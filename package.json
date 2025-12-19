@@ -11,11 +11,11 @@
     "check:watch": "svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "node scripts/build.js patch",
-    "tauri:build:patch": "node scripts/build.js patch",
-    "tauri:build:minor": "node scripts/build.js minor",
-    "tauri:build:major": "node scripts/build.js major",
-    "tauri:build:nobump": "tauri build"
+    "tauri:build": "node scripts/build.js",
+    "release": "node scripts/release.js patch",
+    "release:patch": "node scripts/release.js patch",
+    "release:minor": "node scripts/release.js minor",
+    "release:major": "node scripts/release.js major"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",
