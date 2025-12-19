@@ -1,6 +1,8 @@
-# CoyoteSocket v2.2
+# CoyoteSocket
 
-A modern Svelte 5 + Tauri desktop application for controlling DG-LAB Coyote e-stim devices with T-Code or Buttplug input.
+A modern desktop application for controlling DG-LAB Coyote e-stim devices with T-Code or Buttplug input.
+
+**[Download Now](releases)**
 
 ## Features
 
