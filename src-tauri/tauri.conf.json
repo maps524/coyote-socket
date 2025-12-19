@@ -1,6 +1,6 @@
 {
   "productName": "CoyoteSocket",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "identifier": "com.coyotesocket.app",
   "build": {
     "beforeDevCommand": "npm run dev",
