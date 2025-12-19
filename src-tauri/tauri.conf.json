@@ -1,0 +1,52 @@
+{
+  "productName": "CoyoteSocket",
+  "version": "2.2.1",
+  "identifier": "com.coyotesocket.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CoyoteSocket - DG-LAB Control Interface",
+        "width": 600,
+        "height": 425,
+        "minWidth": 600,
+        "minHeight": 425,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "visible": false,
+        "focus": false,
+        "backgroundColor": "#09090b"
+      },
+      {
+        "label": "splashscreen",
+        "url": "/splashscreen.html",
+        "title": "CoyoteSocket",
+        "width": 400,
+        "height": 300,
+        "center": true,
+        "resizable": false,
+        "decorations": false,
+        "transparent": false,
+        "alwaysOnTop": true,
+        "backgroundColor": "#09090b"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "icons/icon.ico"
+    ]
+  }
+}

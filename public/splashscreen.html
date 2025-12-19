@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CoyoteSocket</title>
+  <style>
+    :root {
+      --background: hsl(240, 10%, 3.9%);
+      --foreground: hsl(0, 0%, 98%);
+      --primary: hsl(280, 100%, 70%);
+      --secondary: hsl(195, 100%, 50%);
+      --accent: hsl(320, 100%, 60%);
+      --muted: hsl(240, 5%, 25%);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: var(--background);
+      color: var(--foreground);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .splash-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .logo-container {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding-top: 2rem;
+    }
+
+    /* Glow effect behind the icon */
+    .logo-glow {
+      position: absolute;
+      width: 120px;
+      height: 120px;
+      background: radial-gradient(circle, var(--primary) 0%, transparent 70%);
+      opacity: 0.4;
+      animation: pulse-glow 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-glow {
+
+      0%,
+      100% {
+        transform: scale(1);
+        opacity: 0.4;
+      }
+
+      50% {
+        transform: scale(1.2);
+        opacity: 0.6;
+      }
+    }
+
+    /* Lightning bolt SVG */
+    .logo-icon {
+      width: 64px;
+      height: 64px;
+      z-index: 1;
+      animation: icon-pulse 2s ease-in-out infinite;
+    }
+
+    .logo-icon svg {
+      width: 100%;
+      height: 100%;
+      stroke: var(--primary);
+      stroke-width: 2;
+      fill: none;
+      filter: drop-shadow(0 0 10px var(--primary));
+    }
+
+    @keyframes icon-pulse {
+
+      0%,
+      100% {
+        transform: scale(1);
+      }
+
+      50% {
+        transform: scale(1.05);
+      }
+    }
+
+    .title {
+      font-size: 1.75rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--primary), var(--secondary));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.025em;
+    }
+
+    .subtitle {
+      font-size: 0.875rem;
+      color: hsl(240, 5%, 55%);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    /* Loading indicator */
+    .loading-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.75rem;
+      margin-top: 0.25rem;
+    }
+
+    .loading-bar {
+      width: 200px;
+      height: 3px;
+      background: var(--muted);
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .loading-bar::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, var(--primary), var(--secondary), transparent);
+      animation: loading-sweep 1.5s ease-in-out infinite;
+    }
+
+    @keyframes loading-sweep {
+      0% {
+        left: -100%;
+      }
+
+      100% {
+        left: 100%;
+      }
+    }
+
+    .loading-text {
+      font-size: 0.75rem;
+      color: hsl(240, 5%, 50%);
+      animation: loading-dots 1.5s ease-in-out infinite;
+    }
+
+    @keyframes loading-dots {
+
+      0%,
+      20% {
+        opacity: 0.5;
+      }
+
+      50% {
+        opacity: 1;
+      }
+
+      80%,
+      100% {
+        opacity: 0.5;
+      }
+    }
+
+    /* Subtle background pattern */
+    .bg-pattern {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-image:
+        radial-gradient(circle at 20% 80%, var(--primary) 0%, transparent 25%),
+        radial-gradient(circle at 80% 20%, var(--secondary) 0%, transparent 25%);
+      opacity: 0.03;
+      pointer-events: none;
+    }
+
+    /* Electric spark effect */
+    .spark {
+      position: absolute;
+      width: 2px;
+      height: 2px;
+      background: var(--secondary);
+      border-radius: 50%;
+      opacity: 0;
+      animation: spark 3s ease-in-out infinite;
+    }
+
+    .spark:nth-child(1) {
+      top: 30%;
+      left: 45%;
+      animation-delay: 0s;
+    }
+
+    .spark:nth-child(2) {
+      top: 70%;
+      left: 55%;
+      animation-delay: 0.5s;
+    }
+
+    .spark:nth-child(3) {
+      top: 40%;
+      left: 60%;
+      animation-delay: 1s;
+    }
+
+    .spark:nth-child(4) {
+      top: 60%;
+      left: 40%;
+      animation-delay: 1.5s;
+    }
+
+    @keyframes spark {
+
+      0%,
+      90%,
+      100% {
+        opacity: 0;
+        transform: scale(0);
+      }
+
+      95% {
+        opacity: 1;
+        transform: scale(1);
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="bg-pattern"></div>
+
+  <div class="splash-container">
+    <div class="logo-container">
+      <div class="logo-glow"></div>
+      <div class="spark"></div>
+      <div class="spark"></div>
+      <div class="spark"></div>
+      <div class="spark"></div>
+      <div class="logo-icon">
+        <!-- Lucide Zap icon -->
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" />
+        </svg>
+      </div>
+    </div>
+
+    <div class="title">CoyoteSocket</div>
+    <div class="subtitle">DG-LAB Coyote Controller</div>
+
+    <div class="loading-container">
+      <div class="loading-bar"></div>
+      <div class="loading-text">Initializing...</div>
+    </div>
+  </div>
+</body>
+
+</html>

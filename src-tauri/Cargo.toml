@@ -1,0 +1,39 @@
+[package]
+name = "coyote-socket"
+version = "2.2.1"
+description = "DG-LAB Coyote Control Interface"
+authors = ["CoyoteSocket Team"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio-tungstenite = "0.21"
+btleplug = { version = "0.11", features = ["serde"] }
+uuid = "1.6"
+futures = "0.3"
+regex = "1"
+lazy_static = "1.4"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = true           # Link Time Optimization
+codegen-units = 1    # Better optimization
+panic = "abort"      # Smaller panic handling
+strip = true         # Strip symbols
+
+[profile.release-fast]
+inherits = "release"
+opt-level = 3        # Optimize for speed
+lto = false          # No LTO (faster compile)
+codegen-units = 16   # Parallel compilation
+strip = false        # Keep symbols for debugging

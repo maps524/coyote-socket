@@ -1,0 +1,23 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1d4ed8;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="url(#grad1)" stroke="#1e40af" stroke-width="2"/>
+  
+  <!-- Lightning bolt representing electrical stimulation -->
+  <path d="M45 30 L75 30 L55 60 L70 60 L40 98 L60 70 L45 70 Z" fill="#fbbf24" stroke="#f59e0b" stroke-width="1"/>
+  
+  <!-- Bluetooth symbol -->
+  <path d="M58 15 L70 27 L64 33 L70 39 L58 51 L58 33 L52 39 M58 33 L64 27 M58 77 L70 89 L64 95 L70 101 L58 113 L58 95 L52 101 M58 95 L64 89" 
+        fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- Connection waves -->
+  <circle cx="64" cy="64" r="25" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.5"/>
+  <circle cx="64" cy="64" r="35" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.3"/>
+  <circle cx="64" cy="64" r="45" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.1"/>
+</svg>
