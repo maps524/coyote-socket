@@ -2,11 +2,10 @@
 ///
 /// Processes incoming Buttplug messages and generates appropriate responses.
 /// Handles handshake, device enumeration, and command processing.
-
 use crate::buttplug::messages::*;
 use crate::buttplug::types::ButtplugFeatureConfig;
-use crate::processing::get_processing_state;
 use crate::emit_buttplug_features;
+use crate::processing::get_processing_state;
 
 /// Handle incoming Buttplug client message and generate response(s)
 ///
@@ -24,33 +23,15 @@ pub async fn handle_buttplug_message(
         ButtplugClientMessage::StartScanning(req) => {
             handle_start_scanning(req, config, protocol_version)
         }
-        ButtplugClientMessage::StopScanning(req) => {
-            handle_stop_scanning(req)
-        }
-        ButtplugClientMessage::RequestDeviceList(req) => {
-            handle_request_device_list(req, config)
-        }
-        ButtplugClientMessage::ScalarCmd(cmd) => {
-            handle_scalar_cmd(cmd, config).await
-        }
-        ButtplugClientMessage::LinearCmd(cmd) => {
-            handle_linear_cmd(cmd).await
-        }
-        ButtplugClientMessage::VibrateCmd(cmd) => {
-            handle_vibrate_cmd(cmd).await
-        }
-        ButtplugClientMessage::RotateCmd(cmd) => {
-            handle_rotate_cmd(cmd).await
-        }
-        ButtplugClientMessage::StopDeviceCmd(cmd) => {
-            handle_stop_device_cmd(cmd).await
-        }
-        ButtplugClientMessage::StopAllDevices(cmd) => {
-            handle_stop_all_devices(cmd).await
-        }
-        ButtplugClientMessage::Ping(req) => {
-            handle_ping(req)
-        }
+        ButtplugClientMessage::StopScanning(req) => handle_stop_scanning(req),
+        ButtplugClientMessage::RequestDeviceList(req) => handle_request_device_list(req, config),
+        ButtplugClientMessage::ScalarCmd(cmd) => handle_scalar_cmd(cmd, config).await,
+        ButtplugClientMessage::LinearCmd(cmd) => handle_linear_cmd(cmd).await,
+        ButtplugClientMessage::VibrateCmd(cmd) => handle_vibrate_cmd(cmd).await,
+        ButtplugClientMessage::RotateCmd(cmd) => handle_rotate_cmd(cmd).await,
+        ButtplugClientMessage::StopDeviceCmd(cmd) => handle_stop_device_cmd(cmd).await,
+        ButtplugClientMessage::StopAllDevices(cmd) => handle_stop_all_devices(cmd).await,
+        ButtplugClientMessage::Ping(req) => handle_ping(req),
     }
 }
 
@@ -69,21 +50,25 @@ fn handle_request_server_info(
 
     if client_version >= 4 {
         // V4 format response
-        vec![ButtplugServerMessage::ServerInfo(ServerInfo::V4(ServerInfoV4 {
-            id: req.id,
-            server_name: "CoyoteSocket".to_string(),
-            protocol_version_major: 4,
-            protocol_version_minor: 0,
-            max_ping_time: 0,
-        }))]
+        vec![ButtplugServerMessage::ServerInfo(ServerInfo::V4(
+            ServerInfoV4 {
+                id: req.id,
+                server_name: "CoyoteSocket".to_string(),
+                protocol_version_major: 4,
+                protocol_version_minor: 0,
+                max_ping_time: 0,
+            },
+        ))]
     } else {
         // V3 and earlier format response
-        vec![ButtplugServerMessage::ServerInfo(ServerInfo::V3(ServerInfoV3 {
-            id: req.id,
-            server_name: "CoyoteSocket".to_string(),
-            message_version: client_version.min(3), // We support up to v3 in this format
-            max_ping_time: 0,
-        }))]
+        vec![ButtplugServerMessage::ServerInfo(ServerInfo::V3(
+            ServerInfoV3 {
+                id: req.id,
+                server_name: "CoyoteSocket".to_string(),
+                message_version: client_version.min(3), // We support up to v3 in this format
+                max_ping_time: 0,
+            },
+        ))]
     }
 }
 
@@ -120,10 +105,7 @@ fn handle_request_device_list(
 }
 
 /// Create DeviceAdded message based on feature configuration
-fn create_device_added(
-    config: &ButtplugFeatureConfig,
-    protocol_version: u32,
-) -> DeviceAdded {
+fn create_device_added(config: &ButtplugFeatureConfig, protocol_version: u32) -> DeviceAdded {
     let device_messages = build_device_messages(config, protocol_version);
 
     DeviceAdded {
@@ -243,7 +225,10 @@ fn build_device_messages(
 // DEVICE COMMANDS
 // ============================================================================
 
-async fn handle_scalar_cmd(cmd: ScalarCmd, config: &ButtplugFeatureConfig) -> Vec<ButtplugServerMessage> {
+async fn handle_scalar_cmd(
+    cmd: ScalarCmd,
+    config: &ButtplugFeatureConfig,
+) -> Vec<ButtplugServerMessage> {
     // Validate device index
     if cmd.device_index != 0 {
         return vec![ButtplugServerMessage::Error(ButtplugError::device_error(
@@ -255,7 +240,7 @@ async fn handle_scalar_cmd(cmd: ScalarCmd, config: &ButtplugFeatureConfig) -> Ve
     // Compute offsets for each actuator type in ScalarCmd
     // Order: Position (if any), Vibrate, Oscillate, Constrict
     let position_offset = 0usize;
-    let vibrate_offset = config.position;  // Starts after Position features
+    let vibrate_offset = config.position; // Starts after Position features
     let oscillate_offset = vibrate_offset + config.vibrate;
     let constrict_offset = oscillate_offset + config.oscillate;
 

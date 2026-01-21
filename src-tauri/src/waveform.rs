@@ -15,28 +15,28 @@ use tokio::sync::RwLock;
 /// A single waveform sample capturing the state at a specific moment
 #[derive(Debug, Clone, Serialize)]
 pub struct WaveformSample {
-    pub timestamp: u64,                 // Unix timestamp in ms
-    pub channel_a_intensity: u8,        // 0-200 (scaled)
-    pub channel_b_intensity: u8,        // 0-200 (scaled)
-    pub channel_a_frequency: f64,       // Hz
-    pub channel_b_frequency: f64,       // Hz
-    pub channel_a_freq_balance: u8,     // 0-255
-    pub channel_b_freq_balance: u8,     // 0-255
-    pub channel_a_int_balance: u8,      // 0-255
-    pub channel_b_int_balance: u8,      // 0-255
-    pub channel_a_waveform: [u8; 4],    // 4 sub-values (0-100)
-    pub channel_b_waveform: [u8; 4],    // 4 sub-values (0-100)
+    pub timestamp: u64,              // Unix timestamp in ms
+    pub channel_a_intensity: u8,     // 0-200 (scaled)
+    pub channel_b_intensity: u8,     // 0-200 (scaled)
+    pub channel_a_frequency: f64,    // Hz
+    pub channel_b_frequency: f64,    // Hz
+    pub channel_a_freq_balance: u8,  // 0-255
+    pub channel_b_freq_balance: u8,  // 0-255
+    pub channel_a_int_balance: u8,   // 0-255
+    pub channel_b_int_balance: u8,   // 0-255
+    pub channel_a_waveform: [u8; 4], // 4 sub-values (0-100)
+    pub channel_b_waveform: [u8; 4], // 4 sub-values (0-100)
 }
 
 /// Full state for a single channel
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelState {
-    pub intensity: f64,                 // 0.0-1.0 normalized
-    pub frequency: f64,                 // Hz
-    pub frequency_balance: u8,          // 0-255
-    pub intensity_balance: u8,          // 0-255
-    pub input_value: f64,               // Raw input (0.0-1.0)
-    pub input_source: String,           // "L0", "R2", "static", etc.
+    pub intensity: f64,        // 0.0-1.0 normalized
+    pub frequency: f64,        // Hz
+    pub frequency_balance: u8, // 0-255
+    pub intensity_balance: u8, // 0-255
+    pub input_value: f64,      // Raw input (0.0-1.0)
+    pub input_source: String,  // "L0", "R2", "static", etc.
 }
 
 /// Response struct for channel state queries

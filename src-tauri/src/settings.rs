@@ -108,7 +108,7 @@ impl Default for ParameterSourceType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ButtplugFeatureLinkSettings {
-    pub feature_type: String,  // "Position", "Vibrate", etc.
+    pub feature_type: String, // "Position", "Vibrate", etc.
     pub feature_index: u32,
     #[serde(default)]
     pub config: ButtplugFeatureConfigSettings,
@@ -151,7 +151,7 @@ pub struct ButtplugLinksSettings {
 impl ButtplugLinksSettings {
     /// Convert settings-based links to processing-ready ButtplugLinkConfig
     pub fn to_link_config(&self) -> crate::buttplug::ButtplugLinkConfig {
-        use crate::buttplug::{ButtplugLinkConfig, FeatureTypeConfig, ConstrictionMethod};
+        use crate::buttplug::{ButtplugLinkConfig, ConstrictionMethod, FeatureTypeConfig};
 
         let mut config = ButtplugLinkConfig::default();
 
@@ -203,11 +203,14 @@ impl ButtplugLinksSettings {
         // Constrict link
         if let Some(ref con) = self.constrict {
             config.constrict_feature = Some(con.feature_index as usize);
-            let method = con.config.constrict_method.as_ref()
+            let method = con
+                .config
+                .constrict_method
+                .as_ref()
                 .and_then(|m| match m.as_str() {
                     "downsample" | "Downsample" => Some(ConstrictionMethod::Downsample),
                     "clamp" | "Clamp" => Some(ConstrictionMethod::Clamp),
-                    _ => None
+                    _ => None,
                 });
             config.constrict_config = Some(FeatureTypeConfig {
                 min_floor: con.config.constrict_min_floor,
@@ -311,8 +314,18 @@ impl ChannelSettings {
         let default_axis = if channel == 'A' { "L0" } else { "R2" };
         Self {
             frequency_source: ParameterSourceSettings::new_static(100.0, default_axis, 1.0, 200.0),
-            frequency_balance_source: ParameterSourceSettings::new_static(128.0, default_axis, 0.0, 255.0),
-            intensity_balance_source: ParameterSourceSettings::new_static(128.0, default_axis, 0.0, 255.0),
+            frequency_balance_source: ParameterSourceSettings::new_static(
+                128.0,
+                default_axis,
+                0.0,
+                255.0,
+            ),
+            intensity_balance_source: ParameterSourceSettings::new_static(
+                128.0,
+                default_axis,
+                0.0,
+                255.0,
+            ),
             intensity_source: ParameterSourceSettings::new_linked(default_axis, 0.0, 20.0, 100.0),
         }
     }
@@ -340,10 +353,30 @@ impl LegacyChannelSettings {
     pub fn migrate(self, channel: char) -> ChannelSettings {
         let default_axis = if channel == 'A' { "L0" } else { "R2" };
         ChannelSettings {
-            frequency_source: ParameterSourceSettings::new_static(self.frequency, default_axis, 1.0, 200.0),
-            frequency_balance_source: ParameterSourceSettings::new_static(self.freq_balance as f64, default_axis, 0.0, 255.0),
-            intensity_balance_source: ParameterSourceSettings::new_static(self.int_balance as f64, default_axis, 0.0, 255.0),
-            intensity_source: ParameterSourceSettings::new_linked(default_axis, self.range_min as f64, self.range_max as f64, 100.0),
+            frequency_source: ParameterSourceSettings::new_static(
+                self.frequency,
+                default_axis,
+                1.0,
+                200.0,
+            ),
+            frequency_balance_source: ParameterSourceSettings::new_static(
+                self.freq_balance as f64,
+                default_axis,
+                0.0,
+                255.0,
+            ),
+            intensity_balance_source: ParameterSourceSettings::new_static(
+                self.int_balance as f64,
+                default_axis,
+                0.0,
+                255.0,
+            ),
+            intensity_source: ParameterSourceSettings::new_linked(
+                default_axis,
+                self.range_min as f64,
+                self.range_max as f64,
+                100.0,
+            ),
         }
     }
 }
@@ -464,13 +497,16 @@ impl Default for AppSettings {
 // ============================================================================
 
 /// Global settings state
-static SETTINGS: tokio::sync::OnceCell<Arc<RwLock<AppSettings>>> = tokio::sync::OnceCell::const_new();
+static SETTINGS: tokio::sync::OnceCell<Arc<RwLock<AppSettings>>> =
+    tokio::sync::OnceCell::const_new();
 
 /// Get settings file path (alongside the executable for portability)
 fn get_settings_path() -> PathBuf {
     // Get the directory containing the executable
     let exe_path = std::env::current_exe().expect("Failed to get executable path");
-    let exe_dir = exe_path.parent().expect("Failed to get executable directory");
+    let exe_dir = exe_path
+        .parent()
+        .expect("Failed to get executable directory");
     exe_dir.join("settings.json")
 }
 
@@ -545,8 +581,13 @@ fn load_settings_from_disk() -> AppSettings {
                                 return migrated;
                             }
                             Err(legacy_err) => {
-                                println!("[Settings] Legacy format parse also failed: {}", legacy_err);
-                                println!("[Settings] Will use defaults and overwrite corrupted file");
+                                println!(
+                                    "[Settings] Legacy format parse also failed: {}",
+                                    legacy_err
+                                );
+                                println!(
+                                    "[Settings] Will use defaults and overwrite corrupted file"
+                                );
                             }
                         }
                     }
@@ -573,8 +614,7 @@ fn save_settings_to_disk(settings: &AppSettings) -> Result<(), String> {
     let path = get_settings_path();
     let json = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-    fs::write(&path, json)
-        .map_err(|e| format!("Failed to write settings: {}", e))?;
+    fs::write(&path, json).map_err(|e| format!("Failed to write settings: {}", e))?;
     println!("[Settings] Saved to {:?}", path);
     Ok(())
 }
@@ -686,12 +726,15 @@ pub async fn toggle_output_paused() -> Result<bool, String> {
 // ============================================================================
 
 /// Global presets state
-static PRESETS: tokio::sync::OnceCell<Arc<RwLock<Vec<ChannelPreset>>>> = tokio::sync::OnceCell::const_new();
+static PRESETS: tokio::sync::OnceCell<Arc<RwLock<Vec<ChannelPreset>>>> =
+    tokio::sync::OnceCell::const_new();
 
 /// Get presets file path
 fn get_presets_path() -> PathBuf {
     let exe_path = std::env::current_exe().expect("Failed to get executable path");
-    let exe_dir = exe_path.parent().expect("Failed to get executable directory");
+    let exe_dir = exe_path
+        .parent()
+        .expect("Failed to get executable directory");
     exe_dir.join("presets.json")
 }
 
@@ -712,17 +755,15 @@ fn load_presets_from_disk() -> Vec<ChannelPreset> {
 
     if path.exists() {
         match fs::read_to_string(&path) {
-            Ok(contents) => {
-                match serde_json::from_str::<Vec<ChannelPreset>>(&contents) {
-                    Ok(presets) => {
-                        println!("[Presets] Loaded {} presets from {:?}", presets.len(), path);
-                        return presets;
-                    }
-                    Err(e) => {
-                        println!("[Presets] Failed to parse presets: {}", e);
-                    }
+            Ok(contents) => match serde_json::from_str::<Vec<ChannelPreset>>(&contents) {
+                Ok(presets) => {
+                    println!("[Presets] Loaded {} presets from {:?}", presets.len(), path);
+                    return presets;
                 }
-            }
+                Err(e) => {
+                    println!("[Presets] Failed to parse presets: {}", e);
+                }
+            },
             Err(e) => {
                 println!("[Presets] Failed to read presets file: {}", e);
             }
@@ -739,8 +780,7 @@ fn save_presets_to_disk(presets: &[ChannelPreset]) -> Result<(), String> {
     let path = get_presets_path();
     let json = serde_json::to_string_pretty(presets)
         .map_err(|e| format!("Failed to serialize presets: {}", e))?;
-    fs::write(&path, json)
-        .map_err(|e| format!("Failed to write presets: {}", e))?;
+    fs::write(&path, json).map_err(|e| format!("Failed to write presets: {}", e))?;
     println!("[Presets] Saved {} presets to {:?}", presets.len(), path);
     Ok(())
 }

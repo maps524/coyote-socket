@@ -5,11 +5,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-use crate::processing::{
-    get_processing_state, parse_tcode,
-    OutputOptions, ProcessingEngineType, ChannelInterplay, WaveformData,
-};
 use crate::emit_axis_update;
+use crate::processing::{
+    get_processing_state, parse_tcode, ChannelInterplay, OutputOptions, ProcessingEngineType,
+    WaveformData,
+};
 
 /// Update the output options from frontend
 pub async fn set_output_options(
@@ -281,8 +281,10 @@ async fn handle_auto_detect_connection(
 
 /// Handle a Buttplug text message and return optional response
 async fn handle_buttplug_text_message(text: &str) -> Option<String> {
-    use crate::buttplug::messages::{parse_buttplug_messages, serialize_buttplug_messages, ButtplugServerMessage, ButtplugError};
     use crate::buttplug::handler::handle_buttplug_message;
+    use crate::buttplug::messages::{
+        parse_buttplug_messages, serialize_buttplug_messages, ButtplugError, ButtplugServerMessage,
+    };
     use crate::buttplug::types::ButtplugFeatureConfig;
 
     let protocol_version = 2; // Support Buttplug v2
@@ -294,11 +296,8 @@ async fn handle_buttplug_text_message(text: &str) -> Option<String> {
 
             // Process each message
             for client_msg in messages {
-                let msg_responses = handle_buttplug_message(
-                    client_msg,
-                    &config,
-                    protocol_version
-                ).await;
+                let msg_responses =
+                    handle_buttplug_message(client_msg, &config, protocol_version).await;
                 responses.extend(msg_responses);
             }
 
@@ -318,14 +317,13 @@ async fn handle_buttplug_text_message(text: &str) -> Option<String> {
         Err(e) => {
             eprintln!("Failed to parse Buttplug message: {}", e);
             // Return error response
-            let error_response = vec![
-                ButtplugServerMessage::Error(ButtplugError::message_error(0, e))
-            ];
+            let error_response = vec![ButtplugServerMessage::Error(ButtplugError::message_error(
+                0, e,
+            ))];
             serialize_buttplug_messages(&error_response).ok()
         }
     }
 }
-
 
 /// Handle incoming T-Code message and return optional response
 async fn handle_tcode_message(message: &str) -> Option<String> {
@@ -370,7 +368,8 @@ async fn handle_tcode_message(message: &str) -> Option<String> {
         // Get current intensities and axis values for logging and frontend push
         let (channel_a, channel_b) = state_guard.get_current_intensities();
         // Convert AxisState map to simple f64 values for frontend
-        let axes: std::collections::HashMap<String, f64> = state_guard.axis_values
+        let axes: std::collections::HashMap<String, f64> = state_guard
+            .axis_values
             .iter()
             .map(|(k, v)| (k.clone(), v.value))
             .collect();
@@ -399,20 +398,20 @@ pub async fn get_current_intensities() -> (f64, f64) {
 
 /// Resolved channel parameters for device output
 #[derive(Debug, Clone)]
-#[allow(dead_code)]  // freq_balance and int_balance reserved for BF command support
+#[allow(dead_code)] // freq_balance and int_balance reserved for BF command support
 pub struct ResolvedChannelParams {
-    pub frequency: f64,       // Hz (1-200)
-    pub freq_balance: u8,     // 0-255
-    pub int_balance: u8,      // 0-255
-    pub range_min: u8,        // 0-200 (only used for linked intensity)
-    pub range_max: u8,        // 0-200 (only used for linked intensity)
+    pub frequency: f64,   // Hz (1-200)
+    pub freq_balance: u8, // 0-255
+    pub int_balance: u8,  // 0-255
+    pub range_min: u8,    // 0-200 (only used for linked intensity)
+    pub range_max: u8,    // 0-200 (only used for linked intensity)
     pub intensity_is_static: bool,
 }
 
 /// Get resolved channel parameters (handles both static and linked sources)
 /// This resolves frequency, freqBalance, and intBalance from their configured sources
 pub async fn get_resolved_channel_params() -> (ResolvedChannelParams, ResolvedChannelParams) {
-    use crate::modulation::{ParameterSourceType, resolve_parameter};
+    use crate::modulation::{resolve_parameter, ParameterSourceType};
     use crate::processing::current_time_ms;
 
     let state = get_processing_state().await;
@@ -441,7 +440,8 @@ pub async fn get_resolved_channel_params() -> (ResolvedChannelParams, ResolvedCh
         now,
         state_guard.no_input_decay_ms,
     );
-    let a_intensity_static = state_guard.channel_a_config.intensity.source_type == ParameterSourceType::Static;
+    let a_intensity_static =
+        state_guard.channel_a_config.intensity.source_type == ParameterSourceType::Static;
     let range_min_a = state_guard.channel_a_config.intensity.range_min;
     let range_max_a = state_guard.channel_a_config.intensity.range_max;
 
@@ -467,7 +467,8 @@ pub async fn get_resolved_channel_params() -> (ResolvedChannelParams, ResolvedCh
         now,
         state_guard.no_input_decay_ms,
     );
-    let b_intensity_static = state_guard.channel_b_config.intensity.source_type == ParameterSourceType::Static;
+    let b_intensity_static =
+        state_guard.channel_b_config.intensity.source_type == ParameterSourceType::Static;
     let range_min_b = state_guard.channel_b_config.intensity.range_min;
     let range_max_b = state_guard.channel_b_config.intensity.range_max;
 
@@ -517,7 +518,8 @@ pub async fn get_axis_values_from_processing() -> std::collections::HashMap<Stri
                     NoInputBehavior::Default | NoInputBehavior::Zero => 0.0,
                     NoInputBehavior::Decay => {
                         // Linear decay from current value to 0 over decay_ms
-                        let decay_progress = ((age_ms - stale_threshold_ms) as f64 / decay_ms as f64).min(1.0);
+                        let decay_progress =
+                            ((age_ms - stale_threshold_ms) as f64 / decay_ms as f64).min(1.0);
                         v.value * (1.0 - decay_progress)
                     }
                 }
@@ -553,9 +555,9 @@ pub async fn set_detected_protocol(protocol: InputProtocol) {
 
 /// Convert a ParameterSourceSettings (from settings) to ParameterSource (for runtime)
 fn convert_parameter_source(
-    source: &crate::settings::ParameterSourceSettings
+    source: &crate::settings::ParameterSourceSettings,
 ) -> crate::modulation::ParameterSource {
-    use crate::modulation::{ParameterSource, ParameterSourceType, CurveType};
+    use crate::modulation::{CurveType, ParameterSource, ParameterSourceType};
     use crate::settings::ParameterSourceType as SettingsSourceType;
 
     let curve = match source.curve.as_str() {
@@ -594,7 +596,7 @@ fn convert_parameter_source(
 
 /// Convert ChannelSettings (from settings) to ChannelConfig (for runtime)
 fn convert_channel_settings(
-    settings: &crate::settings::ChannelSettings
+    settings: &crate::settings::ChannelSettings,
 ) -> crate::modulation::ChannelConfig {
     use crate::modulation::ChannelConfig;
 

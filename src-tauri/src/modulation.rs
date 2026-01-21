@@ -1,9 +1,9 @@
 // Parameter Modulation Module
 // Handles dynamic parameter linking to T-Code axes with curve transformations
 
+use crate::settings::ButtplugLinksSettings;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::settings::ButtplugLinksSettings;
 
 /// Source type for a parameter value
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -54,7 +54,7 @@ pub struct ParameterSource {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub curve_strength: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub midpoint: Option<bool>,  // If true, input is distance from center (0.5 → 0, 0 or 1 → 1)
+    pub midpoint: Option<bool>, // If true, input is distance from center (0.5 → 0, 0 or 1 → 1)
 
     // For Buttplug mode (pipeline stages)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,9 +139,9 @@ impl ChannelConfig {
 /// State tracking for a single T-Code axis
 #[derive(Debug, Clone)]
 pub struct AxisState {
-    pub value: f64,           // 0.0-1.0 normalized
-    pub timestamp: u64,       // When last updated (milliseconds)
-    pub has_data: bool,       // Has received any data this session
+    pub value: f64,     // 0.0-1.0 normalized
+    pub timestamp: u64, // When last updated (milliseconds)
+    pub has_data: bool, // Has received any data this session
 }
 
 impl Default for AxisState {
@@ -213,9 +213,7 @@ pub fn resolve_parameter(
     no_input_decay_ms: u32,
 ) -> f64 {
     match source.source_type {
-        ParameterSourceType::Static => {
-            source.static_value.unwrap_or(0.0)
-        }
+        ParameterSourceType::Static => source.static_value.unwrap_or(0.0),
         ParameterSourceType::Linked => {
             let axis = source.source_axis.as_ref();
             let axis_state = axis.and_then(|a| axis_values.get(a));
@@ -272,10 +270,7 @@ fn handle_no_input(
 }
 
 /// Handle no-input behavior when no axis state exists
-fn handle_no_input_no_state(
-    behavior: &NoInputBehavior,
-    source: &ParameterSource,
-) -> f64 {
+fn handle_no_input_no_state(behavior: &NoInputBehavior, source: &ParameterSource) -> f64 {
     match behavior {
         NoInputBehavior::Hold => 0.0,
         NoInputBehavior::Default => source.static_value.unwrap_or(0.0),
@@ -332,13 +327,7 @@ mod tests {
     fn test_resolve_static_parameter() {
         let source = ParameterSource::static_source(42.0);
         let axis_values = HashMap::new();
-        let result = resolve_parameter(
-            &source,
-            &axis_values,
-            &NoInputBehavior::Hold,
-            0,
-            1000,
-        );
+        let result = resolve_parameter(&source, &axis_values, &NoInputBehavior::Hold, 0, 1000);
         assert_eq!(result, 42.0);
     }
 
@@ -348,13 +337,7 @@ mod tests {
         let mut axis_values = HashMap::new();
         axis_values.insert("L0".to_string(), AxisState::new(0.5, 100));
 
-        let result = resolve_parameter(
-            &source,
-            &axis_values,
-            &NoInputBehavior::Hold,
-            200,
-            1000,
-        );
+        let result = resolve_parameter(&source, &axis_values, &NoInputBehavior::Hold, 200, 1000);
         assert_eq!(result, 50.0);
     }
 }

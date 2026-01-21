@@ -62,3 +62,65 @@ pub fn frequency_to_period(frequency: f64) -> u16 {
         (1000.0 / frequency).round() as u16
     }
 }
+
+// ================= V2 protocol support code ================
+
+/// Generate V2 intensity command (PWM_AB2)
+/// 3 bytes: [Reserved (2 bits)][A channel strength (11 bits)][B channel strength (11 bits)]
+pub fn generate_v2_intensity(intensity_a: u16, intensity_b: u16) -> Vec<u8> {
+    // Limit Range 0-2047
+    let a = intensity_a.min(2047) as u32;
+    let b = intensity_b.min(2047) as u32;
+
+    // Construct 24bit data: Bits 23-22: 0, Bits 21-11: A, Bits 10-0: B
+    let combined = (a << 11) | b;
+
+    vec![
+        (combined & 0xFF) as u8,         // Byte 0 (Low)
+        ((combined >> 8) & 0xFF) as u8,  // Byte 1 (Mid)
+        ((combined >> 16) & 0xFF) as u8, // Byte 2 (High)
+    ]
+}
+
+/// Generate V2 waveform command (PWM_A34/B34)
+/// 3 bytes: [Reserved (4 bits)][Z(5 bits)][Y(10 bits)][X(5 bits)]
+/// X: Pulse Count, Y: Interval, Z: Pulse Width
+pub fn generate_v2_waveform(x: u8, y: u16, z: u8) -> Vec<u8> {
+    let x_val = (x.min(31)) as u32;
+    let y_val = (y.min(1023)) as u32;
+    let z_val = (z.min(31)) as u32;
+
+    // Bits 23-20: 0, Bits 19-15: Z, Bits 14-5: Y, Bits 4-0: X
+    let combined = (z_val << 15) | (y_val << 5) | x_val;
+
+    vec![
+        (combined & 0xFF) as u8,         // Byte 0 (Low)
+        ((combined >> 8) & 0xFF) as u8,  // Byte 1 (Mid)
+        ((combined >> 16) & 0xFF) as u8, // Byte 2 (High)
+    ]
+}
+
+/// Convert frequency (Hz) to X and Y parameters of V2
+/// Based on the "optimal X, Y ratio formula" in the document
+pub fn freq_to_v2_xy(frequency_hz: f64) -> (u8, u16) {
+    if frequency_hz <= 0.0 {
+        return (1, 100);
+    }
+
+    // "Frequency" of V2 is actually period ms (X + Y), range 10-1000
+    let period_ms = (1000.0 / frequency_hz).clamp(10.0, 1000.0);
+
+    // Formula: X = ((Period / 1000) ^ 0.5) * 15
+    let x = ((period_ms / 1000.0).sqrt() * 15.0).round() as u8;
+    let x = x.max(1).min(31); // Make sure X is at least 1
+
+    let y = (period_ms as u16).saturating_sub(x as u16);
+
+    (x, y)
+}
+
+/// Convert intensity balance (0-255) to Z (pulse width 0-31) of V2
+pub fn balance_to_v2_z(balance: u8) -> u8 {
+    // Map 0-255 to 0-31
+    ((balance as f32 / 255.0) * 31.0).round() as u8
+}

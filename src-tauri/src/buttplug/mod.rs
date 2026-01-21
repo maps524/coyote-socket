@@ -4,7 +4,6 @@
 /// where each output type serves a distinct role in shaping the final output.
 ///
 /// Pipeline order: Position → Motion (Rotate/Oscillate) → Vibrate → Constrict → Output
-
 pub mod handler;
 pub mod messages;
 pub mod pipeline;

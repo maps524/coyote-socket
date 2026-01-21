@@ -63,7 +63,7 @@ pub struct ButtplugFeatureConfig {
 impl Default for ButtplugFeatureConfig {
     fn default() -> Self {
         Self {
-            position: 0,  // Not used - clients prefer LinearCmd (PositionWithDuration)
+            position: 0, // Not used - clients prefer LinearCmd (PositionWithDuration)
             position_with_duration: 2,
             vibrate: 2,
             rotate: 2,

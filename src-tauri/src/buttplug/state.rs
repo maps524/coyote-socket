@@ -97,7 +97,10 @@ impl ButtplugFeatureValues {
 
     /// Get new PositionWithDuration command for a feature index
     /// Returns (position, duration_ms, arrival_time) if a new command is available
-    pub fn get_new_position_with_duration(&self, index: Option<usize>) -> Option<(f64, u32, std::time::Instant)> {
+    pub fn get_new_position_with_duration(
+        &self,
+        index: Option<usize>,
+    ) -> Option<(f64, u32, std::time::Instant)> {
         index.and_then(|i| self.position_with_duration.get(i).and_then(|&cmd| cmd))
     }
 
@@ -130,7 +133,9 @@ impl ButtplugFeatureValues {
 
     /// Clear new command buffers (called after processing each tick)
     pub fn clear_new_commands(&mut self) {
-        self.position_with_duration.iter_mut().for_each(|cmd| *cmd = None);
+        self.position_with_duration
+            .iter_mut()
+            .for_each(|cmd| *cmd = None);
     }
 
     /// Create ButtplugFeatureValues from a HashMap of feature keys
@@ -166,7 +171,9 @@ impl ButtplugFeatureValues {
                 if index < max_features {
                     match feature_type.as_str() {
                         "Position" => result.position[index] = *value,
-                        "PositionWithDuration" => result.position_with_duration_value[index] = *value,
+                        "PositionWithDuration" => {
+                            result.position_with_duration_value[index] = *value
+                        }
                         "Vibrate" => result.vibrate[index] = *value,
                         "Oscillate" => result.oscillate[index] = *value,
                         "Constrict" => result.constrict[index] = *value,
