@@ -16,6 +16,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 
+/// V2 intensity scale factor: maps 0-200 device range to 0-2047 V2 range
+const V2_INTENSITY_SCALE: f32 = 2047.0 / 200.0;
+
 /// Output data for a single channel (what was actually sent to the device)
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ChannelOutput {
@@ -153,7 +156,10 @@ pub async fn stop_device_loop() {
 /// Send a zero command to immediately stop all output
 /// This is called when pausing to ensure device stops immediately
 pub async fn send_zero_command() {
-    use crate::protocol::{convert_period, frequency_to_period, generate_b0_command};
+    use crate::protocol::{
+        convert_period, frequency_to_period, generate_b0_command, generate_v2_intensity,
+        generate_v2_waveform,
+    };
 
     // Get Bluetooth manager
     let manager = match get_bluetooth_manager().await {
@@ -166,33 +172,47 @@ pub async fn send_zero_command() {
         return; // Not connected, nothing to do
     }
 
-    // Generate a B0 command with zero intensity
-    let period = frequency_to_period(100.0);
-    let period_converted = convert_period(period);
+    let device_version = manager_guard.device_version.unwrap_or(DeviceVersion::V3);
 
-    let command = generate_b0_command(
-        3,
-        3, // interpretation methods
-        0, // zero intensity channel A
-        0, // zero intensity channel B
-        [
-            period_converted,
-            period_converted,
-            period_converted,
-            period_converted,
-        ],
-        [0, 0, 0, 0], // zero waveform
-        [
-            period_converted,
-            period_converted,
-            period_converted,
-            period_converted,
-        ],
-        [0, 0, 0, 0], // zero waveform
-    );
+    match device_version {
+        DeviceVersion::V3 => {
+            // Generate a B0 command with zero intensity
+            let period = frequency_to_period(100.0);
+            let period_converted = convert_period(period);
 
-    // Send command, ignore errors
-    let _ = manager_guard.write_command(&command).await;
+            let command = generate_b0_command(
+                3,
+                3, // interpretation methods
+                0, // zero intensity channel A
+                0, // zero intensity channel B
+                [
+                    period_converted,
+                    period_converted,
+                    period_converted,
+                    period_converted,
+                ],
+                [0, 0, 0, 0], // zero waveform
+                [
+                    period_converted,
+                    period_converted,
+                    period_converted,
+                    period_converted,
+                ],
+                [0, 0, 0, 0], // zero waveform
+            );
+
+            let _ = manager_guard.write_command(&command).await;
+        }
+        DeviceVersion::V2 => {
+            // Send zero intensity and neutral waveforms for V2
+            let intensity_packet = generate_v2_intensity(0, 0);
+            let zero_waveform = generate_v2_waveform(1, 100, 0);
+            let _ = manager_guard
+                .write_v2_data(&intensity_packet, &zero_waveform, &zero_waveform)
+                .await;
+        }
+    }
+
     println!("[PAUSE] Sent zero command to stop output");
 }
 
@@ -322,34 +342,11 @@ async fn send_device_update() -> Result<(), String> {
     // Also record for history buffer (used by get_waveform_data command)
     crate::waveform::record_sample_direct(sample).await;
 
-    // Generate B0 command with proper waveform intensity arrays
-    let command = generate_b0_command(
-        3,
-        3, // interpretation methods
-        scaled_a,
-        scaled_b,
-        [
-            period_a_converted,
-            period_a_converted,
-            period_a_converted,
-            period_a_converted,
-        ],
-        waveform_a.waveform_intensity,
-        [
-            period_b_converted,
-            period_b_converted,
-            period_b_converted,
-            period_b_converted,
-        ],
-        waveform_b.waveform_intensity,
-    );
-
     // Get device version (defaulting to V3 just in case)
     let device_version = manager_guard.device_version.unwrap_or(DeviceVersion::V3);
 
     match device_version {
         DeviceVersion::V3 => {
-            // Original V3 logic
             let command = generate_b0_command(
                 3,
                 3,
@@ -425,9 +422,8 @@ async fn send_device_update() -> Result<(), String> {
             let coeff_b = calc_coeff(&waveform_b.waveform_intensity);
 
             // Apply coefficients and map to V2 intensity range (0-2047)
-            // Basic formula: scaled_intensity * coefficient * 10.235
-            let v2_int_a = (scaled_a as f32 * coeff_a * 10.235) as u16;
-            let v2_int_b = (scaled_b as f32 * coeff_b * 10.235) as u16;
+            let v2_int_a = (scaled_a as f32 * coeff_a * V2_INTENSITY_SCALE).min(2047.0) as u16;
+            let v2_int_b = (scaled_b as f32 * coeff_b * V2_INTENSITY_SCALE).min(2047.0) as u16;
 
             // Generate and send data
             let intensity_packet = generate_v2_intensity(v2_int_a, v2_int_b);

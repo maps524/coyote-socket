@@ -314,6 +314,10 @@ impl BluetoothManager {
             self.write_characteristic = None;
             self.battery_characteristic = None;
             self.connected_device_address = None;
+            self.device_version = None;
+            self.v2_char_intensity = None;
+            self.v2_char_waveform_a = None;
+            self.v2_char_waveform_b = None;
             println!("Disconnected from device");
         }
         Ok(())
@@ -333,16 +337,22 @@ impl BluetoothManager {
             peripheral
                 .write(char_int, intensity, WriteType::WithoutResponse)
                 .await?;
+        } else {
+            println!("[WARN] V2 intensity characteristic not available");
         }
         if let Some(char_wa) = &self.v2_char_waveform_a {
             peripheral
                 .write(char_wa, wave_a, WriteType::WithoutResponse)
                 .await?;
+        } else {
+            println!("[WARN] V2 waveform A characteristic not available");
         }
         if let Some(char_wb) = &self.v2_char_waveform_b {
             peripheral
                 .write(char_wb, wave_b, WriteType::WithoutResponse)
                 .await?;
+        } else {
+            println!("[WARN] V2 waveform B characteristic not available");
         }
         Ok(())
     }
