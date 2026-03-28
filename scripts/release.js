@@ -10,6 +10,9 @@
  *   npm run release:patch    - Bump patch version and release
  *   npm run release:minor    - Bump minor version and release
  *   npm run release:major    - Bump major version and release
+ *
+ * Flags:
+ *   --yes, -y               - Skip confirmation prompt
  */
 
 import fs from 'fs';
@@ -57,12 +60,13 @@ function gitOutput(command) {
 }
 
 /**
- * Parse command line arguments to determine bump type
+ * Parse command line arguments
  */
-function getBumpType() {
+function parseArgs() {
     const args = process.argv.slice(2);
-    const bumpArg = args.find(arg => ['patch', 'minor', 'major'].includes(arg));
-    return bumpArg || 'patch';
+    const bumpType = args.find(arg => ['patch', 'minor', 'major'].includes(arg)) || 'patch';
+    const yes = args.includes('--yes') || args.includes('-y');
+    return { bumpType, yes };
 }
 
 /**
@@ -175,7 +179,7 @@ function confirm(prompt) {
  * Main release script
  */
 async function main() {
-    const bumpType = getBumpType();
+    const { bumpType, yes } = parseArgs();
 
     console.log('='.repeat(50));
     console.log('Release Script');
@@ -206,10 +210,14 @@ async function main() {
     console.log(`Current version: ${currentVersion}`);
     console.log(`New version:     ${newVersion}\n`);
 
-    const proceed = await confirm('Proceed with release?');
-    if (!proceed) {
-        console.log('Release cancelled.');
-        process.exit(0);
+    if (!yes) {
+        const proceed = await confirm('Proceed with release?');
+        if (!proceed) {
+            console.log('Release cancelled.');
+            process.exit(0);
+        }
+    } else {
+        console.log('Auto-confirmed via --yes flag');
     }
 
     console.log('\n--- Updating version files ---');

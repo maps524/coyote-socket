@@ -47,3 +47,6 @@ Cargo.lock
 
 nul
 .playwright-mcp/
+
+# Local-only scripts
+scripts/setup-local.js
