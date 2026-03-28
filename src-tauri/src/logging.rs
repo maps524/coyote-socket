@@ -97,9 +97,9 @@ pub fn flush() {
 
 /// Get the path to the log file
 pub fn get_log_path() -> Option<PathBuf> {
-    LOGGER.get().and_then(|logger| {
-        logger.lock().ok().map(|guard| guard.log_path.clone())
-    })
+    LOGGER
+        .get()
+        .and_then(|logger| logger.lock().ok().map(|guard| guard.log_path.clone()))
 }
 
 // Convenience macros

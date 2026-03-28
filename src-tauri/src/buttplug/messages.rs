@@ -2,7 +2,6 @@
 ///
 /// Implements Buttplug v2 message format with serde serialization.
 /// Messages are JSON wrapped in arrays: `[{"MessageType": {...}}]`
-
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -16,33 +15,61 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum ButtplugClientMessageWrapper {
-    RequestServerInfo { RequestServerInfo: RequestServerInfo },
-    StartScanning { StartScanning: StartScanning },
-    StopScanning { StopScanning: StopScanning },
-    RequestDeviceList { RequestDeviceList: RequestDeviceList },
-    ScalarCmd { ScalarCmd: ScalarCmd },
-    LinearCmd { LinearCmd: LinearCmd },
-    VibrateCmd { VibrateCmd: VibrateCmd },
-    RotateCmd { RotateCmd: RotateCmd },
-    StopDeviceCmd { StopDeviceCmd: StopDeviceCmd },
-    StopAllDevices { StopAllDevices: StopAllDevices },
-    Ping { Ping: Ping },
+    RequestServerInfo {
+        RequestServerInfo: RequestServerInfo,
+    },
+    StartScanning {
+        StartScanning: StartScanning,
+    },
+    StopScanning {
+        StopScanning: StopScanning,
+    },
+    RequestDeviceList {
+        RequestDeviceList: RequestDeviceList,
+    },
+    ScalarCmd {
+        ScalarCmd: ScalarCmd,
+    },
+    LinearCmd {
+        LinearCmd: LinearCmd,
+    },
+    VibrateCmd {
+        VibrateCmd: VibrateCmd,
+    },
+    RotateCmd {
+        RotateCmd: RotateCmd,
+    },
+    StopDeviceCmd {
+        StopDeviceCmd: StopDeviceCmd,
+    },
+    StopAllDevices {
+        StopAllDevices: StopAllDevices,
+    },
+    Ping {
+        Ping: Ping,
+    },
 }
 
 impl ButtplugClientMessageWrapper {
     /// Extract the inner message for processing
     pub fn into_message(self) -> ButtplugClientMessage {
         match self {
-            Self::RequestServerInfo { RequestServerInfo: msg } => ButtplugClientMessage::RequestServerInfo(msg),
+            Self::RequestServerInfo {
+                RequestServerInfo: msg,
+            } => ButtplugClientMessage::RequestServerInfo(msg),
             Self::StartScanning { StartScanning: msg } => ButtplugClientMessage::StartScanning(msg),
             Self::StopScanning { StopScanning: msg } => ButtplugClientMessage::StopScanning(msg),
-            Self::RequestDeviceList { RequestDeviceList: msg } => ButtplugClientMessage::RequestDeviceList(msg),
+            Self::RequestDeviceList {
+                RequestDeviceList: msg,
+            } => ButtplugClientMessage::RequestDeviceList(msg),
             Self::ScalarCmd { ScalarCmd: msg } => ButtplugClientMessage::ScalarCmd(msg),
             Self::LinearCmd { LinearCmd: msg } => ButtplugClientMessage::LinearCmd(msg),
             Self::VibrateCmd { VibrateCmd: msg } => ButtplugClientMessage::VibrateCmd(msg),
             Self::RotateCmd { RotateCmd: msg } => ButtplugClientMessage::RotateCmd(msg),
             Self::StopDeviceCmd { StopDeviceCmd: msg } => ButtplugClientMessage::StopDeviceCmd(msg),
-            Self::StopAllDevices { StopAllDevices: msg } => ButtplugClientMessage::StopAllDevices(msg),
+            Self::StopAllDevices {
+                StopAllDevices: msg,
+            } => ButtplugClientMessage::StopAllDevices(msg),
             Self::Ping { Ping: msg } => ButtplugClientMessage::Ping(msg),
         }
     }
@@ -234,12 +261,25 @@ pub struct Ping {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum ButtplugServerMessageWrapper {
-    ServerInfo { ServerInfo: ServerInfo },
-    DeviceAdded { DeviceAdded: DeviceAdded },
-    DeviceList { DeviceList: DeviceList },
-    ScanningFinished { ScanningFinished: ScanningFinished },
-    Ok { #[serde(rename = "Ok")] OkMessage: ButtplugOk },
-    Error { Error: ButtplugError },
+    ServerInfo {
+        ServerInfo: ServerInfo,
+    },
+    DeviceAdded {
+        DeviceAdded: DeviceAdded,
+    },
+    DeviceList {
+        DeviceList: DeviceList,
+    },
+    ScanningFinished {
+        ScanningFinished: ScanningFinished,
+    },
+    Ok {
+        #[serde(rename = "Ok")]
+        OkMessage: ButtplugOk,
+    },
+    Error {
+        Error: ButtplugError,
+    },
 }
 
 impl ButtplugServerMessageWrapper {
@@ -249,7 +289,9 @@ impl ButtplugServerMessageWrapper {
             ButtplugServerMessage::ServerInfo(m) => Self::ServerInfo { ServerInfo: m },
             ButtplugServerMessage::DeviceAdded(m) => Self::DeviceAdded { DeviceAdded: m },
             ButtplugServerMessage::DeviceList(m) => Self::DeviceList { DeviceList: m },
-            ButtplugServerMessage::ScanningFinished(m) => Self::ScanningFinished { ScanningFinished: m },
+            ButtplugServerMessage::ScanningFinished(m) => Self::ScanningFinished {
+                ScanningFinished: m,
+            },
             ButtplugServerMessage::Ok(m) => Self::Ok { OkMessage: m },
             ButtplugServerMessage::Error(m) => Self::Error { Error: m },
         }
@@ -391,11 +433,15 @@ pub struct DeviceMessageAttributeV2 {
 
 impl DeviceMessageAttributeV2 {
     pub fn with_features(count: u32) -> Self {
-        Self { feature_count: Some(count) }
+        Self {
+            feature_count: Some(count),
+        }
     }
 
     pub fn empty() -> Self {
-        Self { feature_count: None }
+        Self {
+            feature_count: None,
+        }
     }
 }
 
@@ -438,19 +484,35 @@ impl ButtplugError {
     pub const ERROR_DEVICE: u32 = 4;
 
     pub fn unknown(id: u32, msg: String) -> Self {
-        Self { id, error_code: Self::ERROR_UNKNOWN, error_message: msg }
+        Self {
+            id,
+            error_code: Self::ERROR_UNKNOWN,
+            error_message: msg,
+        }
     }
 
     pub fn handshake(id: u32, msg: String) -> Self {
-        Self { id, error_code: Self::ERROR_HANDSHAKE, error_message: msg }
+        Self {
+            id,
+            error_code: Self::ERROR_HANDSHAKE,
+            error_message: msg,
+        }
     }
 
     pub fn message_error(id: u32, msg: String) -> Self {
-        Self { id, error_code: Self::ERROR_MSG, error_message: msg }
+        Self {
+            id,
+            error_code: Self::ERROR_MSG,
+            error_message: msg,
+        }
     }
 
     pub fn device_error(id: u32, msg: String) -> Self {
-        Self { id, error_code: Self::ERROR_DEVICE, error_message: msg }
+        Self {
+            id,
+            error_code: Self::ERROR_DEVICE,
+            error_message: msg,
+        }
     }
 }
 
@@ -460,8 +522,8 @@ impl ButtplugError {
 
 /// Parse incoming JSON array of Buttplug messages
 pub fn parse_buttplug_messages(raw: &str) -> Result<Vec<ButtplugClientMessage>, String> {
-    let wrappers: Vec<ButtplugClientMessageWrapper> = serde_json::from_str(raw)
-        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    let wrappers: Vec<ButtplugClientMessageWrapper> =
+        serde_json::from_str(raw).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
     Ok(wrappers.into_iter().map(|w| w.into_message()).collect())
 }
@@ -473,8 +535,7 @@ pub fn serialize_buttplug_messages(messages: &[ButtplugServerMessage]) -> Result
         .map(|m| ButtplugServerMessageWrapper::from_message(m.clone()))
         .collect();
 
-    serde_json::to_string(&wrappers)
-        .map_err(|e| format!("Failed to serialize JSON: {}", e))
+    serde_json::to_string(&wrappers).map_err(|e| format!("Failed to serialize JSON: {}", e))
 }
 
 #[cfg(test)]
@@ -483,7 +544,8 @@ mod tests {
 
     #[test]
     fn test_parse_request_server_info() {
-        let json = r#"[{"RequestServerInfo": {"Id": 1, "ClientName": "Test", "MessageVersion": 2}}]"#;
+        let json =
+            r#"[{"RequestServerInfo": {"Id": 1, "ClientName": "Test", "MessageVersion": 2}}]"#;
         let messages = parse_buttplug_messages(json).unwrap();
         assert_eq!(messages.len(), 1);
         match &messages[0] {
@@ -498,12 +560,14 @@ mod tests {
 
     #[test]
     fn test_serialize_server_info_v3() {
-        let messages = vec![ButtplugServerMessage::ServerInfo(ServerInfo::V3(ServerInfoV3 {
-            id: 1,
-            server_name: "CoyoteSocket".to_string(),
-            message_version: 3,
-            max_ping_time: 0,
-        }))];
+        let messages = vec![ButtplugServerMessage::ServerInfo(ServerInfo::V3(
+            ServerInfoV3 {
+                id: 1,
+                server_name: "CoyoteSocket".to_string(),
+                message_version: 3,
+                max_ping_time: 0,
+            },
+        ))];
 
         let json = serialize_buttplug_messages(&messages).unwrap();
         assert!(json.contains("ServerInfo"));
@@ -513,13 +577,15 @@ mod tests {
 
     #[test]
     fn test_serialize_server_info_v4() {
-        let messages = vec![ButtplugServerMessage::ServerInfo(ServerInfo::V4(ServerInfoV4 {
-            id: 1,
-            server_name: "CoyoteSocket".to_string(),
-            protocol_version_major: 4,
-            protocol_version_minor: 0,
-            max_ping_time: 0,
-        }))];
+        let messages = vec![ButtplugServerMessage::ServerInfo(ServerInfo::V4(
+            ServerInfoV4 {
+                id: 1,
+                server_name: "CoyoteSocket".to_string(),
+                protocol_version_major: 4,
+                protocol_version_minor: 0,
+                max_ping_time: 0,
+            },
+        ))];
 
         let json = serialize_buttplug_messages(&messages).unwrap();
         assert!(json.contains("ServerInfo"));

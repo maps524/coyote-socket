@@ -66,7 +66,7 @@ pub struct ButtplugFeaturesPayload {
 #[derive(Clone, Serialize)]
 pub struct ConnectionStatus {
     pub websocket_running: bool,
-    pub detected_input_protocol: String,  // "none", "tcode", or "buttplug"
+    pub detected_input_protocol: String, // "none", "tcode", or "buttplug"
     pub bluetooth_connected: bool,
     pub bluetooth_device_address: Option<String>,
     pub battery_level: Option<u8>,
@@ -120,7 +120,11 @@ pub fn emit_axis_update(axes: HashMap<String, f64>, channel_a: f64, channel_b: f
 }
 
 /// Emit connection status change to frontend
-pub fn emit_connection_changed(connection_type: &str, connected: bool, device_address: Option<String>) {
+pub fn emit_connection_changed(
+    connection_type: &str,
+    connected: bool,
+    device_address: Option<String>,
+) {
     if let Some(handle) = get_app_handle() {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -146,10 +150,7 @@ pub fn emit_output_pause_changed(paused: bool) {
             .unwrap()
             .as_millis() as u64;
 
-        let payload = OutputPauseChangedPayload {
-            paused,
-            timestamp,
-        };
+        let payload = OutputPauseChangedPayload { paused, timestamp };
 
         let _ = handle.emit("output-pause-changed", payload);
     }
@@ -180,15 +181,21 @@ pub fn emit_buttplug_features(features: HashMap<String, f64>) {
 }
 
 use bluetooth::get_bluetooth_manager;
-use device::{start_device_loop, stop_device_loop, update_channel_a_params, update_channel_b_params, get_channel_a_params, get_channel_b_params, ChannelParams, get_last_device_output, DeviceOutput};
-use settings::{
-    AppSettings, ChannelSettings as SettingsChannelSettings, ConnectionSettings,
-    BluetoothSettings, OutputSettings, KeyboardShortcuts, GeneralSettings,
-    ChannelPreset,
+use device::{
+    get_channel_a_params, get_channel_b_params, get_last_device_output, start_device_loop,
+    stop_device_loop, update_channel_a_params, update_channel_b_params, ChannelParams,
+    DeviceOutput,
 };
-use waveform::{get_waveform_data, get_channel_state};
-use websocket::{start_server, stop_server, is_server_running, get_current_intensities, set_output_options, apply_saved_settings_to_processing};
 use modulation::ParameterSource;
+use settings::{
+    AppSettings, BluetoothSettings, ChannelPreset, ChannelSettings as SettingsChannelSettings,
+    ConnectionSettings, GeneralSettings, KeyboardShortcuts, OutputSettings,
+};
+use waveform::{get_channel_state, get_waveform_data};
+use websocket::{
+    apply_saved_settings_to_processing, get_current_intensities, is_server_running,
+    set_output_options, start_server, stop_server,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BluetoothDevice {
@@ -204,10 +211,10 @@ async fn get_bluetooth_adapters() -> Result<Vec<String>, String> {
             let manager = manager.lock().await;
             match manager.get_adapters().await {
                 Ok(adapters) => Ok(adapters.into_iter().map(|a| a.name).collect()),
-                Err(e) => Err(format!("Failed to get adapters: {}", e))
+                Err(e) => Err(format!("Failed to get adapters: {}", e)),
             }
         }
-        Err(e) => Err(format!("Failed to initialize Bluetooth: {}", e))
+        Err(e) => Err(format!("Failed to initialize Bluetooth: {}", e)),
     }
 }
 
@@ -217,15 +224,18 @@ async fn scan_bluetooth_devices(adapter_index: usize) -> Result<Vec<BluetoothDev
         Ok(manager) => {
             let mut manager = manager.lock().await;
             match manager.scan_devices(adapter_index).await {
-                Ok(devices) => Ok(devices.into_iter().map(|d| BluetoothDevice {
-                    address: d.address,
-                    name: d.name,
-                    rssi: d.rssi,
-                }).collect()),
-                Err(e) => Err(format!("Failed to scan devices: {}", e))
+                Ok(devices) => Ok(devices
+                    .into_iter()
+                    .map(|d| BluetoothDevice {
+                        address: d.address,
+                        name: d.name,
+                        rssi: d.rssi,
+                    })
+                    .collect()),
+                Err(e) => Err(format!("Failed to scan devices: {}", e)),
             }
         }
-        Err(e) => Err(format!("Failed to initialize Bluetooth: {}", e))
+        Err(e) => Err(format!("Failed to initialize Bluetooth: {}", e)),
     }
 }
 
@@ -236,13 +246,16 @@ async fn get_discovered_bluetooth_devices() -> Result<Vec<BluetoothDevice>, Stri
         Ok(manager) => {
             let manager = manager.lock().await;
             let devices = manager.get_discovered_devices();
-            Ok(devices.into_iter().map(|d| BluetoothDevice {
-                address: d.address,
-                name: d.name,
-                rssi: d.rssi,
-            }).collect())
+            Ok(devices
+                .into_iter()
+                .map(|d| BluetoothDevice {
+                    address: d.address,
+                    name: d.name,
+                    rssi: d.rssi,
+                })
+                .collect())
         }
-        Err(e) => Err(format!("Failed to get Bluetooth manager: {}", e))
+        Err(e) => Err(format!("Failed to get Bluetooth manager: {}", e)),
     }
 }
 
@@ -266,8 +279,8 @@ async fn start_websocket_server(port: u16) -> Result<String, String> {
             emit_connection_changed("websocket", true, None);
 
             Ok(format!("WebSocket server started on port {}", port))
-        },
-        Err(e) => Err(format!("Failed to start WebSocket server: {}", e))
+        }
+        Err(e) => Err(format!("Failed to start WebSocket server: {}", e)),
     }
 }
 
@@ -281,8 +294,8 @@ async fn stop_websocket_server() -> Result<String, String> {
             // Emit connection changed event for stateless frontend
             emit_connection_changed("websocket", false, None);
             Ok("WebSocket server stopped".to_string())
-        },
-        Err(e) => Err(format!("Failed to stop WebSocket server: {}", e))
+        }
+        Err(e) => Err(format!("Failed to stop WebSocket server: {}", e)),
     }
 }
 
@@ -311,7 +324,11 @@ async fn get_buttplug_features() -> Result<HashMap<String, f64>, String> {
 }
 
 #[tauri::command]
-async fn update_output_options(interplay: Option<String>, engine: Option<String>, chase_delay_ms: Option<u32>) -> Result<String, String> {
+async fn update_output_options(
+    interplay: Option<String>,
+    engine: Option<String>,
+    chase_delay_ms: Option<u32>,
+) -> Result<String, String> {
     set_output_options(interplay, engine, chase_delay_ms).await;
     Ok("Output options updated".to_string())
 }
@@ -336,7 +353,7 @@ async fn connect_bluetooth_device(adapter_index: usize, address: String) -> Resu
                     };
 
                     drop(manager); // Release lock before starting loop
-                    // Start the 10Hz device update loop
+                                   // Start the 10Hz device update loop
                     start_device_loop().await;
 
                     // Emit connection changed event for stateless frontend
@@ -345,12 +362,15 @@ async fn connect_bluetooth_device(adapter_index: usize, address: String) -> Resu
                     let battery_info = battery_level
                         .map(|l| format!(" (Battery: {}%)", l))
                         .unwrap_or_default();
-                    Ok(format!("Connected to Bluetooth device: {}{}", address, battery_info))
+                    Ok(format!(
+                        "Connected to Bluetooth device: {}{}",
+                        address, battery_info
+                    ))
                 }
-                Err(e) => Err(format!("Failed to connect: {}", e))
+                Err(e) => Err(format!("Failed to connect: {}", e)),
             }
         }
-        Err(e) => Err(format!("Failed to initialize Bluetooth: {}", e))
+        Err(e) => Err(format!("Failed to initialize Bluetooth: {}", e)),
     }
 }
 
@@ -367,11 +387,11 @@ async fn disconnect_bluetooth_device() -> Result<String, String> {
                     // Emit connection changed event for stateless frontend
                     emit_connection_changed("bluetooth", false, None);
                     Ok("Disconnected from Bluetooth device".to_string())
-                },
-                Err(e) => Err(format!("Failed to disconnect: {}", e))
+                }
+                Err(e) => Err(format!("Failed to disconnect: {}", e)),
             }
         }
-        Err(e) => Err(format!("Failed to initialize Bluetooth: {}", e))
+        Err(e) => Err(format!("Failed to initialize Bluetooth: {}", e)),
     }
 }
 
@@ -385,10 +405,10 @@ async fn send_coyote_command(command_data: Vec<u8>) -> Result<String, String> {
             }
             match manager.write_command(&command_data).await {
                 Ok(_) => Ok(format!("Sent {} bytes to device", command_data.len())),
-                Err(e) => Err(format!("Failed to send command: {}", e))
+                Err(e) => Err(format!("Failed to send command: {}", e)),
             }
         }
-        Err(e) => Err(format!("Bluetooth not available: {}", e))
+        Err(e) => Err(format!("Bluetooth not available: {}", e)),
     }
 }
 
@@ -423,7 +443,7 @@ async fn update_channel_params(
             update_channel_b_params(params).await;
             Ok("Updated Channel B parameters".to_string())
         }
-        _ => Err(format!("Unknown channel: {}", channel))
+        _ => Err(format!("Unknown channel: {}", channel)),
     }
 }
 
@@ -443,7 +463,7 @@ async fn get_battery_level() -> Result<u8, String> {
                 }
             }
         }
-        Err(_) => Ok(0)
+        Err(_) => Ok(0),
     }
 }
 
@@ -469,7 +489,8 @@ async fn get_connection_status() -> Result<ConnectionStatus, String> {
             let manager = manager.lock().await;
             let connected = manager.is_connected();
             let address = manager.get_connected_device_address();
-            let devices = manager.get_discovered_devices()
+            let devices = manager
+                .get_discovered_devices()
                 .into_iter()
                 .map(|d| BluetoothDevice {
                     address: d.address,
@@ -479,7 +500,7 @@ async fn get_connection_status() -> Result<ConnectionStatus, String> {
                 .collect();
             (connected, address, devices)
         }
-        Err(_) => (false, None, Vec::new())
+        Err(_) => (false, None, Vec::new()),
     };
 
     let battery = if bt_connected {
@@ -488,7 +509,7 @@ async fn get_connection_status() -> Result<ConnectionStatus, String> {
                 let manager = manager.lock().await;
                 manager.read_battery().await.ok()
             }
-            Err(_) => None
+            Err(_) => None,
         }
     } else {
         None
@@ -508,7 +529,7 @@ async fn get_connection_status() -> Result<ConnectionStatus, String> {
 /// This returns all live state so the frontend can restore after reload
 #[tauri::command]
 async fn get_full_state() -> Result<FullAppState, String> {
-    use crate::processing::{get_processing_state, ProcessingEngineType, ChannelInterplay};
+    use crate::processing::{get_processing_state, ChannelInterplay, ProcessingEngineType};
 
     // Get connection status
     let connection = get_connection_status().await?;
@@ -540,7 +561,11 @@ async fn get_full_state() -> Result<FullAppState, String> {
             ChannelInterplay::ChaseInverted => "chase-inverted",
             ChannelInterplay::Alternating => "alternating",
         };
-        (engine.to_string(), interplay.to_string(), state_guard.options.chase_delay_ms)
+        (
+            engine.to_string(),
+            interplay.to_string(),
+            state_guard.options.chase_delay_ms,
+        )
     };
 
     let timestamp = std::time::SystemTime::now()
@@ -613,20 +638,27 @@ async fn save_channel_settings(
     channel_settings: SettingsChannelSettings,
 ) -> Result<String, String> {
     // Extract current values for device params based on parameter source types
-    let frequency = if channel_settings.frequency_source.source_type == settings::ParameterSourceType::Static {
+    let frequency = if channel_settings.frequency_source.source_type
+        == settings::ParameterSourceType::Static
+    {
         channel_settings.frequency_source.static_value
     } else {
         // When linked, use a reasonable default or middle of range
-        (channel_settings.frequency_source.range_min + channel_settings.frequency_source.range_max) / 2.0
+        (channel_settings.frequency_source.range_min + channel_settings.frequency_source.range_max)
+            / 2.0
     };
 
-    let freq_balance = if channel_settings.frequency_balance_source.source_type == settings::ParameterSourceType::Static {
+    let freq_balance = if channel_settings.frequency_balance_source.source_type
+        == settings::ParameterSourceType::Static
+    {
         channel_settings.frequency_balance_source.static_value as u8
     } else {
         128
     };
 
-    let int_balance = if channel_settings.intensity_balance_source.source_type == settings::ParameterSourceType::Static {
+    let int_balance = if channel_settings.intensity_balance_source.source_type
+        == settings::ParameterSourceType::Static
+    {
         channel_settings.intensity_balance_source.static_value as u8
     } else {
         128
@@ -686,7 +718,8 @@ async fn save_output_settings(
         Some(channel_interplay.clone()),
         Some(processing_engine.clone()),
         Some(delay),
-    ).await;
+    )
+    .await;
 
     // Persist to settings file
     let output_settings = OutputSettings {
@@ -796,7 +829,7 @@ async fn save_general_settings(
     processing_engine: String,
 ) -> Result<String, String> {
     use crate::modulation::NoInputBehavior;
-    use crate::processing::{ProcessingEngineType, get_processing_state};
+    use crate::processing::{get_processing_state, ProcessingEngineType};
 
     let engine = match processing_engine.as_str() {
         "v1" => ProcessingEngineType::V1,
@@ -888,8 +921,8 @@ async fn update_parameter_source(
     parameter: String,
     source: ParameterSource,
 ) -> Result<String, String> {
+    use crate::buttplug::{ButtplugLinkConfig, ConstrictionMethod, FeatureTypeConfig};
     use crate::processing::get_processing_state;
-    use crate::buttplug::{ButtplugLinkConfig, FeatureTypeConfig, ConstrictionMethod};
 
     println!("[update_parameter_source] channel={}, parameter={}, source_type={:?}, source_axis={:?}, has_buttplug_links={:?}",
         channel, parameter, source.source_type, source.source_axis, source.buttplug_links.is_some());
@@ -931,7 +964,12 @@ async fn update_parameter_source(
         ("B" | "b", "intensity_balance") => {
             state.channel_b_config.intensity_balance = source;
         }
-        _ => return Err(format!("Unknown channel/parameter: {}/{}", channel, parameter)),
+        _ => {
+            return Err(format!(
+                "Unknown channel/parameter: {}/{}",
+                channel, parameter
+            ))
+        }
     }
 
     // Also update buttplug link config if present (for intensity parameter)
@@ -942,9 +980,7 @@ async fn update_parameter_source(
                 Some(pos) if pos.feature_type == "PositionWithDuration" => {
                     (None, Some(pos.feature_index as usize))
                 }
-                Some(pos) => {
-                    (Some(pos.feature_index as usize), None)
-                }
+                Some(pos) => (Some(pos.feature_index as usize), None),
                 None => (None, None),
             };
 
@@ -960,10 +996,14 @@ async fn update_parameter_source(
                     use_midpoint: None,
                     method: None,
                 }),
-                rotate_feature: links.motion.as_ref()
+                rotate_feature: links
+                    .motion
+                    .as_ref()
                     .filter(|l| l.feature_type == "Rotate")
                     .map(|l| l.feature_index as usize),
-                rotate_config: links.motion.as_ref()
+                rotate_config: links
+                    .motion
+                    .as_ref()
                     .filter(|l| l.feature_type == "Rotate")
                     .map(|l| FeatureTypeConfig {
                         distance: None,
@@ -973,10 +1013,14 @@ async fn update_parameter_source(
                         use_midpoint: None,
                         method: None,
                     }),
-                oscillate_feature: links.motion.as_ref()
+                oscillate_feature: links
+                    .motion
+                    .as_ref()
                     .filter(|l| l.feature_type == "Oscillate")
                     .map(|l| l.feature_index as usize),
-                oscillate_config: links.motion.as_ref()
+                oscillate_config: links
+                    .motion
+                    .as_ref()
                     .filter(|l| l.feature_type == "Oscillate")
                     .map(|l| FeatureTypeConfig {
                         distance: None,
@@ -988,7 +1032,10 @@ async fn update_parameter_source(
                     }),
                 constrict_feature: links.constrict.as_ref().map(|l| l.feature_index as usize),
                 constrict_config: links.constrict.as_ref().map(|l| {
-                    let method = l.config.constrict_method.as_ref()
+                    let method = l
+                        .config
+                        .constrict_method
+                        .as_ref()
                         .map(|m| match m.as_str() {
                             "clamp" => ConstrictionMethod::Clamp,
                             _ => ConstrictionMethod::Downsample,
@@ -1005,11 +1052,17 @@ async fn update_parameter_source(
                 }),
             };
             state.set_buttplug_link_config(channel_char, config);
-            println!("[update_parameter_source] Also updated Buttplug links for channel {}", channel);
+            println!(
+                "[update_parameter_source] Also updated Buttplug links for channel {}",
+                channel
+            );
         }
     }
 
-    Ok(format!("Updated {} {} parameter source", channel, parameter))
+    Ok(format!(
+        "Updated {} {} parameter source",
+        channel, parameter
+    ))
 }
 
 /// Update Buttplug link configuration for a channel
@@ -1034,7 +1087,10 @@ async fn update_buttplug_links(
     let mut state_guard = state.write().await;
     state_guard.set_buttplug_link_config(channel_char, config);
 
-    println!("[update_buttplug_links] Updated Buttplug links for channel {}", channel);
+    println!(
+        "[update_buttplug_links] Updated Buttplug links for channel {}",
+        channel
+    );
     Ok(format!("Updated Buttplug links for channel {}", channel))
 }
 
@@ -1062,7 +1118,10 @@ async fn delete_preset(name: String) -> Result<String, String> {
 #[tauri::command]
 async fn rename_preset(old_name: String, new_name: String) -> Result<String, String> {
     settings::rename_preset(&old_name, &new_name).await?;
-    Ok(format!("Preset renamed from '{}' to '{}'", old_name, new_name))
+    Ok(format!(
+        "Preset renamed from '{}' to '{}'",
+        old_name, new_name
+    ))
 }
 
 // ============================================================================
@@ -1083,16 +1142,12 @@ fn read_logs(lines: Option<usize>) -> Result<Vec<String>, String> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
-    let path = logging::get_log_path()
-        .ok_or_else(|| "Logger not initialized".to_string())?;
+    let path = logging::get_log_path().ok_or_else(|| "Logger not initialized".to_string())?;
 
-    let file = File::open(&path)
-        .map_err(|e| format!("Failed to open log file: {}", e))?;
+    let file = File::open(&path).map_err(|e| format!("Failed to open log file: {}", e))?;
 
     let reader = BufReader::new(file);
-    let all_lines: Vec<String> = reader.lines()
-        .filter_map(|l| l.ok())
-        .collect();
+    let all_lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
 
     let count = lines.unwrap_or(100);
     let start = all_lines.len().saturating_sub(count);
@@ -1111,12 +1166,16 @@ async fn close_splashscreen(window: tauri::Window) -> Result<(), String> {
 
     // Close the splashscreen
     if let Some(splash) = app.get_webview_window("splashscreen") {
-        splash.close().map_err(|e| format!("Failed to close splashscreen: {}", e))?;
+        splash
+            .close()
+            .map_err(|e| format!("Failed to close splashscreen: {}", e))?;
     }
 
     // Show the main window (don't force focus to avoid stealing it during dev rebuilds)
     if let Some(main_window) = app.get_webview_window("main") {
-        main_window.show().map_err(|e| format!("Failed to show main window: {}", e))?;
+        main_window
+            .show()
+            .map_err(|e| format!("Failed to show main window: {}", e))?;
     }
 
     Ok(())

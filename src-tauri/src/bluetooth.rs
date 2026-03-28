@@ -1,4 +1,6 @@
-use btleplug::api::{Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType};
+use btleplug::api::{
+    Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+};
 use btleplug::platform::{Manager, Peripheral};
 use std::collections::HashMap;
 use std::error::Error;
@@ -11,6 +13,19 @@ use uuid::Uuid;
 const INSTRUCTION_CHAR_UUID: Uuid = Uuid::from_u128(0x0000150a_0000_1000_8000_00805f9b34fb);
 // Battery level characteristic
 const BATTERY_CHAR_UUID: Uuid = Uuid::from_u128(0x00001500_0000_1000_8000_00805f9b34fb);
+
+// V2 Specific UUIDs (Base: 955Axxxx-0FE2-F5AA-A094-84B8D4F3E8AD)
+const V2_PWM_AB2_UUID: Uuid = Uuid::from_u128(0x955a1504_0fe2_f5aa_a094_84b8d4f3e8ad); // Strength
+const V2_PWM_A34_UUID: Uuid = Uuid::from_u128(0x955a1505_0fe2_f5aa_a094_84b8d4f3e8ad); // B Channel Waveform
+const V2_PWM_B34_UUID: Uuid = Uuid::from_u128(0x955a1506_0fe2_f5aa_a094_84b8d4f3e8ad); // A Channel Waveform
+                                                                                       // V2 Battery UUID (955a1500-...)
+const V2_BATTERY_CHAR_UUID: Uuid = Uuid::from_u128(0x955a1500_0fe2_f5aa_a094_84b8d4f3e8ad);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeviceVersion {
+    V2,
+    V3,
+}
 
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct BluetoothAdapter {
@@ -27,20 +42,22 @@ pub struct BluetoothDevice {
 
 pub struct BluetoothManager {
     manager: Manager,
-    // Store discovered peripherals by address for later connection
     discovered_peripherals: HashMap<String, Peripheral>,
-    // Store discovered device info (name, rssi) by address
     discovered_devices: Vec<BluetoothDevice>,
-    // Store the connected peripheral
     connected_peripheral: Option<Peripheral>,
-    // Store the connected device address
     connected_device_address: Option<String>,
-    // Store the write characteristic for sending commands
+
+    // V3 Features
     write_characteristic: Option<Characteristic>,
-    // Store the battery characteristic for reading battery level
+
+    // V2 Features
+    pub device_version: Option<DeviceVersion>,
+    v2_char_intensity: Option<Characteristic>,
+    v2_char_waveform_a: Option<Characteristic>, // Control Channel A (corresponding to PWM_B34)
+    v2_char_waveform_b: Option<Characteristic>, // Control Channel B (corresponding to PWM_A34)
+
     battery_characteristic: Option<Characteristic>,
 }
-
 impl BluetoothManager {
     pub async fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let manager = Manager::new().await?;
@@ -52,10 +69,17 @@ impl BluetoothManager {
             connected_device_address: None,
             write_characteristic: None,
             battery_characteristic: None,
+            // Initialize new field
+            device_version: None,
+            v2_char_intensity: None,
+            v2_char_waveform_a: None,
+            v2_char_waveform_b: None,
         })
     }
 
-    pub async fn get_adapters(&self) -> Result<Vec<BluetoothAdapter>, Box<dyn Error + Send + Sync>> {
+    pub async fn get_adapters(
+        &self,
+    ) -> Result<Vec<BluetoothAdapter>, Box<dyn Error + Send + Sync>> {
         let adapters = self.manager.adapters().await?;
         let mut adapter_list = Vec::new();
 
@@ -70,10 +94,12 @@ impl BluetoothManager {
         Ok(adapter_list)
     }
 
-    pub async fn scan_devices(&mut self, adapter_index: usize) -> Result<Vec<BluetoothDevice>, Box<dyn Error + Send + Sync>> {
+    pub async fn scan_devices(
+        &mut self,
+        adapter_index: usize,
+    ) -> Result<Vec<BluetoothDevice>, Box<dyn Error + Send + Sync>> {
         let adapters = self.manager.adapters().await?;
-        let adapter = adapters.get(adapter_index)
-            .ok_or("Invalid adapter index")?;
+        let adapter = adapters.get(adapter_index).ok_or("Invalid adapter index")?;
 
         // Clear previously discovered peripherals and devices
         self.discovered_peripherals.clear();
@@ -95,9 +121,14 @@ impl BluetoothManager {
             if let Some(props) = properties {
                 // Filter for DG-LAB devices
                 if let Some(name) = &props.local_name {
-                    if name.contains("DG-LAB") || name.contains("COYOTE") || name.contains("47L") {
+                    if name.contains("DG-LAB")
+                        || name.contains("COYOTE")
+                        || name.contains("47L")
+                        || name.contains("ESTIM01")
+                    {
                         // Store the peripheral for later connection
-                        self.discovered_peripherals.insert(address.clone(), peripheral);
+                        self.discovered_peripherals
+                            .insert(address.clone(), peripheral);
 
                         // Store the device info
                         self.discovered_devices.push(BluetoothDevice {
@@ -113,14 +144,25 @@ impl BluetoothManager {
         // Stop scanning
         adapter.stop_scan().await?;
 
-        println!("Discovered {} DG-LAB devices, stored {} peripherals", self.discovered_devices.len(), self.discovered_peripherals.len());
+        println!(
+            "Discovered {} DG-LAB devices, stored {} peripherals",
+            self.discovered_devices.len(),
+            self.discovered_peripherals.len()
+        );
 
         Ok(self.discovered_devices.clone())
     }
 
-    pub async fn connect_device(&mut self, adapter_index: usize, address: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn connect_device(
+        &mut self,
+        adapter_index: usize,
+        address: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         println!("Attempting to connect to device: {}", address);
-        println!("Stored peripherals: {:?}", self.discovered_peripherals.keys().collect::<Vec<_>>());
+        println!(
+            "Stored peripherals: {:?}",
+            self.discovered_peripherals.keys().collect::<Vec<_>>()
+        );
 
         // First try to get from stored peripherals
         let peripheral = if let Some(p) = self.discovered_peripherals.get(address) {
@@ -130,8 +172,7 @@ impl BluetoothManager {
             // Fall back to scanning adapter's peripherals
             println!("Device not in stored peripherals, checking adapter...");
             let adapters = self.manager.adapters().await?;
-            let adapter = adapters.get(adapter_index)
-                .ok_or("Invalid adapter index")?;
+            let adapter = adapters.get(adapter_index).ok_or("Invalid adapter index")?;
 
             let peripherals = adapter.peripherals().await?;
 
@@ -155,26 +196,56 @@ impl BluetoothManager {
 
         self.write_characteristic = None;
         self.battery_characteristic = None;
+        self.device_version = None;
+        self.v2_char_intensity = None;
+        self.v2_char_waveform_a = None;
+        self.v2_char_waveform_b = None;
 
         for service in services {
             println!("Service: {}", service.uuid);
-
             for characteristic in service.characteristics {
                 println!("  Characteristic: {}", characteristic.uuid);
 
+                // V3 detection
                 if characteristic.uuid == INSTRUCTION_CHAR_UUID {
-                    println!("  -> Found instruction write characteristic!");
+                    println!("  -> Found V3 write characteristic!");
                     self.write_characteristic = Some(characteristic.clone());
+                    self.device_version = Some(DeviceVersion::V3);
                 }
 
-                if characteristic.uuid == BATTERY_CHAR_UUID {
-                    println!("  -> Found battery characteristic!");
+                // V2 detection
+                if characteristic.uuid == V2_PWM_AB2_UUID {
+                    println!("  -> Found V2 Intensity characteristic!");
+                    self.v2_char_intensity = Some(characteristic.clone());
+                    self.device_version = Some(DeviceVersion::V2);
+                }
+                // The document states: PWM_B34 (1506) controls channel A
+                if characteristic.uuid == V2_PWM_B34_UUID {
+                    println!("  -> Found V2 Waveform A characteristic!");
+                    self.v2_char_waveform_a = Some(characteristic.clone());
+                }
+                // Documentation states: PWM_A34 (1505) controls B channel
+                if characteristic.uuid == V2_PWM_A34_UUID {
+                    println!("  -> Found V2 Waveform B characteristic!");
+                    self.v2_char_waveform_b = Some(characteristic.clone());
+                }
+
+                if characteristic.uuid == BATTERY_CHAR_UUID
+                    || characteristic.uuid == V2_BATTERY_CHAR_UUID
+                {
+                    println!("  -> Found Battery characteristic!");
                     self.battery_characteristic = Some(characteristic.clone());
                 }
             }
         }
 
-        if self.write_characteristic.is_none() {
+        if self.device_version.is_none() {
+            println!("WARNING: No supported device version identified - commands won't be sent");
+        } else {
+            println!("Device version identified: {:?}", self.device_version);
+        }
+
+        if self.write_characteristic.is_none() && self.device_version != Some(DeviceVersion::V2) {
             println!("WARNING: Write characteristic not found - commands won't be sent to device");
         }
 
@@ -188,22 +259,32 @@ impl BluetoothManager {
 
     /// Write a command to the device (B0 or BF command)
     pub async fn write_command(&self, data: &[u8]) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let peripheral = self.connected_peripheral.as_ref()
+        let peripheral = self
+            .connected_peripheral
+            .as_ref()
             .ok_or("No device connected")?;
 
-        let characteristic = self.write_characteristic.as_ref()
+        let characteristic = self
+            .write_characteristic
+            .as_ref()
             .ok_or("Write characteristic not available")?;
 
-        peripheral.write(characteristic, data, WriteType::WithoutResponse).await?;
+        peripheral
+            .write(characteristic, data, WriteType::WithoutResponse)
+            .await?;
         Ok(())
     }
 
     /// Read the battery level
     pub async fn read_battery(&self) -> Result<u8, Box<dyn Error + Send + Sync>> {
-        let peripheral = self.connected_peripheral.as_ref()
+        let peripheral = self
+            .connected_peripheral
+            .as_ref()
             .ok_or("No device connected")?;
 
-        let characteristic = self.battery_characteristic.as_ref()
+        let characteristic = self
+            .battery_characteristic
+            .as_ref()
             .ok_or("Battery characteristic not available")?;
 
         let data = peripheral.read(characteristic).await?;
@@ -212,7 +293,9 @@ impl BluetoothManager {
 
     /// Check if device is connected
     pub fn is_connected(&self) -> bool {
-        self.connected_peripheral.is_some() && self.write_characteristic.is_some()
+        self.connected_peripheral.is_some()
+            && (self.write_characteristic.is_some()
+                || self.device_version == Some(DeviceVersion::V2))
     }
 
     /// Get the list of discovered devices (from last scan)
@@ -235,14 +318,46 @@ impl BluetoothManager {
         }
         Ok(())
     }
+    pub async fn write_v2_data(
+        &self,
+        intensity: &[u8],
+        wave_a: &[u8],
+        wave_b: &[u8],
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let peripheral = self
+            .connected_peripheral
+            .as_ref()
+            .ok_or("No device connected")?;
+
+        if let Some(char_int) = &self.v2_char_intensity {
+            peripheral
+                .write(char_int, intensity, WriteType::WithoutResponse)
+                .await?;
+        }
+        if let Some(char_wa) = &self.v2_char_waveform_a {
+            peripheral
+                .write(char_wa, wave_a, WriteType::WithoutResponse)
+                .await?;
+        }
+        if let Some(char_wb) = &self.v2_char_waveform_b {
+            peripheral
+                .write(char_wb, wave_b, WriteType::WithoutResponse)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 // Global Bluetooth manager instance
-pub static BLUETOOTH_MANAGER: tokio::sync::OnceCell<tokio::sync::Mutex<BluetoothManager>> = tokio::sync::OnceCell::const_new();
+pub static BLUETOOTH_MANAGER: tokio::sync::OnceCell<tokio::sync::Mutex<BluetoothManager>> =
+    tokio::sync::OnceCell::const_new();
 
-pub async fn get_bluetooth_manager() -> Result<&'static tokio::sync::Mutex<BluetoothManager>, Box<dyn Error + Send + Sync>> {
-    BLUETOOTH_MANAGER.get_or_try_init(|| async {
-        let manager = BluetoothManager::new().await?;
-        Ok(tokio::sync::Mutex::new(manager))
-    }).await
+pub async fn get_bluetooth_manager(
+) -> Result<&'static tokio::sync::Mutex<BluetoothManager>, Box<dyn Error + Send + Sync>> {
+    BLUETOOTH_MANAGER
+        .get_or_try_init(|| async {
+            let manager = BluetoothManager::new().await?;
+            Ok(tokio::sync::Mutex::new(manager))
+        })
+        .await
 }

@@ -10,12 +10,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Import types from modulation module (single source of truth)
-use crate::modulation::{
-    NoInputBehavior, ChannelConfig, AxisState, apply_curve,
-};
+use crate::modulation::{apply_curve, AxisState, ChannelConfig, NoInputBehavior};
 
 // Import Buttplug types for link configuration and pipeline
-use crate::buttplug::{ButtplugLinkConfig, ButtplugChannelState, process_buttplug_pipeline};
+use crate::buttplug::{process_buttplug_pipeline, ButtplugChannelState, ButtplugLinkConfig};
 use std::time::Instant;
 
 lazy_static::lazy_static! {
@@ -171,9 +169,12 @@ fn get_delayed_values(a_history: &VecDeque<u8>, delay_ms: u32, invert: bool) -> 
 
         let value = if slots_back <= history_len {
             // Index from end: history_len - slots_back
-            a_history.get(history_len - slots_back).copied().unwrap_or(0)
+            a_history
+                .get(history_len - slots_back)
+                .copied()
+                .unwrap_or(0)
         } else {
-            0  // Not enough history yet
+            0 // Not enough history yet
         };
 
         result[i] = if invert {
@@ -194,9 +195,9 @@ fn get_delayed_values(a_history: &VecDeque<u8>, delay_ms: u32, invert: bool) -> 
 #[derive(Debug, Clone, Serialize)]
 pub struct TCodeCommand {
     pub axis: String,
-    pub value: f64,           // Normalized 0.0-1.0
+    pub value: f64,               // Normalized 0.0-1.0
     pub interval_ms: Option<u32>, // Ramp time in ms
-    pub received_at: u64,     // Timestamp when received
+    pub received_at: u64,         // Timestamp when received
 }
 
 /// Parse T-Code string into commands
@@ -392,7 +393,7 @@ impl Default for V3ChannelState {
         Self {
             command_buffer: VecDeque::with_capacity(100),
             current_position: 0,
-            lookahead_ms: 1000,       // Commands take effect 1s after arrival
+            lookahead_ms: 1000,        // Commands take effect 1s after arrival
             buffer_retention_ms: 2000, // Keep 2s of command history
         }
     }
@@ -413,7 +414,8 @@ impl V3ChannelState {
         };
 
         // Insert in sorted order by effective time
-        let insert_pos = self.command_buffer
+        let insert_pos = self
+            .command_buffer
             .iter()
             .position(|c| c.effective_at > effective_at)
             .unwrap_or(self.command_buffer.len());
@@ -449,7 +451,8 @@ impl V3ChannelState {
         let analysis_end = window_start + 250;
 
         // Get all commands in the analysis window, sorted by effective time
-        let commands: Vec<_> = self.command_buffer
+        let commands: Vec<_> = self
+            .command_buffer
             .iter()
             .filter(|c| c.effective_at >= analysis_start && c.effective_at <= analysis_end)
             .cloned()
@@ -457,8 +460,12 @@ impl V3ChannelState {
 
         // If no commands, hold current position
         if commands.is_empty() {
-            return [self.current_position, self.current_position,
-                    self.current_position, self.current_position];
+            return [
+                self.current_position,
+                self.current_position,
+                self.current_position,
+                self.current_position,
+            ];
         }
 
         // Find critical points (peaks and valleys where direction changes)
@@ -505,7 +512,11 @@ impl V3ChannelState {
     }
 
     /// Find critical points (peaks and valleys) in the command sequence
-    fn find_critical_points(&self, commands: &[BufferedCommand], window_start: u64) -> Vec<CriticalPoint> {
+    fn find_critical_points(
+        &self,
+        commands: &[BufferedCommand],
+        window_start: u64,
+    ) -> Vec<CriticalPoint> {
         let mut critical_points = Vec::new();
 
         if commands.len() < 2 {
@@ -576,7 +587,12 @@ impl V3ChannelState {
     }
 
     /// Interpolate position at a specific time using critical points
-    fn interpolate_at_time(&self, critical_points: &[CriticalPoint], commands: &[BufferedCommand], time: u64) -> u8 {
+    fn interpolate_at_time(
+        &self,
+        critical_points: &[CriticalPoint],
+        commands: &[BufferedCommand],
+        time: u64,
+    ) -> u8 {
         // Find the critical points before and after this time
         let mut before: Option<&CriticalPoint> = None;
         let mut after: Option<&CriticalPoint> = None;
@@ -599,14 +615,18 @@ impl V3ChannelState {
                 }
                 let elapsed = (time - b.time) as f64;
                 let progress = (elapsed / duration).clamp(0.0, 1.0);
-                let interpolated = b.position as f64 + progress * (a.position as f64 - b.position as f64);
+                let interpolated =
+                    b.position as f64 + progress * (a.position as f64 - b.position as f64);
                 interpolated.round().clamp(0.0, 200.0) as u8
             }
             (Some(b), None) => b.position,
             (None, Some(a)) => a.position,
             (None, None) => {
                 // Fallback to commands directly
-                commands.last().map(|c| c.position).unwrap_or(self.current_position)
+                commands
+                    .last()
+                    .map(|c| c.position)
+                    .unwrap_or(self.current_position)
             }
         }
     }
@@ -689,12 +709,16 @@ impl Downsampler {
 
     /// Check if we have samples in a given time window
     pub fn has_samples_in_window(&self, start_time: u64, end_time: u64) -> bool {
-        self.samples.iter().any(|s| s.timestamp >= start_time && s.timestamp < end_time)
+        self.samples
+            .iter()
+            .any(|s| s.timestamp >= start_time && s.timestamp < end_time)
     }
 
     /// Downsample to 4 values using smooth (averaging) algorithm
     pub fn downsample_smooth(&self, window_start: u64, window_end: u64) -> [u8; 4] {
-        let window_samples: Vec<_> = self.samples.iter()
+        let window_samples: Vec<_> = self
+            .samples
+            .iter()
             .filter(|s| s.timestamp >= window_start && s.timestamp < window_end)
             .copied()
             .collect();
@@ -714,13 +738,18 @@ impl Downsampler {
             let bucket_start = window_start + i as u64 * bucket_duration;
             let bucket_end = bucket_start + bucket_duration;
 
-            let bucket_samples: Vec<_> = window_samples.iter()
+            let bucket_samples: Vec<_> = window_samples
+                .iter()
                 .filter(|s| s.timestamp >= bucket_start && s.timestamp < bucket_end)
                 .collect();
 
             if bucket_samples.is_empty() {
                 // Use previous bucket's value or last known
-                result[i] = if i > 0 { result[i - 1] } else { self.last_value };
+                result[i] = if i > 0 {
+                    result[i - 1]
+                } else {
+                    self.last_value
+                };
             } else {
                 // Average all samples in bucket
                 let sum: u32 = bucket_samples.iter().map(|s| s.value as u32).sum();
@@ -733,7 +762,9 @@ impl Downsampler {
 
     /// Downsample to 4 values using balanced (linear interpolation) algorithm
     pub fn downsample_balanced(&self, window_start: u64, window_end: u64) -> [u8; 4] {
-        let mut window_samples: Vec<_> = self.samples.iter()
+        let mut window_samples: Vec<_> = self
+            .samples
+            .iter()
             .filter(|s| s.timestamp >= window_start && s.timestamp < window_end)
             .copied()
             .collect();
@@ -762,7 +793,9 @@ impl Downsampler {
 
     /// Downsample to 4 values using detailed (peak-preserving) algorithm
     pub fn downsample_detailed(&self, window_start: u64, window_end: u64) -> [u8; 4] {
-        let window_samples: Vec<_> = self.samples.iter()
+        let window_samples: Vec<_> = self
+            .samples
+            .iter()
             .filter(|s| s.timestamp >= window_start && s.timestamp < window_end)
             .copied()
             .collect();
@@ -782,13 +815,18 @@ impl Downsampler {
             let bucket_start = window_start + i as u64 * bucket_duration;
             let bucket_end = bucket_start + bucket_duration;
 
-            let bucket_samples: Vec<_> = window_samples.iter()
+            let bucket_samples: Vec<_> = window_samples
+                .iter()
                 .filter(|s| s.timestamp >= bucket_start && s.timestamp < bucket_end)
                 .collect();
 
             if bucket_samples.is_empty() {
                 // Use previous bucket's value or last known
-                result[i] = if i > 0 { result[i - 1] } else { self.last_value };
+                result[i] = if i > 0 {
+                    result[i - 1]
+                } else {
+                    self.last_value
+                };
             } else {
                 // Take maximum value in bucket (preserves peaks)
                 result[i] = bucket_samples.iter().map(|s| s.value).max().unwrap_or(0);
@@ -813,7 +851,9 @@ impl Downsampler {
         let mut after = sorted_samples[sorted_samples.len() - 1];
 
         for i in 0..sorted_samples.len() - 1 {
-            if sorted_samples[i].timestamp <= target_time && sorted_samples[i + 1].timestamp >= target_time {
+            if sorted_samples[i].timestamp <= target_time
+                && sorted_samples[i + 1].timestamp >= target_time
+            {
                 before = sorted_samples[i];
                 after = sorted_samples[i + 1];
                 break;
@@ -837,7 +877,8 @@ impl Downsampler {
         }
 
         let progress = (target_time - before.timestamp) as f64 / time_delta as f64;
-        let interpolated = before.value as f64 + progress * (after.value as f64 - before.value as f64);
+        let interpolated =
+            before.value as f64 + progress * (after.value as f64 - before.value as f64);
 
         interpolated.round().clamp(0.0, 200.0) as u8
     }
@@ -845,7 +886,9 @@ impl Downsampler {
     /// Downsample to 4 values using dynamic (oscillation-preserving) algorithm
     /// When significant oscillation is detected, outputs alternating min/max to preserve movement
     pub fn downsample_dynamic(&self, window_start: u64, window_end: u64) -> [u8; 4] {
-        let window_samples: Vec<_> = self.samples.iter()
+        let window_samples: Vec<_> = self
+            .samples
+            .iter()
             .filter(|s| s.timestamp >= window_start && s.timestamp < window_end)
             .copied()
             .collect();
@@ -883,14 +926,19 @@ impl Downsampler {
             let bucket_start = window_start + i as u64 * bucket_duration;
             let bucket_end = bucket_start + bucket_duration;
 
-            let bucket_samples: Vec<_> = window_samples.iter()
+            let bucket_samples: Vec<_> = window_samples
+                .iter()
                 .filter(|s| s.timestamp >= bucket_start && s.timestamp < bucket_end)
                 .copied()
                 .collect();
 
             if bucket_samples.is_empty() {
                 // No samples in bucket - alternate based on expectation
-                result[i] = if expecting_high { window_max } else { window_min };
+                result[i] = if expecting_high {
+                    window_max
+                } else {
+                    window_min
+                };
                 expecting_high = !expecting_high;
                 continue;
             }
@@ -907,7 +955,11 @@ impl Downsampler {
 
                 if has_direction_change {
                     // Multiple direction changes - output extreme matching expectation
-                    result[i] = if expecting_high { bucket_max } else { bucket_min };
+                    result[i] = if expecting_high {
+                        bucket_max
+                    } else {
+                        bucket_min
+                    };
                     expecting_high = !expecting_high;
                 } else {
                     // Single direction - output based on trend
@@ -945,7 +997,13 @@ impl Downsampler {
 
         for i in 1..samples.len() {
             let delta = samples[i].value as i16 - samples[i - 1].value as i16;
-            let direction = if delta > 5 { 1i8 } else if delta < -5 { -1i8 } else { last_direction };
+            let direction = if delta > 5 {
+                1i8
+            } else if delta < -5 {
+                -1i8
+            } else {
+                last_direction
+            };
 
             if last_direction != 0 && direction != 0 && direction != last_direction {
                 changes += 1;
@@ -972,10 +1030,10 @@ impl Downsampler {
 /// V1 Channel state using queue-based ramping (original implementation)
 #[derive(Debug, Clone)]
 pub struct V1ChannelState {
-    pub current_intensity: u8,   // 0-200 (device native units)
-    pub target_intensity: u8,    // 0-200 (device native units)
-    pub ramp_queue: Vec<u8>,     // Queue of intensity values for ramping (0-200)
-    pub prev_intensity: u8,      // Last sent intensity (for repeating when queue empty)
+    pub current_intensity: u8, // 0-200 (device native units)
+    pub target_intensity: u8,  // 0-200 (device native units)
+    pub ramp_queue: Vec<u8>,   // Queue of intensity values for ramping (0-200)
+    pub prev_intensity: u8,    // Last sent intensity (for repeating when queue empty)
 }
 
 impl Default for V1ChannelState {
@@ -1005,13 +1063,13 @@ impl V1ChannelState {
             // Reduce previous data if queue is getting too long
             if self.ramp_queue.len() > 4 {
                 let last = *self.ramp_queue.last().unwrap_or(&self.prev_intensity) as i32;
-                let second = self.ramp_queue.get(1).copied().unwrap_or(self.prev_intensity) as i32;
+                let second = self
+                    .ramp_queue
+                    .get(1)
+                    .copied()
+                    .unwrap_or(self.prev_intensity) as i32;
                 let delta = (last - second) / 2;
-                self.ramp_queue = vec![
-                    second as u8,
-                    (second + delta) as u8,
-                    last as u8,
-                ];
+                self.ramp_queue = vec![second as u8, (second + delta) as u8, last as u8];
             }
 
             // Generate list of intensities to output every 100ms ramping towards the target
@@ -1038,7 +1096,10 @@ impl V1ChannelState {
         let prev = self.prev_intensity;
 
         // Get next 4 values from queue
-        let mut next_four: Vec<u8> = self.ramp_queue.drain(..self.ramp_queue.len().min(4)).collect();
+        let mut next_four: Vec<u8> = self
+            .ramp_queue
+            .drain(..self.ramp_queue.len().min(4))
+            .collect();
 
         // Pad to 4 values if needed
         if next_four.is_empty() {
@@ -1077,7 +1138,7 @@ impl V1ChannelState {
 pub struct OutputOptions {
     pub channel_interplay: ChannelInterplay,
     pub processing_engine: ProcessingEngineType,
-    pub chase_delay_ms: u32,  // 50-500ms delay for chase modes
+    pub chase_delay_ms: u32, // 50-500ms delay for chase modes
 }
 
 impl Default for OutputOptions {
@@ -1085,7 +1146,7 @@ impl Default for OutputOptions {
         Self {
             channel_interplay: ChannelInterplay::None,
             processing_engine: ProcessingEngineType::V1,
-            chase_delay_ms: 100,  // Default 100ms (1 full window)
+            chase_delay_ms: 100, // Default 100ms (1 full window)
         }
     }
 }
@@ -1097,7 +1158,7 @@ impl Default for OutputOptions {
 /// Waveform data for a channel (4 intensity values for the 100ms window)
 #[derive(Debug, Clone)]
 pub struct WaveformData {
-    pub intensity: u8,              // Max intensity (0-200)
+    pub intensity: u8,               // Max intensity (0-200)
     pub waveform_intensity: [u8; 4], // Relative intensity (0-100) for each slot
 }
 
@@ -1200,7 +1261,7 @@ impl Default for ProcessingState {
             downsampler_a: Downsampler::default(),
             downsampler_b: Downsampler::default(),
             options: OutputOptions::default(),
-            a_history: VecDeque::with_capacity(24),  // 24 slots = 600ms of history
+            a_history: VecDeque::with_capacity(24), // 24 slots = 600ms of history
             axis_values: HashMap::new(),
             buttplug_features: HashMap::new(),
             buttplug_linear_commands: HashMap::new(),
@@ -1208,7 +1269,7 @@ impl Default for ProcessingState {
             channel_a_config: ChannelConfig::channel_a_default(),
             channel_b_config: ChannelConfig::channel_b_default(),
             no_input_behavior: NoInputBehavior::Hold,
-            no_input_decay_ms: 1000,  // 1 second default decay time
+            no_input_decay_ms: 1000, // 1 second default decay time
             buttplug_link_config_a: ButtplugLinkConfig::default(),
             buttplug_link_config_b: ButtplugLinkConfig::default(),
             buttplug_channel_state_a: ButtplugChannelState::default(),
@@ -1307,7 +1368,11 @@ impl ProcessingState {
 
         // Apply curve transformation from channel config
         let curve = &self.channel_a_config.intensity.curve;
-        let strength = self.channel_a_config.intensity.curve_strength.unwrap_or(2.0);
+        let strength = self
+            .channel_a_config
+            .intensity
+            .curve_strength
+            .unwrap_or(2.0);
         let curved_value = apply_curve(midpoint_value, curve, strength);
 
         // Convert to device units (0-200) WITHOUT range mapping
@@ -1318,7 +1383,8 @@ impl ProcessingState {
         self.v1_channel_a.apply_command(curved_value, interval_ms);
 
         // V2: Interpolation-based
-        self.v2_channel_a.set_target(intensity_u8, interval_ms.unwrap_or(0), timestamp);
+        self.v2_channel_a
+            .set_target(intensity_u8, interval_ms.unwrap_or(0), timestamp);
         self.downsampler_a.add_sample(intensity_u8, timestamp);
 
         // V3: Predictive/Lookahead-based - buffer command for future processing
@@ -1341,7 +1407,11 @@ impl ProcessingState {
 
         // Apply curve transformation from channel config
         let curve = &self.channel_b_config.intensity.curve;
-        let strength = self.channel_b_config.intensity.curve_strength.unwrap_or(2.0);
+        let strength = self
+            .channel_b_config
+            .intensity
+            .curve_strength
+            .unwrap_or(2.0);
         let curved_value = apply_curve(midpoint_value, curve, strength);
 
         // Convert to device units (0-200) WITHOUT range mapping
@@ -1352,7 +1422,8 @@ impl ProcessingState {
         self.v1_channel_b.apply_command(curved_value, interval_ms);
 
         // V2: Interpolation-based
-        self.v2_channel_b.set_target(intensity_u8, interval_ms.unwrap_or(0), timestamp);
+        self.v2_channel_b
+            .set_target(intensity_u8, interval_ms.unwrap_or(0), timestamp);
         self.downsampler_b.add_sample(intensity_u8, timestamp);
 
         // V3: Predictive/Lookahead-based - buffer command for future processing
@@ -1393,7 +1464,10 @@ impl ProcessingState {
                 dt_ms,
             );
             let intensity = (output * 200.0).round().clamp(0.0, 200.0) as u8;
-            println!("[Buttplug Pipeline] Channel A: pipeline_output={:.3}, intensity={}", output, intensity);
+            println!(
+                "[Buttplug Pipeline] Channel A: pipeline_output={:.3}, intensity={}",
+                output, intensity
+            );
             Some(intensity)
         } else {
             None
@@ -1419,8 +1493,10 @@ impl ProcessingState {
         }
 
         // Check if intensity sources are static - if so, use static values directly
-        let a_is_static = self.channel_a_config.intensity.source_type == ParameterSourceType::Static;
-        let b_is_static = self.channel_b_config.intensity.source_type == ParameterSourceType::Static;
+        let a_is_static =
+            self.channel_a_config.intensity.source_type == ParameterSourceType::Static;
+        let b_is_static =
+            self.channel_b_config.intensity.source_type == ParameterSourceType::Static;
 
         // Helper to create 4-value array from single intensity
         let intensity_to_values = |i: u8| -> [u8; 4] { [i, i, i, i] };
@@ -1435,34 +1511,48 @@ impl ProcessingState {
             match self.options.processing_engine {
                 ProcessingEngineType::V1 => self.v1_channel_a.get_next_four(),
                 ProcessingEngineType::V2Smooth => {
-                    if self.downsampler_a.has_samples_in_window(window_start, now_ms) {
+                    if self
+                        .downsampler_a
+                        .has_samples_in_window(window_start, now_ms)
+                    {
                         self.downsampler_a.downsample_smooth(window_start, now_ms)
                     } else {
                         self.v2_channel_a.get_next_four_values(window_start)
                     }
                 }
                 ProcessingEngineType::V2Balanced => {
-                    if self.downsampler_a.has_samples_in_window(window_start, now_ms) {
+                    if self
+                        .downsampler_a
+                        .has_samples_in_window(window_start, now_ms)
+                    {
                         self.downsampler_a.downsample_balanced(window_start, now_ms)
                     } else {
                         self.v2_channel_a.get_next_four_values(window_start)
                     }
                 }
                 ProcessingEngineType::V2Detailed => {
-                    if self.downsampler_a.has_samples_in_window(window_start, now_ms) {
+                    if self
+                        .downsampler_a
+                        .has_samples_in_window(window_start, now_ms)
+                    {
                         self.downsampler_a.downsample_detailed(window_start, now_ms)
                     } else {
                         self.v2_channel_a.get_next_four_values(window_start)
                     }
                 }
                 ProcessingEngineType::V2Dynamic => {
-                    if self.downsampler_a.has_samples_in_window(window_start, now_ms) {
+                    if self
+                        .downsampler_a
+                        .has_samples_in_window(window_start, now_ms)
+                    {
                         self.downsampler_a.downsample_dynamic(window_start, now_ms)
                     } else {
                         self.v2_channel_a.get_next_four_values(window_start)
                     }
                 }
-                ProcessingEngineType::V3Predictive => self.v3_channel_a.get_next_four_values(now_ms),
+                ProcessingEngineType::V3Predictive => {
+                    self.v3_channel_a.get_next_four_values(now_ms)
+                }
             }
         };
 
@@ -1476,34 +1566,48 @@ impl ProcessingState {
             match self.options.processing_engine {
                 ProcessingEngineType::V1 => self.v1_channel_b.get_next_four(),
                 ProcessingEngineType::V2Smooth => {
-                    if self.downsampler_b.has_samples_in_window(window_start, now_ms) {
+                    if self
+                        .downsampler_b
+                        .has_samples_in_window(window_start, now_ms)
+                    {
                         self.downsampler_b.downsample_smooth(window_start, now_ms)
                     } else {
                         self.v2_channel_b.get_next_four_values(window_start)
                     }
                 }
                 ProcessingEngineType::V2Balanced => {
-                    if self.downsampler_b.has_samples_in_window(window_start, now_ms) {
+                    if self
+                        .downsampler_b
+                        .has_samples_in_window(window_start, now_ms)
+                    {
                         self.downsampler_b.downsample_balanced(window_start, now_ms)
                     } else {
                         self.v2_channel_b.get_next_four_values(window_start)
                     }
                 }
                 ProcessingEngineType::V2Detailed => {
-                    if self.downsampler_b.has_samples_in_window(window_start, now_ms) {
+                    if self
+                        .downsampler_b
+                        .has_samples_in_window(window_start, now_ms)
+                    {
                         self.downsampler_b.downsample_detailed(window_start, now_ms)
                     } else {
                         self.v2_channel_b.get_next_four_values(window_start)
                     }
                 }
                 ProcessingEngineType::V2Dynamic => {
-                    if self.downsampler_b.has_samples_in_window(window_start, now_ms) {
+                    if self
+                        .downsampler_b
+                        .has_samples_in_window(window_start, now_ms)
+                    {
                         self.downsampler_b.downsample_dynamic(window_start, now_ms)
                     } else {
                         self.v2_channel_b.get_next_four_values(window_start)
                     }
                 }
-                ProcessingEngineType::V3Predictive => self.v3_channel_b.get_next_four_values(now_ms),
+                ProcessingEngineType::V3Predictive => {
+                    self.v3_channel_b.get_next_four_values(now_ms)
+                }
             }
         };
 
@@ -1525,7 +1629,10 @@ impl ProcessingState {
             self.a_history.pop_front();
         }
 
-        (WaveformData::from_values(final_a), WaveformData::from_values(final_b))
+        (
+            WaveformData::from_values(final_a),
+            WaveformData::from_values(final_b),
+        )
     }
 
     /// Get V2 raw values with support for static intensity sources
@@ -1545,7 +1652,10 @@ impl ProcessingState {
             let static_val = self.channel_a_config.intensity.static_value.unwrap_or(0.0);
             let intensity = static_val.round().clamp(0.0, 200.0) as u8;
             [intensity, intensity, intensity, intensity]
-        } else if self.downsampler_a.has_samples_in_window(window_start, window_end) {
+        } else if self
+            .downsampler_a
+            .has_samples_in_window(window_start, window_end)
+        {
             downsample_fn(&self.downsampler_a, window_start, window_end)
         } else {
             self.v2_channel_a.get_next_four_values(window_start)
@@ -1556,7 +1666,10 @@ impl ProcessingState {
             let static_val = self.channel_b_config.intensity.static_value.unwrap_or(0.0);
             let intensity = static_val.round().clamp(0.0, 200.0) as u8;
             [intensity, intensity, intensity, intensity]
-        } else if self.downsampler_b.has_samples_in_window(window_start, window_end) {
+        } else if self
+            .downsampler_b
+            .has_samples_in_window(window_start, window_end)
+        {
             downsample_fn(&self.downsampler_b, window_start, window_end)
         } else {
             self.v2_channel_b.get_next_four_values(window_start)
@@ -1629,7 +1742,11 @@ impl ProcessingState {
     pub fn set_buttplug_linear_cmd(&mut self, index: usize, position: f64, duration_ms: u32) {
         self.buttplug_linear_commands.insert(
             index,
-            (position.clamp(0.0, 1.0), duration_ms, std::time::Instant::now())
+            (
+                position.clamp(0.0, 1.0),
+                duration_ms,
+                std::time::Instant::now(),
+            ),
         );
     }
 
@@ -1670,7 +1787,10 @@ impl ProcessingState {
                 self.buttplug_link_config_b = config;
             }
             _ => {
-                println!("[ProcessingState] Unknown channel for Buttplug link config: {}", channel);
+                println!(
+                    "[ProcessingState] Unknown channel for Buttplug link config: {}",
+                    channel
+                );
             }
         }
     }
@@ -1761,12 +1881,30 @@ mod tests {
 
     #[test]
     fn test_processing_engine_from_str() {
-        assert_eq!(ProcessingEngineType::from_str("v1"), ProcessingEngineType::V1);
-        assert_eq!(ProcessingEngineType::from_str("v2-smooth"), ProcessingEngineType::V2Smooth);
-        assert_eq!(ProcessingEngineType::from_str("v2-balanced"), ProcessingEngineType::V2Balanced);
-        assert_eq!(ProcessingEngineType::from_str("v2-detailed"), ProcessingEngineType::V2Detailed);
-        assert_eq!(ProcessingEngineType::from_str("v2-dynamic"), ProcessingEngineType::V2Dynamic);
-        assert_eq!(ProcessingEngineType::from_str("v3-predictive"), ProcessingEngineType::V3Predictive);
+        assert_eq!(
+            ProcessingEngineType::from_str("v1"),
+            ProcessingEngineType::V1
+        );
+        assert_eq!(
+            ProcessingEngineType::from_str("v2-smooth"),
+            ProcessingEngineType::V2Smooth
+        );
+        assert_eq!(
+            ProcessingEngineType::from_str("v2-balanced"),
+            ProcessingEngineType::V2Balanced
+        );
+        assert_eq!(
+            ProcessingEngineType::from_str("v2-detailed"),
+            ProcessingEngineType::V2Detailed
+        );
+        assert_eq!(
+            ProcessingEngineType::from_str("v2-dynamic"),
+            ProcessingEngineType::V2Dynamic
+        );
+        assert_eq!(
+            ProcessingEngineType::from_str("v3-predictive"),
+            ProcessingEngineType::V3Predictive
+        );
     }
 
     // Note: Curve transformation tests are in modulation.rs

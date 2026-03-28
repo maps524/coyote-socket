@@ -129,8 +129,10 @@ pub fn process_buttplug_pipeline(
     // ========== STAGE 4: CONSTRICT - Downsample to range ==========
 
     // Debug: Check constrict configuration and values
-    println!("[Pipeline] Constrict check: constrict_feature={:?}, constrict_values={:?}",
-        config.constrict_feature, features.constrict);
+    println!(
+        "[Pipeline] Constrict check: constrict_feature={:?}, constrict_values={:?}",
+        config.constrict_feature, features.constrict
+    );
 
     if let Some(constriction) = features.get_constrict(config.constrict_feature) {
         let config_vals = config.constrict_config.as_ref();
