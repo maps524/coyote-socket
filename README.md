@@ -2,7 +2,7 @@
 
 A modern desktop application for controlling DG-LAB Coyote e-stim devices with T-Code or Buttplug input.
 
-**[Download Now](releases)**
+**[Download Now](https://github.com/maps524/coyote-socket/releases/latest)**
 
 ## Features
 
