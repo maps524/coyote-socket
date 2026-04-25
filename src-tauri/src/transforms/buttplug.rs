@@ -20,6 +20,44 @@
 use std::f64::consts::PI;
 
 use super::{ConstrictionMethod, TransformState};
+use crate::modulation::lerp;
+
+/// Pull a transform's phase + last-target slot out of `state`, compute the
+/// elapsed `dt_ms` since the previous call, and bump the slot's
+/// last_target. Returns `None` and rewrites the slot to the right shape
+/// (with `init`) if the wrong variant arrived — sub E's resolver init
+/// guarantees the right slot, but the rewrite is defense-in-depth so a
+/// misconfiguration recovers within one tick rather than killing the
+/// device loop.
+///
+/// The first call (`last_target == 0`) reports `dt_ms = 0` so the very
+/// first tick of a Vibrate / Oscillate slot doesn't immediately wobble
+/// — phase advances on the second call onward.
+fn step_phase_state<'a>(
+    state: &'a mut TransformState,
+    target_ts: u64,
+    init: TransformState,
+) -> Option<(&'a mut f64, u64)> {
+    let needs_rewrite = !matches!(state, TransformState::Vibrate { .. } | TransformState::Oscillate { .. })
+        // additionally require the variant tag matches the init slot.
+        || std::mem::discriminant(state) != std::mem::discriminant(&init);
+    if needs_rewrite {
+        *state = init;
+        return None;
+    }
+    let (phase, last_target) = match state {
+        TransformState::Vibrate { phase, last_target }
+        | TransformState::Oscillate { phase, last_target } => (phase, last_target),
+        _ => unreachable!("matches! guard above ensures Vibrate or Oscillate"),
+    };
+    let dt_ms = if *last_target == 0 {
+        0
+    } else {
+        target_ts.saturating_sub(*last_target)
+    };
+    *last_target = target_ts;
+    Some((phase, dt_ms))
+}
 
 /// Sinusoidal wobble around `value`. `modifiers[0]` is the speed input
 /// (typically the resolver's read of `bp:Vibrate_<i>` at `target_ts`)
@@ -35,23 +73,16 @@ pub fn apply_vibrate(
     target_ts: u64,
 ) -> f64 {
     let speed = modifiers.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
-    let TransformState::Vibrate { phase, last_target } = state else {
-        // Mismatched slot: rewrite and pass through this tick. Sub E's
-        // resolver init should guarantee the right slot, so reaching
-        // this branch indicates a bug — but a panic here would kill
-        // the device tick mid-stream.
-        *state = TransformState::Vibrate {
+    let Some((phase, dt_ms)) = step_phase_state(
+        state,
+        target_ts,
+        TransformState::Vibrate {
             phase: 0.0,
             last_target: target_ts,
-        };
+        },
+    ) else {
         return value;
     };
-    let dt_ms = if *last_target == 0 {
-        0
-    } else {
-        target_ts.saturating_sub(*last_target)
-    };
-    *last_target = target_ts;
     let freq_hz = speed * 20.0;
     *phase += freq_hz * (dt_ms as f64 / 1000.0) * 2.0 * PI;
     let offset = phase.sin() * distance;
@@ -77,19 +108,16 @@ pub fn apply_oscillate(
     target_ts: u64,
 ) -> f64 {
     let speed = modifiers.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
-    let TransformState::Oscillate { phase, last_target } = state else {
-        *state = TransformState::Oscillate {
+    let Some((phase, dt_ms)) = step_phase_state(
+        state,
+        target_ts,
+        TransformState::Oscillate {
             phase: 0.0,
             last_target: target_ts,
-        };
+        },
+    ) else {
         return value;
     };
-    let dt_ms = if *last_target == 0 {
-        0
-    } else {
-        target_ts.saturating_sub(*last_target)
-    };
-    *last_target = target_ts;
     let freq_hz = speed * max_speed_hz;
     *phase += freq_hz * (dt_ms as f64 / 1000.0);
 
@@ -132,11 +160,6 @@ pub fn apply_constrict(
         }
         ConstrictionMethod::Clamp => value.clamp(min_bound, max_bound),
     }
-}
-
-#[inline]
-fn lerp(a: f64, b: f64, t: f64) -> f64 {
-    a + (b - a) * t
 }
 
 #[cfg(test)]
@@ -198,7 +221,13 @@ mod tests {
     }
 
     #[test]
-    fn oscillate_passes_through_on_first_call() {
+    fn oscillate_first_call_lands_at_phase_zero_trough() {
+        // The triangle wave's value at phase 0 is the trough, so even
+        // with dt=0 (no phase advance) the offset = (0-0.5)*2*scale =
+        // -scale. This is intentional: phase 0 is the start of the
+        // sweep cycle, not a "pass-through" identity. Vibrate's sin(0)
+        // = 0 gives identity on the first call; Oscillate's triangle(0)
+        // = 0 does not. Document the asymmetry rather than mask it.
         let cfg = TransformConfig::Oscillate {
             speed_axis: "bp:Oscillate_0".into(),
             scale: 0.4,
@@ -206,10 +235,6 @@ mod tests {
         };
         let mut state = cfg.initial_state();
         let out = apply_transform(&cfg, &mut state, 0.5, &[1.0], 1_000);
-        // dt=0 → phase=0 → triangle=0 → offset = (0-0.5)*2*0.4 = -0.4.
-        // First call still sees the offset because the triangle wave's
-        // value at phase=0 is the trough. Document both outcomes the
-        // tests want to pin.
         assert!(
             (out - 0.1).abs() < 1e-9,
             "oscillate at phase 0 should land at value-scale, got {}",
