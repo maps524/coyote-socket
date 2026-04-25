@@ -5,6 +5,7 @@
   import { Activity, Radio, Zap, MapPin, RotateCw, MoveHorizontal, Minimize2 } from 'lucide-svelte';
   import { currentInputSource, updateButtplugFeatures } from '$lib/stores/inputSource';
   import { refreshConnectionStatus } from '$lib/stores/stateSync';
+  import { gamepadStatus } from '$lib/stores/gamepadStatus';
   import SynthWaveformChart from './SynthWaveformChart.svelte';
   import WaveformChart from './WaveformChart.svelte';
 
@@ -62,6 +63,22 @@
   // Display state for T-Code axes - populated dynamically from received commands
   let tcodeAxes: TCodeAxisValue[] = [];
 
+  // Display lists derived from latestTcodeAxes: gamepad axes (GP_* prefix)
+  // and network T-Code axes (everything else). Recomputed in the RAF tick.
+  let networkAxes: TCodeAxisValue[] = [];
+  let gamepadAxes: TCodeAxisValue[] = [];
+
+  // Sticky key sets — the union of every key we've seen for each source while
+  // the current protocol session has been alive. Used so that an explicit Stop
+  // (which empties the live map) still renders bars at 0 instead of collapsing
+  // the section to a placeholder. Reset when the protocol disconnects.
+  let knownNetworkAxisKeys: string[] = [];
+  let knownButtplugFeatureKeys: string[] = [];
+
+  function isGamepadKey(k: string): boolean {
+    return k.startsWith('GP_');
+  }
+
   // Buttplug features - populated dynamically from backend
   let buttplugFeatures: ButtplugFeatureDisplay[] = [];
 
@@ -86,22 +103,46 @@
   // Subscribe to input source to detect changes
   $: inputSource = $currentInputSource;
 
+  // Clear sticky key sets when the relevant protocol drops, so an old session's
+  // keys don't carry over after a disconnect/reconnect to a different sender.
+  $: if (inputSource !== 'tcode') {
+    knownNetworkAxisKeys = [];
+  }
+  $: if (inputSource !== 'buttplug' && inputSource !== 'lovense') {
+    knownButtplugFeatureKeys = [];
+  }
+
   function rafTick() {
     if (tcodeDirty) {
-      tcodeAxes = Object.entries(latestTcodeAxes)
+      // Add any new keys to the sticky set, then render the union with the
+      // latest values (defaulting absent keys to 0).
+      for (const k of Object.keys(latestTcodeAxes)) {
+        if (!isGamepadKey(k) && !knownNetworkAxisKeys.includes(k)) {
+          knownNetworkAxisKeys = [...knownNetworkAxisKeys, k].sort((a, b) => a.localeCompare(b));
+        }
+      }
+      networkAxes = knownNetworkAxisKeys.map(axis => ({
+        axis,
+        value: latestTcodeAxes[axis] ?? 0,
+      }));
+      gamepadAxes = Object.entries(latestTcodeAxes)
+        .filter(([k]) => isGamepadKey(k))
         .map(([axis, value]) => ({ axis, value }))
         .sort((a, b) => a.axis.localeCompare(b.axis));
       tcodeDirty = false;
     }
     if (buttplugDirty) {
-      buttplugFeatures = Object.entries(latestButtplugFeatures)
-        .map(([key, value]) => {
-          const parts = key.split('_');
-          const featureType = parts[0] || key;
-          const index = parseInt(parts[1] || '0', 10);
-          return { key, featureType, index, value };
-        })
-        .sort((a, b) => a.key.localeCompare(b.key));
+      for (const k of Object.keys(latestButtplugFeatures)) {
+        if (!knownButtplugFeatureKeys.includes(k)) {
+          knownButtplugFeatureKeys = [...knownButtplugFeatureKeys, k].sort((a, b) => a.localeCompare(b));
+        }
+      }
+      buttplugFeatures = knownButtplugFeatureKeys.map(key => {
+        const parts = key.split('_');
+        const featureType = parts[0] || key;
+        const index = parseInt(parts[1] || '0', 10);
+        return { key, featureType, index, value: latestButtplugFeatures[key] ?? 0 };
+      });
       updateButtplugFeatures(buttplugFeatures.map(f => ({
         featureType: f.featureType,
         featureIndex: f.index,
@@ -118,8 +159,11 @@
       const { axes } = event.payload;
       latestTcodeAxes = axes;
       tcodeDirty = true;
-      if (Object.keys(axes).length > 0) {
-        isInputConnected = true;
+      for (const k of Object.keys(axes)) {
+        if (!isGamepadKey(k)) {
+          isInputConnected = true;
+          break;
+        }
       }
     });
 
@@ -204,15 +248,50 @@
 
   <!-- Input & Output Side by Side -->
   <div class="grid grid-cols-2 divide-x divide-border">
-    <!-- INPUT Section -->
-    <div class="p-3 flex flex-col">
-      <div class="text-[10px] text-muted-foreground mb-2 font-medium">INPUT (Target)</div>
+    <!-- INPUT Section.
+         Each input source renders independently — gamepad, network T-Code,
+         and Buttplug/Lovense can all be live at the same time and are shown
+         in their own sub-sections. A "waiting" placeholder fills in only
+         when nothing is contributing. -->
+    <div class="p-3 flex flex-col gap-2">
+      <div class="text-[10px] text-muted-foreground font-medium">INPUT (Target)</div>
 
-      {#if inputSource === 'tcode'}
-        <!-- T-Code Mode: Show axis values in 2 columns -->
-        {#if tcodeAxes.length > 0}
+      {#if !$gamepadStatus.connected && inputSource === 'none'}
+        <div class="flex-1 flex items-center justify-center text-muted-foreground text-[10px]">
+          Waiting for input...
+        </div>
+      {/if}
+
+      <!-- Gamepad sub-section (independent of network input). Renders whenever
+           a controller is connected, since axes report center even when idle. -->
+      {#if $gamepadStatus.connected && gamepadAxes.length > 0}
+        <div class="space-y-1">
+          <div class="text-[9px] uppercase tracking-wider text-muted-foreground/70">Gamepad</div>
           <div class="grid grid-cols-2 gap-1 font-mono text-[10px]">
-            {#each tcodeAxes as axis (axis.axis)}
+            {#each gamepadAxes as axis (axis.axis)}
+              <div class="relative h-4 bg-muted rounded-sm overflow-hidden">
+                <div
+                  class="absolute inset-y-0 left-0 bg-emerald-500/40"
+                  style="width: {getProgressPercent(axis.value)}%"
+                />
+                <div class="absolute inset-0 flex items-center justify-between px-1.5">
+                  <span class="font-medium text-foreground">{axis.axis.replace('GP_', '')}</span>
+                  <span class="text-foreground/80">{Math.round(axis.value * 100)}</span>
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
+      <!-- Network T-Code sub-section. Renders last-known positions for as long
+           as the protocol is detected as T-Code; the connection drop event
+           clears `inputSource` back to 'none' which hides this. -->
+      {#if inputSource === 'tcode' && networkAxes.length > 0}
+        <div class="space-y-1">
+          <div class="text-[9px] uppercase tracking-wider text-muted-foreground/70">T-Code</div>
+          <div class="grid grid-cols-2 gap-1 font-mono text-[10px]">
+            {#each networkAxes as axis (axis.axis)}
               <div class="relative h-4 bg-muted rounded-sm overflow-hidden">
                 <div
                   class="absolute inset-y-0 left-0 bg-primary/50"
@@ -225,14 +304,18 @@
               </div>
             {/each}
           </div>
-        {:else}
-          <div class="flex-1 flex items-center justify-center text-muted-foreground text-[10px]">
-            Waiting for T-Code...
+        </div>
+      {/if}
+
+      <!-- Buttplug / Lovense sub-section (shared feature map). Stays visible
+           for the lifetime of the protocol detection — a Stop command (which
+           empties the feature map) shouldn't make the section disappear, only
+           a real disconnect should. -->
+      {#if (inputSource === 'buttplug' || inputSource === 'lovense') && buttplugFeatures.length > 0}
+        <div class="space-y-1">
+          <div class="text-[9px] uppercase tracking-wider text-muted-foreground/70">
+            {inputSource === 'lovense' ? 'Lovense' : 'Buttplug'}
           </div>
-        {/if}
-      {:else if inputSource === 'buttplug' || inputSource === 'lovense'}
-        <!-- Buttplug Mode (also Lovense, which writes into the same feature map) -->
-        {#if buttplugFeatures.length > 0}
           <div class="grid grid-cols-2 gap-1 font-mono text-[10px]">
             {#each buttplugFeatures as feature (feature.key)}
               <div class="relative h-4 bg-muted rounded-sm overflow-hidden">
@@ -250,15 +333,6 @@
               </div>
             {/each}
           </div>
-        {:else}
-          <div class="flex-1 flex items-center justify-center text-muted-foreground text-[10px]">
-            Waiting for {inputSource === 'lovense' ? 'Lovense' : 'Buttplug'}...
-          </div>
-        {/if}
-      {:else}
-        <!-- No input connected -->
-        <div class="flex-1 flex items-center justify-center text-muted-foreground text-[10px]">
-          Waiting for input connection...
         </div>
       {/if}
     </div>

@@ -883,6 +883,13 @@ async fn set_gamepad_engine(engine: String) -> Result<String, String> {
     Ok(format!("Gamepad engine set to {}", parsed.as_str()))
 }
 
+/// Return the current gamepad connection snapshot. Used by the frontend on
+/// mount / HMR to seed the status pill before any change event arrives.
+#[tauri::command]
+async fn get_gamepad_status() -> Result<gamepad::GamepadStatusPayload, String> {
+    Ok(gamepad::current_status())
+}
+
 #[tauri::command]
 async fn save_general_settings(
     no_input_behavior: String,
@@ -1330,6 +1337,7 @@ fn main() {
             save_gamepad_bindings,
             get_gamepad_bindings,
             set_gamepad_engine,
+            get_gamepad_status,
             set_gamepad_stick_sensitivity,
             set_gamepad_button_repeat,
             save_general_settings,

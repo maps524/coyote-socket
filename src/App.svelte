@@ -8,6 +8,8 @@
   import ConnectionPanel from './lib/components/ConnectionPanel.svelte';
   import BluetoothPanel, { type BluetoothPanelState, type BluetoothDevice } from './lib/components/BluetoothPanel.svelte';
   import InputStatusPill from './lib/components/InputStatusPill.svelte';
+  import GamepadStatusPill from './lib/components/GamepadStatusPill.svelte';
+  import { startGamepadStatusSync, stopGamepadStatusSync } from '$lib/stores/gamepadStatus';
   import OutputStatusPill from './lib/components/OutputStatusPill.svelte';
   import ChannelControl from './lib/components/ChannelControl.svelte';
   import InputMonitor from './lib/components/InputMonitor.svelte';
@@ -299,6 +301,8 @@
     // FIRST: Start state sync and get live connection state immediately
     // This ensures connection status is shown without delay after HMR
     await startStateSync();
+    // Gamepad connect/disconnect feed for the nav status pill
+    await startGamepadStatusSync();
     try {
       const liveState = await getFullState();
       console.log('[StateSync] Live state from backend:', liveState);
@@ -600,6 +604,7 @@
     stopInputTracking();
     // Stop state sync event listeners
     stopStateSync();
+    stopGamepadStatusSync();
     // Clear output pause event listener
     if (unlistenOutputPause) unlistenOutputPause();
     // Clear all update timers (50ms)
@@ -1453,6 +1458,9 @@
         </div>
 
         <div class="flex items-center gap-2">
+          <!-- Gamepad connection status (icon-only) -->
+          <GamepadStatusPill />
+
           <!-- Input Status Pill with Popover -->
           <InputStatusPill
             bind:this={inputPill}

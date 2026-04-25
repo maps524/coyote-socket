@@ -16,7 +16,8 @@ use crate::settings::{AxisDir, ChordPart, GamepadBinding, GamepadBindings};
 use crate::{get_app_handle, log_info, log_warn};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, RwLock as StdRwLock};
 use tauri::async_runtime::JoinHandle;
 use tauri::Emitter;
 use tokio::sync::{Mutex, RwLock};
@@ -109,6 +110,87 @@ enum GamepadRawPayload {
 const REBIND_AXIS_THRESHOLD: f64 = 0.5;
 
 // ---------------------------------------------------------------------------
+// Connection tracking
+//
+// Tracks how many gamepads the active engine sees, and pushes a Tauri event
+// whenever that changes. Used by the frontend to gate the T-Code monitor and
+// drive the gamepad status pill in the nav.
+// ---------------------------------------------------------------------------
+
+static CONNECTED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static CONNECTED_FLAG: AtomicBool = AtomicBool::new(false);
+static ACTIVE_ENGINE_NAME: OnceLock<StdRwLock<String>> = OnceLock::new();
+
+#[derive(Clone, Serialize)]
+pub struct GamepadStatusPayload {
+    pub connected: bool,
+    pub count: usize,
+    pub engine: String,
+}
+
+fn engine_lock() -> &'static StdRwLock<String> {
+    ACTIVE_ENGINE_NAME.get_or_init(|| StdRwLock::new("off".to_string()))
+}
+
+fn current_engine_name() -> String {
+    engine_lock()
+        .read()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| "off".to_string())
+}
+
+fn set_active_engine_name(name: &str) {
+    if let Ok(mut guard) = engine_lock().write() {
+        *guard = name.to_string();
+    }
+}
+
+/// Snapshot of the live status — used by the `get_gamepad_status` command for
+/// HMR refresh and by the in-process emitter below.
+pub fn current_status() -> GamepadStatusPayload {
+    GamepadStatusPayload {
+        connected: CONNECTED_FLAG.load(Ordering::Relaxed),
+        count: CONNECTED_COUNT.load(Ordering::Relaxed),
+        engine: current_engine_name(),
+    }
+}
+
+fn emit_status(payload: &GamepadStatusPayload) {
+    if let Some(handle) = get_app_handle() {
+        let _ = handle.emit("gamepad-status", payload.clone());
+    }
+}
+
+/// Set the absolute connected-gamepad count for the active engine and emit if
+/// the connected/disconnected boundary or the count changed. Engines call this
+/// whenever their internal "user X is connected" state mutates.
+fn update_connected_count(new_count: usize) {
+    let was = CONNECTED_COUNT.swap(new_count, Ordering::Relaxed);
+    let was_connected = CONNECTED_FLAG.load(Ordering::Relaxed);
+    let now_connected = new_count > 0;
+    if was_connected != now_connected {
+        CONNECTED_FLAG.store(now_connected, Ordering::Relaxed);
+    }
+    if was != new_count || was_connected != now_connected {
+        let payload = current_status();
+        log_info!(
+            "[gamepad] status changed: engine={} connected={} count={}",
+            payload.engine,
+            payload.connected,
+            payload.count
+        );
+        emit_status(&payload);
+    }
+}
+
+fn reset_connection_state() {
+    CONNECTED_COUNT.store(0, Ordering::Relaxed);
+    CONNECTED_FLAG.store(false, Ordering::Relaxed);
+    let payload = current_status();
+    emit_status(&payload);
+}
+
+// ---------------------------------------------------------------------------
 // Engine selection
 // ---------------------------------------------------------------------------
 
@@ -151,6 +233,12 @@ pub async fn set_engine(engine: GamepadEngine) {
         eprintln!("[gamepad] aborting previous engine task");
         task.abort();
     }
+
+    // Engine swap invalidates any prior connection state — the new engine has
+    // not enumerated devices yet. Reset to disconnected so the UI flips off
+    // immediately, then the engine loop will re-emit on first detection.
+    set_active_engine_name(engine.as_str());
+    reset_connection_state();
 
     let handle = match engine {
         GamepadEngine::Off => {
@@ -493,6 +581,13 @@ fn compute_locked_axes(active: &GamepadActive, bindings: &GamepadBindings) -> Ha
 async fn feed_gamepad_axes_to_processing() {
     use crate::processing::{get_processing_state, TCodeCommand};
 
+    // No connected gamepad → don't synthesize stick-centered T-Code commands
+    // every tick. Channel intensity bars still update from the device 10 Hz
+    // loop, so dropping these is purely a noise reduction.
+    if !CONNECTED_FLAG.load(Ordering::Relaxed) {
+        return;
+    }
+
     let active_cell = match ACTIVE_STATE.get() {
         Some(a) => a,
         None => return,
@@ -757,13 +852,9 @@ async fn gilrs_loop() {
         }
     };
 
-    let count = gilrs.gamepads().count();
-    eprintln!(
-        "[gamepad/gilrs] initialized, {} gamepad(s) detected at startup",
-        count
-    );
-    log_info!("[gamepad/gilrs] initialized, {} gamepad(s)", count);
+    let mut connected_ids: HashSet<gilrs::GamepadId> = HashSet::new();
     for (id, pad) in gilrs.gamepads() {
+        connected_ids.insert(id);
         eprintln!(
             "[gamepad/gilrs] {:?}: name='{}' uuid={:?}",
             id,
@@ -771,6 +862,13 @@ async fn gilrs_loop() {
             pad.uuid()
         );
     }
+    let startup_count = connected_ids.len();
+    eprintln!(
+        "[gamepad/gilrs] initialized, {} gamepad(s) detected at startup",
+        startup_count
+    );
+    log_info!("[gamepad/gilrs] initialized, {} gamepad(s)", startup_count);
+    update_connected_count(startup_count);
 
     let mut axis_state: HashMap<(usize, u8), f32> = HashMap::new();
     let mut last_rate_tick = std::time::Instant::now();
@@ -805,9 +903,17 @@ async fn gilrs_loop() {
                 }
                 EventType::Connected => {
                     eprintln!("[gamepad/gilrs] Connected: {:?}", event.id);
+                    log_info!("[gamepad/gilrs] connected: {:?}", event.id);
+                    if connected_ids.insert(event.id) {
+                        update_connected_count(connected_ids.len());
+                    }
                 }
                 EventType::Disconnected => {
                     eprintln!("[gamepad/gilrs] Disconnected: {:?}", event.id);
+                    log_info!("[gamepad/gilrs] disconnected: {:?}", event.id);
+                    if connected_ids.remove(&event.id) {
+                        update_connected_count(connected_ids.len());
+                    }
                 }
                 _ => {}
             }
@@ -908,9 +1014,12 @@ async fn xinput_loop() {
                 Err(XInputUsageError::DeviceNotConnected) => {
                     if connected_seen[user_index as usize] {
                         eprintln!("[gamepad/xinput] user {} disconnected", user_index);
+                        log_info!("[gamepad/xinput] user {} disconnected", user_index);
                         connected_seen[user_index as usize] = false;
                         prev_buttons[user_index as usize] = 0;
                         prev_axes[user_index as usize] = [0.0; 6];
+                        let live = connected_seen.iter().filter(|c| **c).count();
+                        update_connected_count(live);
                     }
                     continue;
                 }
@@ -924,6 +1033,8 @@ async fn xinput_loop() {
                 eprintln!("[gamepad/xinput] user {} connected", user_index);
                 log_info!("[gamepad/xinput] user {} connected", user_index);
                 connected_seen[user_index as usize] = true;
+                let live = connected_seen.iter().filter(|c| **c).count();
+                update_connected_count(live);
             }
 
             let raw = state.raw.Gamepad;
