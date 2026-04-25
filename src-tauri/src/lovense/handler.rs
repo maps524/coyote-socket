@@ -649,7 +649,7 @@ pub async fn handle_http_connection(mut stream: TcpStream, addr: SocketAddr) {
         let preview: String = body_str.chars().take(300).collect();
         eprintln!("[lovense] POST {} from {} body={}", request.path, addr, preview);
         crate::log_info!("Lovense POST {} from {}: {}", request.path, addr, preview);
-        crate::websocket::set_detected_protocol(crate::websocket::InputProtocol::Lovense).await;
+        crate::net::set_detected_protocol(crate::net::InputProtocol::Lovense).await;
         let reply = dispatch_command(body_str).await;
         let reply_preview = serde_json::to_string(&reply).unwrap_or_default();
         let reply_short: String = reply_preview.chars().take(200).collect();

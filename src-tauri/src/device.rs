@@ -9,7 +9,7 @@ use crate::protocol::{
     generate_bf_command, generate_v2_intensity, generate_v2_waveform,
 };
 use crate::waveform::WaveformSample;
-use crate::websocket::{get_next_waveform_data, get_resolved_channel_params};
+use crate::resolver::{get_next_waveform_data, get_resolved_channel_params};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -291,7 +291,7 @@ async fn send_device_update() -> Result<(), String> {
         .as_millis() as u64
         - 100;
     let (freq_slots_a_hz, freq_slots_b_hz) =
-        crate::websocket::get_per_slot_frequencies(window_start_ms).await;
+        crate::resolver::get_per_slot_frequencies(window_start_ms).await;
 
     // V2 path uses the scalar `params_a/b.frequency` directly via
     // `freq_to_v2_xy`; V3 uses the per-slot arrays computed above. No need

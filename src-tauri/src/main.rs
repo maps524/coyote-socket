@@ -14,12 +14,14 @@ mod gamepad;
 mod logging;
 mod lovense;
 mod modulation;
+mod net;
 mod processing;
 mod protocol;
+mod resolver;
 mod settings;
 pub(crate) mod settings_convert;
+mod tcode_input;
 mod waveform;
-mod websocket;
 
 // Global AppHandle for emitting events from anywhere
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -235,10 +237,8 @@ use settings::{
     AppSettings, BluetoothSettings, ChannelPreset, ChannelSettings as SettingsChannelSettings,
     ConnectionSettings, GamepadBindings, GeneralSettings, KeyboardShortcuts, OutputSettings,
 };
-use websocket::{
-    apply_saved_settings_to_processing, get_current_intensities, is_server_running,
-    set_output_options, start_server, stop_server,
-};
+use net::{is_server_running, set_output_options, start_server, stop_server};
+use resolver::get_current_intensities;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BluetoothDevice {
@@ -354,7 +354,7 @@ async fn get_channel_intensities() -> Result<(f64, f64), String> {
 
 #[tauri::command]
 async fn get_axis_values() -> Result<HashMap<String, f64>, String> {
-    use crate::websocket::get_axis_values_from_processing;
+    use crate::resolver::get_axis_values_from_processing;
     Ok(get_axis_values_from_processing().await)
 }
 
@@ -481,7 +481,7 @@ async fn get_device_output() -> Result<DeviceOutput, String> {
 /// Get current connection status for both WebSocket and Bluetooth
 #[tauri::command]
 async fn get_connection_status() -> Result<ConnectionStatus, String> {
-    use crate::websocket::get_detected_protocol;
+    use crate::net::get_detected_protocol;
 
     let ws_running = is_server_running().await;
     let detected_protocol = get_detected_protocol().await.as_str().to_string();
@@ -661,6 +661,43 @@ fn derive_hmr_channel_params(s: &SettingsChannelSettings) -> ChannelParams {
 async fn sync_settings_to_state(settings: &AppSettings) {
     apply_channel_config_to_state(processing::ChannelId::A, &settings.channel_a).await;
     apply_channel_config_to_state(processing::ChannelId::B, &settings.channel_b).await;
+}
+
+/// Apply saved settings to the running ProcessingState. Called from
+/// `start_websocket_server` so a fresh start picks up the persisted
+/// no-input behavior, decay, channel configs, and output options.
+///
+/// Lifted out of `websocket.rs` (the file no longer exists) since this
+/// function is settings-load glue, not WS-server logic.
+async fn apply_saved_settings_to_processing() {
+    use crate::modulation::NoInputBehavior;
+
+    let all_settings = settings::get_settings().await;
+    let saved = all_settings.general;
+
+    let behavior = match saved.no_input_behavior.as_str() {
+        "hold" => NoInputBehavior::Hold,
+        "default" => NoInputBehavior::Default,
+        "decay" => NoInputBehavior::Decay,
+        "zero" => NoInputBehavior::Zero,
+        _ => NoInputBehavior::Hold,
+    };
+
+    let channel_a_config =
+        crate::settings_convert::convert_channel_settings(&all_settings.channel_a);
+    let channel_b_config =
+        crate::settings_convert::convert_channel_settings(&all_settings.channel_b);
+
+    let state = processing::get_processing_state().await;
+    let mut state_guard = state.write().await;
+    state_guard.no_input_behavior = behavior;
+    state_guard.no_input_decay_ms = saved.no_input_decay_ms;
+    state_guard.channel_mut(processing::ChannelId::A).config = channel_a_config;
+    state_guard.channel_mut(processing::ChannelId::B).config = channel_b_config;
+
+    // Restore output options so engine + peak_fill variant survive restart.
+    state_guard.options.processing_engine = all_settings.output.processing_engine;
+    state_guard.options.peak_fill = all_settings.output.peak_fill;
 }
 
 #[tauri::command]
