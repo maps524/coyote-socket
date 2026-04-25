@@ -1243,6 +1243,25 @@ fn main() {
 
             // Store the AppHandle for global event emission
             set_app_handle(app.handle().clone());
+
+            // DEV_URL override: when set (e.g. http://localhost:1421), redirect
+            // config-created windows to the Vite dev server. Allows release
+            // builds run under the dev-server skill's shadow-copy hot-swap to
+            // pick up frontend HMR without re-bundling assets.
+            if let Ok(dev_url) = std::env::var("DEV_URL") {
+                let base = dev_url.trim_end_matches('/').to_string();
+                log_info!("DEV_URL override active: {}", base);
+                if let Some(main) = app.get_webview_window("main") {
+                    if let Ok(url) = base.parse::<tauri::Url>() {
+                        let _ = main.navigate(url);
+                    }
+                }
+                if let Some(splash) = app.get_webview_window("splashscreen") {
+                    if let Ok(url) = format!("{}/splashscreen.html", base).parse::<tauri::Url>() {
+                        let _ = splash.navigate(url);
+                    }
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

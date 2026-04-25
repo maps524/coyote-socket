@@ -1,0 +1,23 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dev-server",
+  "description": "Grants the Vite dev server origin (DEV_URL) the same IPC access as the embedded frontend. Only matches when the webview is loaded from http://localhost:1421 — release builds load from tauri://localhost and never hit this capability, so production permissions are unchanged.",
+  "windows": ["main", "splashscreen"],
+  "remote": {
+    "urls": ["http://localhost:1421"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-size",
+    "core:window:allow-set-min-size",
+    "core:window:allow-inner-size",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}
