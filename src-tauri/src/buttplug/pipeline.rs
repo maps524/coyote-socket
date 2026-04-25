@@ -1,7 +1,6 @@
 use super::state::{ButtplugChannelState, ButtplugFeatureValues};
 use super::types::{ButtplugLinkConfig, ConstrictionMethod};
 use std::f64::consts::PI;
-use std::time::Instant;
 
 /// Process the Buttplug feature pipeline for a single channel parameter
 ///
@@ -15,7 +14,7 @@ use std::time::Instant;
 /// * `state` - Mutable channel state (position, phases, interpolation)
 /// * `features` - Current feature values from Buttplug client
 /// * `config` - Link configuration (which features affect this parameter)
-/// * `now` - Current timestamp for interpolation
+/// * `now_ms` - Current timestamp in wall-clock milliseconds
 /// * `dt_ms` - Delta time since last tick (milliseconds)
 ///
 /// # Returns
@@ -24,7 +23,7 @@ pub fn process_buttplug_pipeline(
     state: &mut ButtplugChannelState,
     features: &ButtplugFeatureValues,
     config: &ButtplugLinkConfig,
-    now: Instant,
+    now_ms: u64,
     dt_ms: u32,
 ) -> f64 {
     let mut value: f64;
@@ -38,13 +37,18 @@ pub fn process_buttplug_pipeline(
 
     // PositionWithDuration: Check for new LinearCmd with duration
     let new_pos_dur = features.get_new_position_with_duration(config.pos_dur_feature);
-    if let Some((target, duration, arrival_time)) = new_pos_dur {
-        println!("[Pipeline] New PositionWithDuration: target={:.3}, duration={}ms, start_pos={:.3}, arrived={:?}ms ago",
-            target, duration, state.base_position, now.duration_since(arrival_time).as_millis());
+    if let Some((target, duration, arrival_ms)) = new_pos_dur {
+        println!(
+            "[Pipeline] New PositionWithDuration: target={:.3}, duration={}ms, start_pos={:.3}, arrived={}ms ago",
+            target,
+            duration,
+            state.base_position,
+            now_ms.saturating_sub(arrival_ms)
+        );
         // New command received - start interpolation using arrival time as start
         // This ensures smooth interpolation even when commands arrive faster than tick rate
         state.pos_dur_state = Some(super::state::PositionDurationState {
-            start_time: arrival_time,
+            start_time: arrival_ms,
             start_position: state.base_position,
             target_position: target,
             duration_ms: duration,
@@ -53,8 +57,8 @@ pub fn process_buttplug_pipeline(
 
     // Process ongoing interpolation
     if let Some(ref pds) = state.pos_dur_state {
-        let elapsed_ms = now.duration_since(pds.start_time).as_millis() as f64;
-        let progress = (elapsed_ms / pds.duration_ms as f64).min(1.0);
+        let elapsed_ms = now_ms.saturating_sub(pds.start_time) as f64;
+        let progress = (elapsed_ms / pds.duration_ms.max(1) as f64).min(1.0);
         state.base_position = lerp(pds.start_position, pds.target_position, progress);
 
         // Clear interpolation state when complete
@@ -72,8 +76,8 @@ pub fn process_buttplug_pipeline(
     // DEBUG: Show position state
     let pos_dur_val = features.get_position_with_duration_value(config.pos_dur_feature);
     let interp_progress = state.pos_dur_state.as_ref().map(|pds| {
-        let elapsed = now.duration_since(pds.start_time).as_millis() as f64;
-        (elapsed / pds.duration_ms as f64).min(1.0) * 100.0
+        let elapsed = now_ms.saturating_sub(pds.start_time) as f64;
+        (elapsed / pds.duration_ms.max(1) as f64).min(1.0) * 100.0
     });
     println!("[Pipeline] pos_dur_feature={:?}, new_cmd={}, interp_progress={:?}%, pos_dur_val={:?}, base_pos={:.3}",
         config.pos_dur_feature, new_pos_dur.is_some(), interp_progress, pos_dur_val, state.base_position);
@@ -203,8 +207,7 @@ mod tests {
             ..Default::default()
         };
 
-        let now = Instant::now();
-        let output = process_buttplug_pipeline(&mut state, &features, &config, now, 100);
+        let output = process_buttplug_pipeline(&mut state, &features, &config, 1_000, 100);
 
         assert_eq!(output, 0.7);
         assert_eq!(state.base_position, 0.7);
@@ -227,8 +230,7 @@ mod tests {
             ..Default::default()
         };
 
-        let now = Instant::now();
-        let output = process_buttplug_pipeline(&mut state, &features, &config, now, 100);
+        let output = process_buttplug_pipeline(&mut state, &features, &config, 1_000, 100);
 
         // Output should be 0.5 ± 0.2 depending on phase
         assert!(output >= 0.3 && output <= 0.7);
@@ -254,11 +256,9 @@ mod tests {
             ..Default::default()
         };
 
-        let now = Instant::now();
-
         // Start at base_position = 0.5
         state.base_position = 0.5;
-        let output = process_buttplug_pipeline(&mut state, &features, &config, now, 100);
+        let output = process_buttplug_pipeline(&mut state, &features, &config, 1_000, 100);
 
         // With constriction=0.5, min_floor=0.0:
         // effective = lerp(1.0, 0.0, 0.5) = 0.5 (50% of full range)
@@ -287,11 +287,10 @@ mod tests {
             ..Default::default()
         };
 
-        let now = Instant::now();
-        let output1 = process_buttplug_pipeline(&mut state, &features, &config, now, 100);
+        let output1 = process_buttplug_pipeline(&mut state, &features, &config, 1_000, 100);
 
         // Run again to advance phase
-        let output2 = process_buttplug_pipeline(&mut state, &features, &config, now, 100);
+        let output2 = process_buttplug_pipeline(&mut state, &features, &config, 1_100, 100);
 
         // Outputs should differ as phase advances
         assert_ne!(output1, output2);

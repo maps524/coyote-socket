@@ -1,14 +1,17 @@
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+
+use crate::input_bus::InputBus;
 
 /// State for smooth position interpolation (PositionWithDuration)
 ///
-/// Tracks an ongoing movement from start_position to target_position over duration_ms.
-/// New commands overwrite in-progress movements.
+/// Tracks an ongoing movement from start_position to target_position over
+/// duration_ms. New commands overwrite in-progress movements. `start_time`
+/// is wall-clock milliseconds (matches `current_time_ms()` / `InputBus`
+/// sample timestamps) so interpolation math reads as `now_ms - start_time`.
 #[derive(Debug, Clone)]
 pub struct PositionDurationState {
-    /// When the movement started
-    pub start_time: Instant,
+    /// When the movement started (wall-clock ms)
+    pub start_time: u64,
     /// Position when movement began
     pub start_position: f64,
     /// Target position to reach
@@ -66,11 +69,13 @@ pub struct ButtplugFeatureValues {
     /// Position feature values (index → value 0.0-1.0)
     pub position: Vec<f64>,
 
-    /// PositionWithDuration commands (index → (position, duration_ms, arrival_time))
-    /// This is a "new command" buffer that gets cleared after processing
-    /// Skipped from serialization because Instant can't be serialized
+    /// "New LinearCmd since last tick" buffer keyed by feature index. Each
+    /// slot is `Some((position, duration_ms, arrival_ms))` when a new
+    /// LinearCmd arrived after the channel's `last_buttplug_replay_ts`
+    /// watermark, `None` otherwise. Skipped from serialization — the buffer
+    /// is rebuilt fresh from bus state at every tick, never persisted.
     #[serde(skip)]
-    pub position_with_duration: Vec<Option<(f64, u32, std::time::Instant)>>,
+    pub position_with_duration: Vec<Option<(f64, u32, u64)>>,
 
     /// PositionWithDuration current values (index → position 0.0-1.0)
     /// Persists between ticks - used when no new LinearCmd is available
@@ -96,11 +101,11 @@ impl ButtplugFeatureValues {
     }
 
     /// Get new PositionWithDuration command for a feature index
-    /// Returns (position, duration_ms, arrival_time) if a new command is available
+    /// Returns (position, duration_ms, arrival_ms) if a new command is available
     pub fn get_new_position_with_duration(
         &self,
         index: Option<usize>,
-    ) -> Option<(f64, u32, std::time::Instant)> {
+    ) -> Option<(f64, u32, u64)> {
         index.and_then(|i| self.position_with_duration.get(i).and_then(|&cmd| cmd))
     }
 
@@ -131,80 +136,64 @@ impl ButtplugFeatureValues {
         index.and_then(|i| self.constrict.get(i).copied())
     }
 
-    /// Clear new command buffers (called after processing each tick)
-    pub fn clear_new_commands(&mut self) {
-        self.position_with_duration
-            .iter_mut()
-            .for_each(|cmd| *cmd = None);
-    }
-
-    /// Create ButtplugFeatureValues from a HashMap of feature keys
+    /// Build a snapshot from the current `InputBus` state.
     ///
-    /// Keys are expected to be in the format "{FeatureType}_{Index}", e.g.:
-    /// - "Vibrate_0", "Vibrate_1"
-    /// - "Position_0"
-    /// - "Oscillate_0"
-    /// - "Constrict_0"
-    /// - "Rotate_0"
-    ///
-    /// The linear_commands map should contain PositionWithDuration (LinearCmd) values
-    /// as (position, duration_ms, arrival_time) tuples indexed by feature index.
-    pub fn from_hashmap(
-        features: &std::collections::HashMap<String, f64>,
-        linear_commands: &std::collections::HashMap<usize, (f64, u32, std::time::Instant)>,
-        rotate_directions: &std::collections::HashMap<usize, bool>,
-        max_features: usize,
-    ) -> Self {
+    /// Reads `bp:{FeatureType}_{i}` axes for `i in 0..max_features` and
+    /// rebuilds the per-type vectors. The "new LinearCmd since last tick"
+    /// buffer (`position_with_duration`) is populated from
+    /// `bp:LinearCmd_{i}` axes whose latest sample timestamp is strictly
+    /// greater than `last_replay_ts` — that's how the bundled phase replaces
+    /// the old post-tick `clear()` of the linear-commands HashMap.
+    pub fn from_input_bus(bus: &InputBus, last_replay_ts: u64, max_features: usize) -> Self {
         let mut result = Self {
             position: vec![0.0; max_features],
             position_with_duration: vec![None; max_features],
-            position_with_duration_value: vec![0.5; max_features], // Default to midpoint
+            // Default to midpoint so a channel without prior LinearCmd traffic
+            // settles at center rather than zero.
+            position_with_duration_value: vec![0.5; max_features],
             vibrate: vec![0.0; max_features],
             rotate: vec![None; max_features],
             oscillate: vec![0.0; max_features],
             constrict: vec![0.0; max_features],
         };
 
-        // Parse feature keys and populate vectors
-        for (key, value) in features {
-            if let Some((feature_type, index)) = parse_feature_key(key) {
-                if index < max_features {
-                    match feature_type.as_str() {
-                        "Position" => result.position[index] = *value,
-                        "PositionWithDuration" => {
-                            result.position_with_duration_value[index] = *value
-                        }
-                        "Vibrate" => result.vibrate[index] = *value,
-                        "Oscillate" => result.oscillate[index] = *value,
-                        "Constrict" => result.constrict[index] = *value,
-                        "Rotate" => {
-                            let clockwise = rotate_directions.get(&index).copied().unwrap_or(true);
-                            result.rotate[index] = Some((*value, clockwise));
-                        }
-                        _ => {}
+        for i in 0..max_features {
+            if let Some(v) = bus.value(&format!("bp:Position_{}", i)) {
+                result.position[i] = v;
+            }
+            if let Some(v) = bus.value(&format!("bp:Vibrate_{}", i)) {
+                result.vibrate[i] = v;
+            }
+            if let Some(v) = bus.value(&format!("bp:Oscillate_{}", i)) {
+                result.oscillate[i] = v;
+            }
+            if let Some(v) = bus.value(&format!("bp:Constrict_{}", i)) {
+                result.constrict[i] = v;
+            }
+            if let Some(v) = bus.value(&format!("bp:PositionWithDuration_{}", i)) {
+                result.position_with_duration_value[i] = v;
+            }
+            if let Some(speed) = bus.value(&format!("bp:Rotate_{}", i)) {
+                let dir_axis = format!("bp:RotateDir_{}", i);
+                let clockwise = bus.value(&dir_axis).map(|v| v >= 0.5).unwrap_or(true);
+                result.rotate[i] = Some((speed, clockwise));
+            }
+            // LinearCmd "new arrival" detection: the axis stores
+            // (position, duration_ms, arrival_ms) on each sample; we report
+            // the latest only when its timestamp post-dates the watermark.
+            if let Some(state) = bus.get(&format!("bp:LinearCmd_{}", i)) {
+                if state.has_data && state.timestamp > last_replay_ts {
+                    if let Some(sample) = state.history.back() {
+                        result.position_with_duration[i] = Some((
+                            sample.value,
+                            sample.interval_ms.unwrap_or(0),
+                            sample.timestamp,
+                        ));
                     }
                 }
             }
         }
 
-        // Populate LinearCmd (PositionWithDuration) new command values with arrival time
-        for (index, (position, duration, arrival_time)) in linear_commands {
-            if *index < max_features {
-                result.position_with_duration[*index] = Some((*position, *duration, *arrival_time));
-            }
-        }
-
         result
     }
-}
-
-/// Parse a feature key like "Vibrate_0" into (feature_type, index)
-fn parse_feature_key(key: &str) -> Option<(String, usize)> {
-    let parts: Vec<&str> = key.split('_').collect();
-    if parts.len() == 2 {
-        if let Ok(index) = parts[1].parse::<usize>() {
-            return Some((parts[0].to_string(), index));
-        }
-    }
-    None
 }

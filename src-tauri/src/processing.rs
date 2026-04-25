@@ -15,7 +15,11 @@ use crate::modulation::{ChannelConfig, NoInputBehavior};
 
 // Import Buttplug types for link configuration and pipeline
 use crate::buttplug::{process_buttplug_pipeline, ButtplugChannelState, ButtplugLinkConfig};
-use std::time::Instant;
+
+/// Per-feature-type slot count for the bus → `ButtplugFeatureValues`
+/// projection. Eight is the upper bound the v3 device descriptor advertises;
+/// raising it just reserves more index slots without semantic effect.
+const BUTTPLUG_MAX_FEATURES: usize = 8;
 
 lazy_static::lazy_static! {
     static ref TCODE_REGEX: Regex = Regex::new(r"(?:([LRVAD])(\d)([^\s]*))+").unwrap();
@@ -1214,6 +1218,12 @@ pub struct Channel {
     /// of axis-history timestamps already fed into engines, so each tick
     /// only replays new samples in `(watermark, now - delay_ms]`.
     pub last_intensity_replay_ts: u64,
+    /// Watermark for the Buttplug "new LinearCmd since last tick" buffer.
+    /// `ButtplugFeatureValues::from_input_bus` reports a `bp:LinearCmd_<i>`
+    /// sample as new only when its timestamp is strictly greater than this
+    /// value. Updated to `now_ms` after each Buttplug-pipeline run, which
+    /// replaces the old post-tick `clear()` of the linear-commands HashMap.
+    pub last_buttplug_replay_ts: u64,
 }
 
 impl Channel {
@@ -1232,6 +1242,7 @@ impl Channel {
             buttplug_state: ButtplugChannelState::default(),
             peak_hold: IntensityPeakHold::default(),
             last_intensity_replay_ts: 0,
+            last_buttplug_replay_ts: 0,
         }
     }
 
@@ -1352,16 +1363,6 @@ pub struct ProcessingState {
     /// `value_at` lookup lives on `AxisState` inside the bus.
     pub input_bus: InputBus,
 
-    // Track Buttplug feature values (feature_key → value 0.0-1.0)
-    // Keys are like "Vibrate_0", "Position_0", "Oscillate_0", etc.
-    pub buttplug_features: HashMap<String, f64>,
-
-    /// LinearCmd commands with (position, duration_ms, arrival_time)
-    pub buttplug_linear_commands: HashMap<usize, (f64, u32, std::time::Instant)>,
-
-    // Track Rotate directions: index → clockwise
-    pub buttplug_rotate_directions: HashMap<usize, bool>,
-
     // General settings for parameter modulation
     pub no_input_behavior: NoInputBehavior,
     pub no_input_decay_ms: u32,
@@ -1373,9 +1374,6 @@ impl Default for ProcessingState {
             channels: [Channel::new(ChannelId::A), Channel::new(ChannelId::B)],
             options: OutputOptions::default(),
             input_bus: InputBus::new(),
-            buttplug_features: HashMap::new(),
-            buttplug_linear_commands: HashMap::new(),
-            buttplug_rotate_directions: HashMap::new(),
             no_input_behavior: NoInputBehavior::Hold,
             no_input_decay_ms: 1000,
         }
@@ -1476,7 +1474,6 @@ impl ProcessingState {
         // before computing the output for this tick.
         self.replay_pending_intensity_samples(now_ms);
         let window_start = now_ms.saturating_sub(100);
-        let now_instant = Instant::now();
         let dt_ms = 100u32; // 10Hz tick rate = 100ms per tick
 
         let has_buttplug = self.has_buttplug_input();
@@ -1484,30 +1481,45 @@ impl ProcessingState {
         let b_has_bp_links = self.channel(ChannelId::B).buttplug_link.has_any_links();
 
         if has_buttplug || a_has_bp_links || b_has_bp_links {
-            println!("[Buttplug Pipeline] has_buttplug={}, a_has_links={}, b_has_links={}, features={:?}, linear_cmds={:?}, pos_dur_feature_a={:?}",
-                has_buttplug, a_has_bp_links, b_has_bp_links,
-                self.buttplug_features.keys().collect::<Vec<_>>(),
-                self.buttplug_linear_commands.keys().collect::<Vec<_>>(),
-                self.channel(ChannelId::A).buttplug_link.pos_dur_feature);
+            let bp_axes: Vec<&String> = self
+                .input_bus
+                .iter()
+                .filter(|(k, _)| k.starts_with("bp:"))
+                .map(|(k, _)| k)
+                .collect();
+            println!(
+                "[Buttplug Pipeline] has_buttplug={}, a_has_links={}, b_has_links={}, bp_axes={:?}, pos_dur_feature_a={:?}",
+                has_buttplug,
+                a_has_bp_links,
+                b_has_bp_links,
+                bp_axes,
+                self.channel(ChannelId::A).buttplug_link.pos_dur_feature
+            );
         }
 
-        // Run Buttplug pipeline per channel if links are configured.
-        // Features are snapshotted ONCE so the second call sees the same input.
+        // Run Buttplug pipeline per channel if links are configured. The
+        // feature snapshot is rebuilt per channel using that channel's own
+        // `last_buttplug_replay_ts` watermark — that's how the bundled phase
+        // replaces the old shared `linear_commands.clear()` at the bottom of
+        // this loop. Each channel sees a `position_with_duration` slot as
+        // "new" exactly once, even though both channels read the same bus.
         let bp_intensities: [Option<u8>; 2] = if has_buttplug {
-            let features = self.get_buttplug_feature_values();
             let mut out = [None, None];
             for id in ChannelId::ALL {
-                let ch = self.channel_mut(id);
-                if !ch.buttplug_link.has_any_links() {
+                if !self.channel(id).buttplug_link.has_any_links() {
                     continue;
                 }
+                let watermark = self.channel(id).last_buttplug_replay_ts;
+                let features = self.get_buttplug_feature_values(watermark);
+                let ch = self.channel_mut(id);
                 let output = process_buttplug_pipeline(
                     &mut ch.buttplug_state,
                     &features,
                     &ch.buttplug_link,
-                    now_instant,
+                    now_ms,
                     dt_ms,
                 );
+                ch.last_buttplug_replay_ts = now_ms;
                 let intensity = (output * 200.0).round().clamp(0.0, 200.0) as u8;
                 if id == ChannelId::A {
                     println!(
@@ -1517,7 +1529,6 @@ impl ProcessingState {
                 }
                 out[id as usize] = Some(intensity);
             }
-            self.buttplug_linear_commands.clear();
             out
         } else {
             [None, None]
@@ -1592,54 +1603,88 @@ impl ProcessingState {
     // ===== Parameter Modulation Methods =====
 
     // ===== Buttplug Feature Methods =====
+    //
+    // Buttplug feature samples now live in the shared `input_bus` under the
+    // `bp:` namespace. The set/get/clear shims preserve the call sites in
+    // `buttplug::handler` and `lovense::handler` while routing through the
+    // bus, so subs C+D+E can rebuild the resolver on top of bus reads
+    // without further handler churn.
 
-    /// Update a Buttplug feature value
+    /// Update a Buttplug feature value. `key` is the legacy
+    /// `{FeatureType}_{index}` form; the bus axis is `bp:{key}`.
     pub fn set_buttplug_feature(&mut self, key: String, value: f64) {
-        self.buttplug_features.insert(key, value.clamp(0.0, 1.0));
+        let axis = format!("bp:{}", key);
+        self.input_bus
+            .update(&axis, value.clamp(0.0, 1.0), current_time_ms(), None);
     }
 
-    /// Clear all Buttplug features (on stop commands)
+    /// Clear every Buttplug-namespaced axis. T-Code / gamepad axes survive.
     pub fn clear_all_buttplug_features(&mut self) {
-        self.buttplug_features.clear();
-        self.buttplug_linear_commands.clear();
-        self.buttplug_rotate_directions.clear();
+        self.input_bus.clear_prefix("bp:");
     }
 
-    /// Get all Buttplug feature values
+    /// Get all Buttplug feature values keyed by `{FeatureType}_{index}`
+    /// (legacy shape — drops the `bp:` prefix that lives only on the bus).
+    /// Excludes the LinearCmd / RotateDir control axes; those don't match
+    /// the pre-refactor "feature value" map the frontend consumes.
     pub fn get_buttplug_features(&self) -> HashMap<String, f64> {
-        self.buttplug_features.clone()
+        self.input_bus
+            .iter()
+            .filter_map(|(k, s)| {
+                let stripped = k.strip_prefix("bp:")?;
+                if stripped.starts_with("LinearCmd_") || stripped.starts_with("RotateDir_") {
+                    return None;
+                }
+                if !s.has_data {
+                    return None;
+                }
+                Some((stripped.to_string(), s.value))
+            })
+            .collect()
     }
 
-    /// Set a LinearCmd (PositionWithDuration) value with arrival timestamp
+    /// Set a LinearCmd (PositionWithDuration) sample. The bus axis stores
+    /// `(position, duration_ms, arrival_ms)` per sample; the per-channel
+    /// `last_buttplug_replay_ts` watermark turns it into a one-shot "new
+    /// command" signal at tick time.
     pub fn set_buttplug_linear_cmd(&mut self, index: usize, position: f64, duration_ms: u32) {
-        self.buttplug_linear_commands.insert(
-            index,
-            (
-                position.clamp(0.0, 1.0),
-                duration_ms,
-                std::time::Instant::now(),
-            ),
+        let axis = format!("bp:LinearCmd_{}", index);
+        self.input_bus.update(
+            &axis,
+            position.clamp(0.0, 1.0),
+            current_time_ms(),
+            Some(duration_ms),
         );
     }
 
-    /// Set a Rotate direction
+    /// Set a Rotate direction. Encoded as `1.0` for clockwise, `0.0` for
+    /// counter-clockwise on a dedicated `bp:RotateDir_<i>` axis. Sub D will
+    /// likely fold this into a richer transform input; for now the axis
+    /// keeps the 0/1 contract the pipeline reader expects.
     pub fn set_buttplug_rotate_direction(&mut self, index: usize, clockwise: bool) {
-        self.buttplug_rotate_directions.insert(index, clockwise);
+        let axis = format!("bp:RotateDir_{}", index);
+        let v = if clockwise { 1.0 } else { 0.0 };
+        self.input_bus.update(&axis, v, current_time_ms(), None);
     }
 
-    /// Get ButtplugFeatureValues struct for pipeline processing
-    pub fn get_buttplug_feature_values(&self) -> crate::buttplug::ButtplugFeatureValues {
-        crate::buttplug::ButtplugFeatureValues::from_hashmap(
-            &self.buttplug_features,
-            &self.buttplug_linear_commands,
-            &self.buttplug_rotate_directions,
-            8, // Max features per type
+    /// Build a per-tick `ButtplugFeatureValues` snapshot from the bus.
+    /// `last_replay_ts` is the channel's previous tick boundary — the
+    /// resulting `position_with_duration` buffer reports `bp:LinearCmd_<i>`
+    /// samples newer than that watermark exactly once.
+    pub fn get_buttplug_feature_values(
+        &self,
+        last_replay_ts: u64,
+    ) -> crate::buttplug::ButtplugFeatureValues {
+        crate::buttplug::ButtplugFeatureValues::from_input_bus(
+            &self.input_bus,
+            last_replay_ts,
+            BUTTPLUG_MAX_FEATURES,
         )
     }
 
-    /// Check if there are any active Buttplug features
+    /// True iff any axis under the `bp:` prefix has received data.
     pub fn has_buttplug_input(&self) -> bool {
-        !self.buttplug_features.is_empty() || !self.buttplug_linear_commands.is_empty()
+        self.input_bus.has_any_with_prefix("bp:")
     }
 
     // ===== Buttplug Link Config Methods =====
@@ -2114,5 +2159,140 @@ mod tests {
         // Bucket 2 MAX = 180 in both variants.
         assert_eq!(v1[2], 180);
         assert_eq!(v2[2], 180);
+    }
+
+    // ========================================================================
+    // Bundled phase sub B: Buttplug feature methods are bus-backed
+    // ========================================================================
+
+    #[test]
+    fn test_set_buttplug_feature_writes_through_bus_under_bp_namespace() {
+        // The pre-refactor `buttplug_features` HashMap is gone — feature
+        // values now flow through `input_bus` under the `bp:` prefix. The
+        // legacy `set_buttplug_feature(key, value)` shim must preserve the
+        // call-site contract while routing through the bus.
+        let mut state = ProcessingState::default();
+        state.set_buttplug_feature("Vibrate_0".to_string(), 0.7);
+
+        // Direct bus read confirms the namespaced axis exists.
+        assert_eq!(state.input_bus.value("bp:Vibrate_0"), Some(0.7));
+        // Legacy `get_buttplug_features` strips the prefix before returning,
+        // so the frontend wire format stays identical to pre-refactor.
+        let map = state.get_buttplug_features();
+        assert_eq!(map.get("Vibrate_0"), Some(&0.7));
+        // Other channels untouched.
+        assert!(map.get("Vibrate_1").is_none());
+        // Sentinel: a never-written T-Code axis must not show up in the
+        // buttplug map (prefix filter actually filters).
+        assert!(map.get("L0").is_none());
+    }
+
+    #[test]
+    fn test_get_buttplug_features_excludes_control_axes() {
+        // `LinearCmd_<i>` and `RotateDir_<i>` are control axes (new-arrival
+        // signal + direction encoding); they live on the bus under `bp:` but
+        // are NOT part of the legacy "feature value map" the frontend reads.
+        let mut state = ProcessingState::default();
+        state.set_buttplug_feature("Vibrate_0".to_string(), 0.5);
+        state.set_buttplug_linear_cmd(0, 0.4, 100);
+        state.set_buttplug_rotate_direction(0, false);
+
+        let map = state.get_buttplug_features();
+        assert_eq!(map.get("Vibrate_0"), Some(&0.5));
+        assert!(map.get("LinearCmd_0").is_none());
+        assert!(map.get("RotateDir_0").is_none());
+    }
+
+    #[test]
+    fn test_clear_all_buttplug_features_drops_only_bp_axes() {
+        // `clear_all_buttplug_features` now delegates to `bus.clear_prefix("bp:")`.
+        // T-Code / gamepad axes live under non-prefixed keys (`L0`, `GP_LX`)
+        // and must survive a Buttplug stop command.
+        let mut state = ProcessingState::default();
+        state.set_buttplug_feature("Vibrate_0".to_string(), 0.5);
+        state.set_buttplug_linear_cmd(0, 0.3, 200);
+        state.set_buttplug_rotate_direction(0, true);
+        state.process_command(&TCodeCommand {
+            axis: "L0".to_string(),
+            value: 0.9,
+            interval_ms: None,
+            received_at: 1000,
+        });
+
+        assert!(state.has_buttplug_input());
+        state.clear_all_buttplug_features();
+
+        // Buttplug axes gone.
+        assert!(!state.has_buttplug_input());
+        assert!(state.input_bus.value("bp:Vibrate_0").is_none());
+        assert!(state.input_bus.value("bp:LinearCmd_0").is_none());
+        assert!(state.input_bus.value("bp:RotateDir_0").is_none());
+        // T-Code axis untouched.
+        assert_eq!(state.get_axis_value("L0"), Some(0.9));
+    }
+
+    #[test]
+    fn test_buttplug_linear_cmd_watermark_reports_new_arrival_once_per_channel() {
+        // The "new LinearCmd since last tick" semantic moved off the
+        // post-tick `clear()` of a shared HashMap onto a per-channel
+        // watermark (`Channel.last_buttplug_replay_ts`). Same axis, same
+        // sample timestamp; first read past the watermark sees `Some`,
+        // subsequent reads at-or-before the watermark see `None`.
+        let mut state = ProcessingState::default();
+        state.set_buttplug_linear_cmd(0, 0.4, 250);
+
+        // Find the actual sample timestamp the bus recorded; the test must
+        // anchor its watermark to that, not to wall clock.
+        let arrival_ts = state
+            .input_bus
+            .latest_timestamp("bp:LinearCmd_0")
+            .expect("LinearCmd write must register a sample");
+
+        // Watermark below the sample timestamp → reports as new with the
+        // (position, duration_ms, arrival_ms) triple intact.
+        let fresh = state.get_buttplug_feature_values(arrival_ts.saturating_sub(1));
+        assert_eq!(
+            fresh.get_new_position_with_duration(Some(0)),
+            Some((0.4, 250, arrival_ts))
+        );
+
+        // Watermark at-or-after the sample timestamp → consumed.
+        let consumed = state.get_buttplug_feature_values(arrival_ts);
+        assert!(consumed.get_new_position_with_duration(Some(0)).is_none());
+
+        // The persisted value vector still defaults to midpoint because
+        // LinearCmd writes only `bp:LinearCmd_<i>`, not `bp:PositionWithDuration_<i>`.
+        assert_eq!(
+            consumed.get_position_with_duration_value(Some(0)),
+            Some(0.5)
+        );
+    }
+
+    #[test]
+    fn test_buttplug_feature_values_round_trip_position_and_rotate_direction() {
+        // Position/Vibrate/Oscillate/Constrict slots come straight off bus
+        // axes; Rotate carries an out-of-band `bp:RotateDir_<i>` axis
+        // encoded as 1.0/0.0. Confirm the bus → ButtplugFeatureValues
+        // projection reassembles both shapes.
+        let mut state = ProcessingState::default();
+        state.set_buttplug_feature("Position_0".to_string(), 0.6);
+        state.set_buttplug_feature("Vibrate_0".to_string(), 0.3);
+        state.set_buttplug_feature("Oscillate_1".to_string(), 0.8);
+        state.set_buttplug_feature("Constrict_0".to_string(), 0.2);
+        state.set_buttplug_feature("Rotate_0".to_string(), 0.5);
+        state.set_buttplug_rotate_direction(0, false);
+        state.set_buttplug_feature("PositionWithDuration_1".to_string(), 0.9);
+
+        let v = state.get_buttplug_feature_values(0);
+        assert_eq!(v.get_position(Some(0)), Some(0.6));
+        assert_eq!(v.get_vibrate(Some(0)), Some(0.3));
+        assert_eq!(v.get_oscillate(Some(1)), Some(0.8));
+        assert_eq!(v.get_constrict(Some(0)), Some(0.2));
+        assert_eq!(v.get_rotate(Some(0)), Some((0.5, false)));
+        assert_eq!(v.get_position_with_duration_value(Some(1)), Some(0.9));
+        // Slot 1 has no Position write → defaults to 0.0 (the type's init).
+        assert_eq!(v.get_position(Some(1)), Some(0.0));
+        // Slot 0 has no PositionWithDuration write → defaults to 0.5 (midpoint).
+        assert_eq!(v.get_position_with_duration_value(Some(0)), Some(0.5));
     }
 }
