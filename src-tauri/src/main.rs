@@ -17,7 +17,7 @@ mod modulation;
 mod processing;
 mod protocol;
 mod settings;
-mod settings_convert;
+pub(crate) mod settings_convert;
 mod waveform;
 mod websocket;
 
