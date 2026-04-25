@@ -5,7 +5,7 @@
 use crate::buttplug::messages::*;
 use crate::buttplug::types::ButtplugFeatureConfig;
 use crate::emit_buttplug_features;
-use crate::processing::get_processing_state;
+use crate::processing::{current_time_ms, get_processing_state};
 
 /// Handle incoming Buttplug client message and generate response(s)
 ///
@@ -246,6 +246,10 @@ async fn handle_scalar_cmd(
 
     // Store feature values in PROCESSING_STATE
     // Key format: "{ActuatorType}_{TypeSpecificIndex}" e.g., "Vibrate_0", "Position_0"
+    // All scalars in one ScalarCmd share an arrival timestamp so the
+    // resolver's watermark either picks up the whole batch on this tick
+    // or leaves the whole batch for the next.
+    let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
     let features = {
         let mut state_guard = state.write().await;
@@ -261,7 +265,7 @@ async fn handle_scalar_cmd(
             };
             let feature_key = format!("{}_{}", scalar.actuator_type, type_specific_index);
             let value = scalar.scalar.clamp(0.0, 1.0);
-            state_guard.set_buttplug_feature(feature_key, value);
+            state_guard.set_buttplug_feature(feature_key, value, arrival_ts);
         }
         state_guard.get_buttplug_features()
     };
@@ -282,7 +286,12 @@ async fn handle_linear_cmd(cmd: LinearCmd) -> Vec<ButtplugServerMessage> {
     }
 
     // Store feature values in PROCESSING_STATE
-    // LinearCmd includes position AND duration for smooth movement
+    // LinearCmd includes position AND duration for smooth movement.
+    // One arrival timestamp shared across all vectors in this command —
+    // critical for LinearCmd specifically, since the resolver's
+    // "new arrival since last watermark" check would otherwise split a
+    // multi-vector LinearCmd batch across two ticks.
+    let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
     let features = {
         let mut state_guard = state.write().await;
@@ -292,11 +301,12 @@ async fn handle_linear_cmd(cmd: LinearCmd) -> Vec<ButtplugServerMessage> {
                 vector.index as usize,
                 vector.position,
                 vector.duration,
+                arrival_ts,
             );
             // Also store position in features for UI display
             // Use "PositionWithDuration" to match frontend terminology
             let feature_key = format!("PositionWithDuration_{}", vector.index);
-            state_guard.set_buttplug_feature(feature_key, vector.position);
+            state_guard.set_buttplug_feature(feature_key, vector.position, arrival_ts);
         }
         state_guard.get_buttplug_features()
     };
@@ -317,13 +327,14 @@ async fn handle_vibrate_cmd(cmd: VibrateCmd) -> Vec<ButtplugServerMessage> {
     }
 
     // Store feature values in PROCESSING_STATE
+    let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
     let features = {
         let mut state_guard = state.write().await;
         for speed in &cmd.speeds {
             let feature_key = format!("Vibrate_{}", speed.index);
             let value = speed.speed.clamp(0.0, 1.0);
-            state_guard.set_buttplug_feature(feature_key, value);
+            state_guard.set_buttplug_feature(feature_key, value, arrival_ts);
         }
         state_guard.get_buttplug_features()
     };
@@ -344,16 +355,24 @@ async fn handle_rotate_cmd(cmd: RotateCmd) -> Vec<ButtplugServerMessage> {
     }
 
     // Store feature values in PROCESSING_STATE
-    // RotateCmd includes speed AND direction (clockwise)
+    // RotateCmd includes speed AND direction (clockwise). One arrival
+    // timestamp so speed + direction land on the same tick — Rotate
+    // transform reads them as paired modifiers, off-by-one would
+    // pair last-tick's speed with this-tick's direction.
+    let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
     let features = {
         let mut state_guard = state.write().await;
         for rotation in &cmd.rotations {
             let feature_key = format!("Rotate_{}", rotation.index);
             let value = rotation.speed.clamp(0.0, 1.0);
-            state_guard.set_buttplug_feature(feature_key, value);
+            state_guard.set_buttplug_feature(feature_key, value, arrival_ts);
             // Store direction for pipeline processing
-            state_guard.set_buttplug_rotate_direction(rotation.index as usize, rotation.clockwise);
+            state_guard.set_buttplug_rotate_direction(
+                rotation.index as usize,
+                rotation.clockwise,
+                arrival_ts,
+            );
         }
         state_guard.get_buttplug_features()
     };

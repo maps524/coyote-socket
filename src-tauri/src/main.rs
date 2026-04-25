@@ -612,6 +612,8 @@ async fn apply_channel_config_to_state(
     channel_id: processing::ChannelId,
     channel_settings: &SettingsChannelSettings,
 ) {
+    use crate::modulation::ChannelLinkRuntime;
+
     let new_config = crate::settings_convert::convert_channel_settings(channel_settings);
     let bp_config = channel_settings
         .intensity_source
@@ -621,7 +623,19 @@ async fn apply_channel_config_to_state(
 
     let state = processing::get_processing_state().await;
     let mut state_guard = state.write().await;
-    state_guard.channel_mut(channel_id).config = new_config;
+    let ch = state_guard.channel_mut(channel_id);
+    // Reset transform state in lockstep with the new config so the
+    // resolver doesn't carry over phase / smoothing / hold-peak slots
+    // from a different transform list. `for_config` produces one slot
+    // per `TransformConfig` in declaration order — matches what the
+    // resolver expects on the next tick.
+    ch.link_runtime = ChannelLinkRuntime::for_config(&new_config);
+    ch.config = new_config;
+    // Buttplug link kept as a write-only field until sub F's deletion;
+    // no consumer reads it now that `process_buttplug_pipeline` is
+    // gone, so the assignment is effectively a no-op for hot-path
+    // behavior. Removing the call here would leave `set_buttplug_link_config`
+    // unreferenced — pull the trigger in sub F alongside the field.
     if let Some(cfg) = bp_config {
         state_guard.set_buttplug_link_config(channel_id.as_char(), cfg);
     }

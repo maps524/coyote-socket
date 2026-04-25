@@ -23,50 +23,72 @@ pub struct ResolvedChannelParams {
 }
 
 /// Resolve frequency / freqBalance / intBalance for both channels at the
-/// current instant. Closed over `state_guard` once so the read lock is held
-/// for the duration of the per-channel work.
+/// current instant. Holds a write lock since the unified resolver threads
+/// per-tick state through `Channel.link_runtime` — switching to a read
+/// lock would require throwaway runtime per call, which would break
+/// stateful transforms like `Smooth` or `Hold` attached to non-intensity
+/// parameters by silently resetting their state every tick.
 pub async fn get_resolved_channel_params() -> (ResolvedChannelParams, ResolvedChannelParams) {
-    use crate::modulation::{resolve_parameter, ParameterSourceType};
+    use crate::modulation::{resolve_link, ParameterSourceType};
 
     let state = get_processing_state().await;
-    let state_guard = state.read().await;
+    let mut state_guard = state.write().await;
     let now = current_time_ms();
+    let no_input_behavior = state_guard.no_input_behavior.clone();
+    let decay_ms = state_guard.no_input_decay_ms;
 
-    let resolve_one = |id: ChannelId| -> ResolvedChannelParams {
-        let ch = state_guard.channel(id);
-        let freq = resolve_parameter(
-            &ch.config.frequency,
-            &state_guard.input_bus,
-            &state_guard.no_input_behavior,
-            now,
-            state_guard.no_input_decay_ms,
-        );
-        let freq_bal = resolve_parameter(
-            &ch.config.frequency_balance,
-            &state_guard.input_bus,
-            &state_guard.no_input_behavior,
-            now,
-            state_guard.no_input_decay_ms,
-        );
-        let int_bal = resolve_parameter(
-            &ch.config.intensity_balance,
-            &state_guard.input_bus,
-            &state_guard.no_input_behavior,
-            now,
-            state_guard.no_input_decay_ms,
-        );
+    // Disjoint-field borrow: the bus is a sibling field of `channels`, so
+    // Rust's split-borrow rule lets us hold `&InputBus` and
+    // `&mut Channel[i]` simultaneously. Deref the lock guard once to get a
+    // plain `&mut ProcessingState`, then take both borrows from it.
+    let state_inner = &mut *state_guard;
+    let bus = &state_inner.input_bus;
+
+    let resolve_one = |ch: &mut crate::processing::Channel| -> ResolvedChannelParams {
         let intensity_is_static = ch.config.intensity.source_type == ParameterSourceType::Static;
+        let range_min = ch.config.intensity.range_min as u8;
+        let range_max = ch.config.intensity.range_max as u8;
+
+        let freq = resolve_link(
+            &ch.config.frequency,
+            &mut ch.link_runtime.frequency,
+            bus,
+            &no_input_behavior,
+            now,
+            decay_ms,
+        )
+        .device_value;
+        let freq_bal = resolve_link(
+            &ch.config.frequency_balance,
+            &mut ch.link_runtime.frequency_balance,
+            bus,
+            &no_input_behavior,
+            now,
+            decay_ms,
+        )
+        .device_value;
+        let int_bal = resolve_link(
+            &ch.config.intensity_balance,
+            &mut ch.link_runtime.intensity_balance,
+            bus,
+            &no_input_behavior,
+            now,
+            decay_ms,
+        )
+        .device_value;
+
         ResolvedChannelParams {
             frequency: freq.clamp(1.0, 200.0),
             freq_balance: freq_bal.clamp(0.0, 255.0) as u8,
             int_balance: int_bal.clamp(0.0, 255.0) as u8,
-            range_min: ch.config.intensity.range_min as u8,
-            range_max: ch.config.intensity.range_max as u8,
+            range_min,
+            range_max,
             intensity_is_static,
         }
     };
 
-    (resolve_one(ChannelId::A), resolve_one(ChannelId::B))
+    let [a, b] = &mut state_inner.channels;
+    (resolve_one(a), resolve_one(b))
 }
 
 /// Resolve per-slot frequencies (Hz) for both channels at 25ms intervals
@@ -74,33 +96,47 @@ pub async fn get_resolved_channel_params() -> (ResolvedChannelParams, ResolvedCh
 /// `window_start + slot*25` so fast axis motion produces true sub-100ms
 /// frequency sweeps instead of four copies of the same value.
 ///
+/// Holds a write lock so per-slot calls thread mutable transform state
+/// through `link_runtime.frequency` — when a `Smooth` or `Hold` transform
+/// is attached to frequency, each slot advances the same state in
+/// chronological order, matching the engine's per-slot semantics.
+///
 /// Returns `(chan_a_hz, chan_b_hz)` with 4 entries each, already clamped to
 /// the protocol range 1-200 Hz. Callers feed these through
 /// `frequency_to_period` → `convert_period` for the device command.
 pub async fn get_per_slot_frequencies(window_start: u64) -> ([f64; 4], [f64; 4]) {
-    use crate::modulation::resolve_parameter_at_time;
+    use crate::modulation::resolve_link_at_time;
 
     let state = get_processing_state().await;
-    let state_guard = state.read().await;
+    let mut state_guard = state.write().await;
     let now = current_time_ms();
+    let no_input_behavior = state_guard.no_input_behavior.clone();
+    let decay_ms = state_guard.no_input_decay_ms;
 
-    let resolve_slots = |id: ChannelId| -> [f64; 4] {
-        let src = &state_guard.channel(id).config.frequency;
-        std::array::from_fn(|i| {
+    let state_inner = &mut *state_guard;
+    let bus = &state_inner.input_bus;
+
+    let resolve_slots = |ch: &mut crate::processing::Channel| -> [f64; 4] {
+        let mut out = [0.0f64; 4];
+        for i in 0..4 {
             let target = window_start + (i as u64) * 25;
-            resolve_parameter_at_time(
-                src,
-                &state_guard.input_bus,
-                &state_guard.no_input_behavior,
+            out[i] = resolve_link_at_time(
+                &ch.config.frequency,
+                &mut ch.link_runtime.frequency,
+                bus,
+                &no_input_behavior,
                 now,
-                state_guard.no_input_decay_ms,
+                decay_ms,
                 target,
             )
-            .clamp(1.0, 200.0)
-        })
+            .device_value
+            .clamp(1.0, 200.0);
+        }
+        out
     };
 
-    (resolve_slots(ChannelId::A), resolve_slots(ChannelId::B))
+    let [a, b] = &mut state_inner.channels;
+    (resolve_slots(a), resolve_slots(b))
 }
 
 /// Read every axis value with no-input behavior applied. Stale axes

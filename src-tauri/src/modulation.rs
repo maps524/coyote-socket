@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::transforms::{TransformConfig, TransformState};
+use crate::transforms::{apply_transform, TransformConfig, TransformState};
 
 /// Source type for a parameter value
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -120,17 +120,29 @@ impl ParameterLinkConfig {
 
 /// Mutable per-parameter runtime state. Holds whatever a transform pipeline
 /// needs to remember between resolver ticks (interpolation positions,
-/// oscillator phases, smoothing accumulators, hold peaks). Sub D fleshes
-/// out `TransformState` variants alongside the `TransformConfig` enum;
-/// for now the vector starts empty so `Channel.link_runtime` exists at
-/// the right shape without prescribing the transform model.
+/// oscillator phases, smoothing accumulators, hold peaks). One
+/// `TransformState` slot per `TransformConfig` in the same index order;
+/// `resolve_link_at_time` reconciles the slot count on entry so a config
+/// edit that races a tick can't cause out-of-bounds indexing.
 ///
 /// Lives on `Channel`, not on `ParameterLinkConfig`, so it can never be
 /// serialized into a preset by accident.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // Read by sub D's transform model; staging shape in sub C.
 pub struct ParameterLinkRuntime {
     pub transform_state: Vec<TransformState>,
+}
+
+impl ParameterLinkRuntime {
+    /// Build a runtime whose `transform_state` slots match `cfg.transforms`
+    /// in length and variant. Used by `apply_channel_config_to_state` to
+    /// reset state when a channel's config changes — without the reset, a
+    /// preset switch would carry over the previous channel's oscillator
+    /// phases / smoothing accumulators into the new transforms.
+    pub fn for_config(cfg: &ParameterLinkConfig) -> Self {
+        Self {
+            transform_state: cfg.transforms.iter().map(|t| t.initial_state()).collect(),
+        }
+    }
 }
 
 /// Per-channel bundle of `ParameterLinkRuntime` slots — one per parameter
@@ -139,12 +151,26 @@ pub struct ParameterLinkRuntime {
 /// `ChannelConfig` so each `ParameterLinkConfig` has a co-indexed runtime
 /// neighbor.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // Per-field reads land in sub E's resolver rewrite.
 pub struct ChannelLinkRuntime {
     pub frequency: ParameterLinkRuntime,
     pub frequency_balance: ParameterLinkRuntime,
     pub intensity_balance: ParameterLinkRuntime,
     pub intensity: ParameterLinkRuntime,
+}
+
+impl ChannelLinkRuntime {
+    /// Build a runtime whose four parameter slots match `config`'s four
+    /// `transforms` lists. Called by `apply_channel_config_to_state` so
+    /// each config write to a channel resets phase / smoothing /
+    /// hold-peak state in lockstep with the new transform list.
+    pub fn for_config(config: &ChannelConfig) -> Self {
+        Self {
+            frequency: ParameterLinkRuntime::for_config(&config.frequency),
+            frequency_balance: ParameterLinkRuntime::for_config(&config.frequency_balance),
+            intensity_balance: ParameterLinkRuntime::for_config(&config.intensity_balance),
+            intensity: ParameterLinkRuntime::for_config(&config.intensity),
+        }
+    }
 }
 
 /// Complete configuration for a single channel's parameters
@@ -319,78 +345,171 @@ pub fn lerp(min: f64, max: f64, t: f64) -> f64 {
     min + (max - min) * t.clamp(0.0, 1.0)
 }
 
-/// Resolve a parameter source to its value at a specific point in time.
+/// Output of one resolver pass over a `ParameterLinkConfig`. Carries the
+/// staged values for both engine consumption (`device_value`) and frontend
+/// telemetry (`raw_input`, `normalized_pre_range`, `target_time_ms`,
+/// `source_axis`). Sub G's `resolved-update` Tauri event projects this
+/// shape onto the wire format directly — defining it once now keeps the
+/// frontend wire format stable as more callers pick up the resolver.
+#[derive(Debug, Clone)]
+pub struct ResolvedSample {
+    /// Pre-curve, pre-transform input value. For Static parameters this
+    /// is the static value (which for non-intensity slots is in device
+    /// units, not 0..1). For Linked parameters it's the bus axis read at
+    /// `target_time_ms`, post no-input handling.
+    pub raw_input: f64,
+    /// Post-curve, post-transforms value clamped to `[0, 1]`. The UI
+    /// renders this as the live "where the resolver thinks we are" dot
+    /// on the curve plot. For Static parameters it equals `raw_input`
+    /// (no shaping applied).
+    pub normalized_pre_range: f64,
+    /// Final value the engine / device consumes. For Linked parameters
+    /// this is `lerp(range_min, range_max, normalized_pre_range)`. For
+    /// Static parameters it's the static value as-is.
+    pub device_value: f64,
+    /// `current_time_ms - delay_ms` for Linked, or the resolver's `now`
+    /// for Static. Lets the frontend align dots on the curve plot with
+    /// the delayed input position.
+    pub target_time_ms: u64,
+    /// The bus axis name when Linked; `None` for Static. Sub G's
+    /// frontend uses this to pick which input-monitor card the resolved
+    /// dot belongs on.
+    pub source_axis: Option<String>,
+}
+
+impl ResolvedSample {
+    /// Build the Static-source result. Skips bus reads, transforms, and
+    /// range mapping — the static value is the device value verbatim.
+    fn from_static(value: f64, target_time_ms: u64) -> Self {
+        Self {
+            raw_input: value,
+            normalized_pre_range: value,
+            device_value: value,
+            target_time_ms,
+            source_axis: None,
+        }
+    }
+}
+
+/// Resolve a `ParameterLinkConfig` at a specific point in time, threading
+/// per-call mutable transform state through `runtime`.
 ///
-/// Like `resolve_parameter` but indexes the axis history at `target_time_ms`
-/// instead of using the latest sample. Lets callers compute per-slot values
-/// within a 100ms output window (e.g. for V3 B0's 4-slot frequency array).
-pub fn resolve_parameter_at_time(
-    source: &ParameterLinkConfig,
+/// Pipeline order (matches the plan doc's resolver layer):
+/// `bus.value_at(target - delay)  →  midpoint?  →  curve  →
+///  transforms (with pre-fetched modifiers)  →  lerp(range_min, range_max)`.
+///
+/// Transforms run in declaration order; for each transform the resolver
+/// pre-fetches every axis named by `declared_axes()` at the link's
+/// `lookup_time` and passes the values into `apply_transform` as a slice.
+/// A misordered or short slice falls through to a documented zero/identity
+/// default rather than panicking.
+///
+/// `runtime.transform_state` length is reconciled against
+/// `cfg.transforms` on entry — a length mismatch (config edit that
+/// hasn't been replayed through `apply_channel_config_to_state` yet, or
+/// a fresh runtime) re-seeds with `initial_state()` so the resolver
+/// never indexes past the slice. Callers don't have to remember to
+/// re-init.
+pub fn resolve_link_at_time(
+    cfg: &ParameterLinkConfig,
+    runtime: &mut ParameterLinkRuntime,
     bus: &crate::input_bus::InputBus,
     no_input_behavior: &NoInputBehavior,
     current_time_ms: u64,
     no_input_decay_ms: u32,
     target_time_ms: u64,
-) -> f64 {
-    match source.source_type {
-        ParameterSourceType::Static => source.static_value.unwrap_or(0.0),
+) -> ResolvedSample {
+    match cfg.source_type {
+        ParameterSourceType::Static => {
+            ResolvedSample::from_static(cfg.static_value.unwrap_or(0.0), target_time_ms)
+        }
         ParameterSourceType::Linked => {
-            let axis = source.source_axis.as_deref();
-            let axis_state = axis.and_then(|a| bus.get(a));
-            let delay = source.delay_ms.unwrap_or(0) as u64;
+            let axis_name = cfg.source_axis.as_deref();
+            let axis_state = axis_name.and_then(|a| bus.get(a));
+            let delay = cfg.delay_ms.unwrap_or(0) as u64;
             let lookup_time = target_time_ms.saturating_sub(delay);
 
-            let input = match axis_state {
+            let raw = match axis_state {
                 Some(state) if state.has_data => {
                     // Staleness check is against CURRENT time (not target), so a
                     // stale axis produces the same no-input response for every
                     // slot within one tick.
                     let age_ms = current_time_ms.saturating_sub(state.timestamp);
                     if age_ms > 1000 {
-                        handle_no_input(
-                            no_input_behavior,
-                            source,
-                            state,
-                            age_ms,
-                            no_input_decay_ms,
-                        )
+                        handle_no_input(no_input_behavior, cfg, state, age_ms, no_input_decay_ms)
                     } else {
-                        state
-                            .value_at(lookup_time)
-                            .unwrap_or(state.value)
+                        state.value_at(lookup_time).unwrap_or(state.value)
                     }
                 }
-                _ => handle_no_input_no_state(no_input_behavior, source),
+                _ => handle_no_input_no_state(no_input_behavior, cfg),
             };
 
-            let midpoint_value = if source.midpoint.unwrap_or(false) {
-                apply_midpoint(input)
+            let midpoint_value = if cfg.midpoint.unwrap_or(false) {
+                apply_midpoint(raw)
             } else {
-                input
+                raw
             };
+            let strength = cfg.curve_strength.unwrap_or(2.0);
+            let curved = apply_curve(midpoint_value, &cfg.curve, strength);
 
-            let strength = source.curve_strength.unwrap_or(2.0);
-            let curved = apply_curve(midpoint_value, &source.curve, strength);
-            lerp(source.range_min, source.range_max, curved)
+            // Reconcile runtime slot count with config. The resolver never
+            // index-out-of-bounds here even if `apply_channel_config_to_state`
+            // hasn't refreshed the runtime yet (e.g. early-tick race after a
+            // config swap).
+            if runtime.transform_state.len() != cfg.transforms.len() {
+                runtime.transform_state =
+                    cfg.transforms.iter().map(|t| t.initial_state()).collect();
+            }
+
+            let mut shaped = curved;
+            for (i, tcfg) in cfg.transforms.iter().enumerate() {
+                // Pre-fetch every axis the transform declares — at the SAME
+                // `lookup_time` as the base read, so a delayed link's
+                // transforms see modifiers from the same instant the base
+                // value came from. No transform reads the bus directly.
+                let modifiers: Vec<f64> = tcfg
+                    .declared_axes()
+                    .iter()
+                    .map(|axis| bus.value_at(axis, lookup_time).unwrap_or(0.0))
+                    .collect();
+                shaped = apply_transform(
+                    tcfg,
+                    &mut runtime.transform_state[i],
+                    shaped,
+                    &modifiers,
+                    lookup_time,
+                );
+            }
+
+            let normalized = shaped.clamp(0.0, 1.0);
+            let device_value = lerp(cfg.range_min, cfg.range_max, normalized);
+
+            ResolvedSample {
+                raw_input: raw,
+                normalized_pre_range: normalized,
+                device_value,
+                target_time_ms: lookup_time,
+                source_axis: axis_name.map(|s| s.to_string()),
+            }
         }
     }
 }
 
-/// Resolve a parameter source to its current value, honoring `delay_ms`.
-///
-/// Thin wrapper over `resolve_parameter_at_time` with `target_time = now`;
-/// the inner function handles the `delay_ms` shift, staleness check, curve,
-/// midpoint, and range mapping. Keeping a single body for both call sites
-/// means a future change to the resolver pipeline only touches one place.
-pub fn resolve_parameter(
-    source: &ParameterLinkConfig,
+/// Resolve a `ParameterLinkConfig` at the current instant. Thin wrapper
+/// over `resolve_link_at_time` with `target_time = current_time_ms` so
+/// the per-call delay shift, staleness check, transform pipeline, and
+/// range mapping all live in one place.
+pub fn resolve_link(
+    cfg: &ParameterLinkConfig,
+    runtime: &mut ParameterLinkRuntime,
     bus: &crate::input_bus::InputBus,
     no_input_behavior: &NoInputBehavior,
     current_time_ms: u64,
     no_input_decay_ms: u32,
-) -> f64 {
-    resolve_parameter_at_time(
-        source,
+) -> ResolvedSample {
+    resolve_link_at_time(
+        cfg,
+        runtime,
         bus,
         no_input_behavior,
         current_time_ms,
@@ -474,12 +593,36 @@ mod tests {
     }
 
     use crate::input_bus::InputBus;
+    use crate::transforms::{TransformConfig, TransformState};
+
+    fn resolve_value(
+        cfg: &ParameterLinkConfig,
+        bus: &InputBus,
+        behavior: &NoInputBehavior,
+        now: u64,
+        decay_ms: u32,
+    ) -> f64 {
+        let mut runtime = ParameterLinkRuntime::for_config(cfg);
+        resolve_link(cfg, &mut runtime, bus, behavior, now, decay_ms).device_value
+    }
+
+    fn resolve_value_at_time(
+        cfg: &ParameterLinkConfig,
+        bus: &InputBus,
+        behavior: &NoInputBehavior,
+        now: u64,
+        decay_ms: u32,
+        target: u64,
+    ) -> f64 {
+        let mut runtime = ParameterLinkRuntime::for_config(cfg);
+        resolve_link_at_time(cfg, &mut runtime, bus, behavior, now, decay_ms, target).device_value
+    }
 
     #[test]
     fn test_resolve_static_parameter() {
         let source = ParameterLinkConfig::static_source(42.0);
         let bus = InputBus::new();
-        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 0, 1000);
+        let result = resolve_value(&source, &bus, &NoInputBehavior::Hold, 0, 1000);
         assert_eq!(result, 42.0);
     }
 
@@ -489,7 +632,7 @@ mod tests {
         let mut bus = InputBus::new();
         bus.update("L0", 0.5, 100, None);
 
-        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
+        let result = resolve_value(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
         assert_eq!(result, 50.0);
     }
 
@@ -506,7 +649,7 @@ mod tests {
         bus.update("L0", 0.2, 100, None);
         bus.update("L0", 0.8, 200, None);
 
-        let delayed = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
+        let delayed = resolve_value(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
         assert!(
             (delayed - 0.2).abs() < 1e-9,
             "delayed lookup expected 0.2, got {}",
@@ -514,7 +657,7 @@ mod tests {
         );
 
         source.delay_ms = Some(0);
-        let live = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
+        let live = resolve_value(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
         assert!(
             (live - 0.8).abs() < 1e-9,
             "live lookup expected 0.8, got {}",
@@ -536,7 +679,7 @@ mod tests {
         bus.update("L0", 0.3, 1000, None);
         bus.update("L0", 0.7, 1100, None);
 
-        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 1100, 1000);
+        let result = resolve_value(&source, &bus, &NoInputBehavior::Hold, 1100, 1000);
         // target = 1100 - delay. No sample has ts ≤ target, so fallback
         // returns the oldest still in history (t=1000 / value=0.3).
         assert!(
@@ -559,7 +702,7 @@ mod tests {
         bus.update("L0", 0.4, 100, None);
 
         // age_ms = 1500 - 100 = 1400 > 1000 → staleness path runs.
-        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 1500, 1000);
+        let result = resolve_value(&source, &bus, &NoInputBehavior::Hold, 1500, 1000);
         // Hold returns state.value = 0.4 (last received).
         assert!(
             (result - 0.4).abs() < 1e-9,
@@ -580,7 +723,7 @@ mod tests {
         let mut bus = InputBus::new();
         bus.update("L0", 0.6, 100, None);
 
-        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 50, 1000);
+        let result = resolve_value(&source, &bus, &NoInputBehavior::Hold, 50, 1000);
         assert!(
             (result - 0.6).abs() < 1e-9,
             "delay underflow should clamp to oldest sample, got {}",
@@ -589,10 +732,10 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_parameter_at_time_matches_resolve_parameter_when_target_is_now() {
-        // The wrapper relationship: resolve_parameter(now) must equal
-        // resolve_parameter_at_time(now, target=now). This guards the
-        // collapse from two bodies into one.
+    fn test_resolve_link_at_time_matches_resolve_link_when_target_is_now() {
+        // The wrapper relationship: resolve_link(now) must equal
+        // resolve_link_at_time(now, target=now). Guards the collapse
+        // from two bodies into one.
         let mut source = ParameterLinkConfig::linked_source("R2", 10.0, 90.0, CurveType::Linear);
         source.delay_ms = Some(40);
 
@@ -601,19 +744,17 @@ mod tests {
         bus.update("R2", 0.9, 150, None);
 
         let now = 200u64;
-        let via_wrapper = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, now, 1000);
-        let via_inner =
-            resolve_parameter_at_time(&source, &bus, &NoInputBehavior::Hold, now, 1000, now);
+        let via_wrapper = resolve_value(&source, &bus, &NoInputBehavior::Hold, now, 1000);
+        let via_inner = resolve_value_at_time(&source, &bus, &NoInputBehavior::Hold, now, 1000, now);
         assert_eq!(via_wrapper, via_inner);
     }
 
     #[test]
     fn test_channel_link_runtime_default_starts_with_empty_transform_state() {
-        // Sub C contract: the runtime split exists at the right shape, even
-        // though sub D defines real `TransformState` variants. Until then
-        // every parameter starts with an empty `transform_state` vector
-        // (no-op resolver path), so existing behavior is preserved
-        // bit-for-bit.
+        // Default ChannelLinkRuntime is the "no transforms anywhere"
+        // shape used by `Channel::new` before a config is applied.
+        // `apply_channel_config_to_state` is what fills in slots that
+        // match the config's transform list.
         let runtime = ChannelLinkRuntime::default();
         for slot in [
             &runtime.frequency,
@@ -626,5 +767,169 @@ mod tests {
                 "fresh ParameterLinkRuntime must start with no transform slots"
             );
         }
+    }
+
+    #[test]
+    fn test_channel_link_runtime_for_config_seeds_slots_per_transform() {
+        // `for_config` is what `apply_channel_config_to_state` calls when
+        // it swaps a channel's config. Each slot's `transform_state`
+        // length must match `cfg.transforms` length, and each slot's
+        // variant must match the corresponding `initial_state()`.
+        let mut intensity =
+            ParameterLinkConfig::linked_source("bp:Position_0", 0.0, 200.0, CurveType::Linear);
+        intensity.transforms = vec![
+            TransformConfig::Vibrate {
+                speed_axis: "bp:Vibrate_0".into(),
+                distance: 0.2,
+            },
+            TransformConfig::Constrict {
+                amount_axis: "bp:Constrict_0".into(),
+                min_floor: 0.0,
+                use_midpoint: false,
+                method: crate::transforms::ConstrictionMethod::Downsample,
+            },
+        ];
+        let cfg = ChannelConfig {
+            frequency: ParameterLinkConfig::static_source(100.0),
+            frequency_balance: ParameterLinkConfig::static_source(128.0),
+            intensity_balance: ParameterLinkConfig::static_source(128.0),
+            intensity,
+        };
+
+        let runtime = ChannelLinkRuntime::for_config(&cfg);
+        assert!(runtime.frequency.transform_state.is_empty());
+        assert_eq!(runtime.intensity.transform_state.len(), 2);
+        assert!(matches!(
+            runtime.intensity.transform_state[0],
+            TransformState::Vibrate { .. }
+        ));
+        assert!(matches!(
+            runtime.intensity.transform_state[1],
+            TransformState::None
+        ));
+    }
+
+    #[test]
+    fn test_resolve_link_runs_transforms_and_lerps_into_range() {
+        // Vibrate + range mapping: the resolver applies the transform
+        // post-curve, then `lerp(range_min, range_max, normalized)`.
+        // Speed=0 so the wobble offset is 0 → output sits at
+        // lerp(0, 200, 0.5) = 100. Confirms the device_value path
+        // honors the range when transforms are attached.
+        let mut cfg =
+            ParameterLinkConfig::linked_source("bp:Position_0", 0.0, 200.0, CurveType::Linear);
+        cfg.transforms = vec![TransformConfig::Vibrate {
+            speed_axis: "bp:Vibrate_0".into(),
+            distance: 0.2,
+        }];
+        let mut runtime = ParameterLinkRuntime::for_config(&cfg);
+        let mut bus = InputBus::new();
+        bus.update("bp:Position_0", 0.5, 100, None);
+        bus.update("bp:Vibrate_0", 0.0, 100, None);
+
+        let resolved = resolve_link(&cfg, &mut runtime, &bus, &NoInputBehavior::Hold, 100, 1000);
+        assert!((resolved.normalized_pre_range - 0.5).abs() < 1e-9);
+        assert!((resolved.device_value - 100.0).abs() < 1e-9);
+        assert_eq!(resolved.source_axis.as_deref(), Some("bp:Position_0"));
+    }
+
+    #[test]
+    fn test_resolve_link_range_change_visibly_affects_buttplug_driven_intensity() {
+        // Acceptance for sub E: a Buttplug-namespaced intensity link
+        // honors `range_min` / `range_max`, so adjusting the range
+        // sliders changes the device output. Pre-sub-E the Buttplug
+        // pipeline short-circuit always emitted `output * 200`, ignoring
+        // the user's range. Same input, two range configs, different
+        // device values.
+        let mut cfg =
+            ParameterLinkConfig::linked_source("bp:Position_0", 0.0, 200.0, CurveType::Linear);
+        // No transforms attached; the unified resolver handles the
+        // range-mapping for plain Buttplug-driven links too.
+        cfg.transforms = Vec::new();
+        let mut runtime = ParameterLinkRuntime::for_config(&cfg);
+        let mut bus = InputBus::new();
+        bus.update("bp:Position_0", 0.5, 100, None);
+
+        let full = resolve_link(&cfg, &mut runtime, &bus, &NoInputBehavior::Hold, 100, 1000);
+        // Full 0..200 range, input 0.5 → 100.
+        assert!((full.device_value - 100.0).abs() < 1e-9);
+
+        // Tighten range to 40..120; input 0.5 → 80.
+        cfg.range_min = 40.0;
+        cfg.range_max = 120.0;
+        let mut runtime2 = ParameterLinkRuntime::for_config(&cfg);
+        let narrowed =
+            resolve_link(&cfg, &mut runtime2, &bus, &NoInputBehavior::Hold, 100, 1000);
+        assert!((narrowed.device_value - 80.0).abs() < 1e-9);
+        assert_ne!(full.device_value, narrowed.device_value);
+    }
+
+    #[test]
+    fn test_resolve_link_vibrate_constrict_chain_narrows_around_wobbled_value() {
+        // Sub D's centering shift: Constrict centers on the post-prior-
+        // transforms value (the wobble) rather than the un-wobbled base.
+        // Pin the chain Vibrate → Constrict so a future regression that
+        // re-anchors Constrict back to `state.base_position` would fail
+        // here. With speed=0 → Vibrate offset = 0 → wobbled value =
+        // input value → Constrict centers on input. Output should sit
+        // inside `[input - effective/2, input + effective/2]`.
+        use crate::transforms::ConstrictionMethod;
+
+        let mut cfg =
+            ParameterLinkConfig::linked_source("bp:Position_0", 0.0, 1.0, CurveType::Linear);
+        cfg.transforms = vec![
+            TransformConfig::Vibrate {
+                speed_axis: "bp:Vibrate_0".into(),
+                distance: 0.2,
+            },
+            TransformConfig::Constrict {
+                amount_axis: "bp:Constrict_0".into(),
+                min_floor: 0.0,
+                use_midpoint: false,
+                method: ConstrictionMethod::Downsample,
+            },
+        ];
+        let mut runtime = ParameterLinkRuntime::for_config(&cfg);
+
+        let mut bus = InputBus::new();
+        bus.update("bp:Position_0", 0.5, 100, None);
+        bus.update("bp:Vibrate_0", 0.0, 100, None);
+        bus.update("bp:Constrict_0", 0.5, 100, None);
+
+        let resolved =
+            resolve_link(&cfg, &mut runtime, &bus, &NoInputBehavior::Hold, 100, 1000);
+        // Vibrate priming returns input → wobbled = 0.5. Constrict at
+        // strength=0.5 with use_midpoint=false centers on 0.5,
+        // effective range = 0.5 → bounds [0.25, 0.75]. Downsample
+        // remaps input 0.5 → 0.5. Output = 0.5.
+        assert!((resolved.normalized_pre_range - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_resolve_link_reseeds_runtime_when_slot_count_drifts() {
+        // A config swap that races the resolver: cfg gains a new
+        // transform but runtime hasn't been reset yet. The resolver
+        // re-seeds rather than panicking on the index, so the worst
+        // case is one tick of phase reset (not a crash).
+        let mut cfg =
+            ParameterLinkConfig::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        cfg.transforms = vec![TransformConfig::Vibrate {
+            speed_axis: "bp:Vibrate_0".into(),
+            distance: 0.2,
+        }];
+        // Runtime starts empty (mismatched length).
+        let mut runtime = ParameterLinkRuntime::default();
+
+        let mut bus = InputBus::new();
+        bus.update("L0", 0.5, 100, None);
+        bus.update("bp:Vibrate_0", 0.0, 100, None);
+
+        // Should not panic.
+        let _ = resolve_link(&cfg, &mut runtime, &bus, &NoInputBehavior::Hold, 100, 1000);
+        assert_eq!(runtime.transform_state.len(), 1);
+        assert!(matches!(
+            runtime.transform_state[0],
+            TransformState::Vibrate { .. }
+        ));
     }
 }

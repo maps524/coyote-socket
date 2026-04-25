@@ -133,10 +133,16 @@ fn feature_count(config: &ButtplugFeatureConfig, actuator: Actuator) -> usize {
 }
 
 async fn write_actuator(actuator: Actuator, value: f64) {
+    use crate::processing::current_time_ms;
+
     let config = ButtplugFeatureConfig::default();
     let count = feature_count(&config, actuator);
     let value = value.clamp(0.0, 1.0);
 
+    // One arrival timestamp per Lovense action so all replicated feature
+    // indices share a tick — matches the Buttplug `ScalarCmd` batch
+    // contract and keeps the resolver's watermark reading coherent.
+    let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
     let features = {
         let mut guard = state.write().await;
@@ -146,9 +152,9 @@ async fn write_actuator(actuator: Actuator, value: f64) {
                 // Linear features go through both pipelines: a LinearCmd record
                 // (so the smooth-move pipeline picks it up) and the feature
                 // map (so the UI displays the current target).
-                guard.set_buttplug_linear_cmd(i, value, 200);
+                guard.set_buttplug_linear_cmd(i, value, 200, arrival_ts);
             }
-            guard.set_buttplug_feature(key, value);
+            guard.set_buttplug_feature(key, value, arrival_ts);
         }
         guard.get_buttplug_features()
     };

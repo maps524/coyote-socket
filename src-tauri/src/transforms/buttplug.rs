@@ -38,7 +38,12 @@ fn step_phase_state<'a>(
     target_ts: u64,
     init: TransformState,
 ) -> Option<(&'a mut f64, u64)> {
-    let needs_rewrite = !matches!(state, TransformState::Vibrate { .. } | TransformState::Oscillate { .. })
+    let needs_rewrite = !matches!(
+        state,
+        TransformState::Vibrate { .. }
+            | TransformState::Oscillate { .. }
+            | TransformState::Rotate { .. }
+    )
         // additionally require the variant tag matches the init slot.
         || std::mem::discriminant(state) != std::mem::discriminant(&init);
     if needs_rewrite {
@@ -47,8 +52,9 @@ fn step_phase_state<'a>(
     }
     let (phase, last_target) = match state {
         TransformState::Vibrate { phase, last_target }
-        | TransformState::Oscillate { phase, last_target } => (phase, last_target),
-        _ => unreachable!("matches! guard above ensures Vibrate or Oscillate"),
+        | TransformState::Oscillate { phase, last_target }
+        | TransformState::Rotate { phase, last_target } => (phase, last_target),
+        _ => unreachable!("matches! guard above ensures Vibrate / Oscillate / Rotate"),
     };
     let dt_ms = if *last_target == 0 {
         0
@@ -124,6 +130,50 @@ pub fn apply_oscillate(
     let phase_norm = *phase % 1.0;
     let triangle = 1.0 - (2.0 * phase_norm - 1.0).abs();
     let offset = (triangle - 0.5) * 2.0 * scale;
+    value + offset
+}
+
+/// Sawtooth directional sweep around `value`. `modifiers[0]` is the
+/// speed input in `[0, 1]`; it scales the frequency to
+/// `[0, max_speed_hz]` Hz. `modifiers[1]` is the direction axis: a value
+/// `>= 0.5` is clockwise (+sign), `< 0.5` is counter-clockwise (-sign).
+/// `scale` sets amplitude (the wave swings `0..scale` in the chosen
+/// direction).
+///
+/// Mirrors the pre-refactor `process_buttplug_pipeline`'s Rotate stage:
+/// `phase % 1.0 * scale * direction`, added to `value`. The modifier
+/// slot order matches `declared_axes()` (`speed_axis` first,
+/// `direction_axis` second) so the resolver pre-fetch always lands the
+/// values in the right slot.
+pub fn apply_rotate(
+    scale: f64,
+    max_speed_hz: f64,
+    value: f64,
+    modifiers: &[f64],
+    state: &mut TransformState,
+    target_ts: u64,
+) -> f64 {
+    let speed = modifiers.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+    let direction = if modifiers.get(1).copied().unwrap_or(1.0) >= 0.5 {
+        1.0
+    } else {
+        -1.0
+    };
+    let Some((phase, dt_ms)) = step_phase_state(
+        state,
+        target_ts,
+        TransformState::Rotate {
+            phase: 0.0,
+            last_target: target_ts,
+        },
+    ) else {
+        return value;
+    };
+    let freq_hz = speed * max_speed_hz;
+    *phase += freq_hz * (dt_ms as f64 / 1000.0);
+
+    let sawtooth = *phase % 1.0;
+    let offset = sawtooth * scale * direction;
     value + offset
 }
 
@@ -292,6 +342,90 @@ mod tests {
         assert!((apply_transform(&cfg, &mut state, 0.1, &[0.5], 0) - 0.25).abs() < 1e-9);
         assert!((apply_transform(&cfg, &mut state, 0.5, &[0.5], 0) - 0.5).abs() < 1e-9);
         assert!((apply_transform(&cfg, &mut state, 0.9, &[0.5], 0) - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rotate_first_call_passes_value_through() {
+        // First call: dt_ms = 0 → phase stays at 0 → sawtooth(0) = 0 →
+        // offset = 0 → output = input. Same identity guarantee Vibrate
+        // gives on its priming tick, so a Rotate-driven preset doesn't
+        // jump on the first frame.
+        let cfg = TransformConfig::Rotate {
+            speed_axis: "bp:Rotate_0".into(),
+            direction_axis: "bp:RotateDir_0".into(),
+            scale: 0.4,
+            max_speed_hz: 5.0,
+        };
+        let mut state = cfg.initial_state();
+        let out = apply_transform(&cfg, &mut state, 0.5, &[1.0, 1.0], 1_000);
+        assert!((out - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rotate_advances_phase_clockwise() {
+        let cfg = TransformConfig::Rotate {
+            speed_axis: "bp:Rotate_0".into(),
+            direction_axis: "bp:RotateDir_0".into(),
+            scale: 0.4,
+            max_speed_hz: 5.0,
+        };
+        let mut state = cfg.initial_state();
+        // Prime at t=1000 (no offset).
+        apply_transform(&cfg, &mut state, 0.5, &[1.0, 1.0], 1_000);
+        // 100ms at speed=1, max=5Hz → phase += 0.5. sawtooth(0.5) = 0.5.
+        // offset = 0.5 * 0.4 * 1 (clockwise) = 0.2 → output = 0.7.
+        let out = apply_transform(&cfg, &mut state, 0.5, &[1.0, 1.0], 1_100);
+        assert!(
+            (out - 0.7).abs() < 1e-9,
+            "rotate clockwise should land at value+0.2, got {}",
+            out
+        );
+    }
+
+    #[test]
+    fn rotate_direction_axis_below_threshold_flips_sign() {
+        // direction modifier < 0.5 → counter-clockwise → offset is
+        // subtracted. Same speed / dt as the clockwise test, opposite sign.
+        let cfg = TransformConfig::Rotate {
+            speed_axis: "bp:Rotate_0".into(),
+            direction_axis: "bp:RotateDir_0".into(),
+            scale: 0.4,
+            max_speed_hz: 5.0,
+        };
+        let mut state = cfg.initial_state();
+        apply_transform(&cfg, &mut state, 0.5, &[1.0, 0.0], 1_000);
+        let out = apply_transform(&cfg, &mut state, 0.5, &[1.0, 0.0], 1_100);
+        assert!(
+            (out - 0.3).abs() < 1e-9,
+            "rotate ccw should land at value-0.2, got {}",
+            out
+        );
+    }
+
+    #[test]
+    fn rotate_missing_direction_modifier_defaults_clockwise() {
+        // Resolver pre-fetches `declared_axes()` in order. If the bus
+        // lacks the direction axis the slot still gets a value (default
+        // 0.0 from the resolver's `unwrap_or(0.0)`), which is < 0.5 and
+        // would go counter-clockwise. The transform's own
+        // `modifiers.get(1)` fallback (`1.0` = clockwise) only kicks in
+        // when the slice is short — defense-in-depth for a misordered
+        // resolver.
+        let cfg = TransformConfig::Rotate {
+            speed_axis: "bp:Rotate_0".into(),
+            direction_axis: "bp:RotateDir_0".into(),
+            scale: 0.4,
+            max_speed_hz: 5.0,
+        };
+        let mut state = cfg.initial_state();
+        // Pass only the speed slot — direction is missing entirely.
+        apply_transform(&cfg, &mut state, 0.5, &[1.0], 1_000);
+        let out = apply_transform(&cfg, &mut state, 0.5, &[1.0], 1_100);
+        assert!(
+            (out - 0.7).abs() < 1e-9,
+            "missing direction slot should default to clockwise, got {}",
+            out
+        );
     }
 
     #[test]

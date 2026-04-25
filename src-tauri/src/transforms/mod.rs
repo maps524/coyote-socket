@@ -101,6 +101,23 @@ pub enum TransformConfig {
         max_speed_hz: f64,
     },
 
+    /// Sawtooth directional sweep around the input value. `speed_axis`
+    /// drives frequency in `[0, max_speed_hz]`; `direction_axis` carries a
+    /// 0/1 bool (typically `bp:RotateDir_<i>`) where `>= 0.5` is clockwise
+    /// (+sign) and `< 0.5` is counter-clockwise (-sign). `scale` sets
+    /// amplitude. Mirrors the pre-refactor `process_buttplug_pipeline`'s
+    /// Rotate stage so a saved Rotate-driven preset reproduces the same
+    /// sweep on the new resolver path.
+    Rotate {
+        #[serde(rename = "speedAxis")]
+        speed_axis: String,
+        #[serde(rename = "directionAxis")]
+        direction_axis: String,
+        scale: f64,
+        #[serde(rename = "maxSpeedHz")]
+        max_speed_hz: f64,
+    },
+
     /// Range-narrowing transform. The modifier `amount_axis` drives a
     /// 0..1 constriction strength: 0 leaves the full range alone, 1
     /// collapses to `min_floor`. `use_midpoint = false` centers the
@@ -136,6 +153,11 @@ impl TransformConfig {
             Self::Vibrate { speed_axis, .. } | Self::Oscillate { speed_axis, .. } => {
                 vec![speed_axis.as_str()]
             }
+            Self::Rotate {
+                speed_axis,
+                direction_axis,
+                ..
+            } => vec![speed_axis.as_str(), direction_axis.as_str()],
             Self::Constrict { amount_axis, .. } => vec![amount_axis.as_str()],
         }
     }
@@ -159,6 +181,10 @@ impl TransformConfig {
                 last_target: 0,
             },
             Self::Oscillate { .. } => TransformState::Oscillate {
+                phase: 0.0,
+                last_target: 0,
+            },
+            Self::Rotate { .. } => TransformState::Rotate {
                 phase: 0.0,
                 last_target: 0,
             },
@@ -196,6 +222,10 @@ pub enum TransformState {
         last_target: u64,
     },
     Oscillate {
+        phase: f64,
+        last_target: u64,
+    },
+    Rotate {
         phase: f64,
         last_target: u64,
     },
@@ -242,6 +272,18 @@ pub fn apply_transform(
             max_speed_hz,
             ..
         } => buttplug::apply_oscillate(
+            *scale,
+            *max_speed_hz,
+            value,
+            modifiers,
+            state,
+            target_time_ms,
+        ),
+        TransformConfig::Rotate {
+            scale,
+            max_speed_hz,
+            ..
+        } => buttplug::apply_rotate(
             *scale,
             *max_speed_hz,
             value,
@@ -359,6 +401,21 @@ mod tests {
         };
         assert_eq!(oscillate.declared_axes(), vec!["bp:Oscillate_1"]);
 
+        // Rotate declares two axes — speed first, direction second. The
+        // resolver's pre-fetch must preserve that order so
+        // `apply_rotate` reads `modifiers[0]` as speed and
+        // `modifiers[1]` as direction.
+        let rotate = TransformConfig::Rotate {
+            speed_axis: "bp:Rotate_0".into(),
+            direction_axis: "bp:RotateDir_0".into(),
+            scale: 0.4,
+            max_speed_hz: 5.0,
+        };
+        assert_eq!(
+            rotate.declared_axes(),
+            vec!["bp:Rotate_0", "bp:RotateDir_0"]
+        );
+
         let constrict = TransformConfig::Constrict {
             amount_axis: "bp:Constrict_0".into(),
             min_floor: 0.1,
@@ -428,6 +485,19 @@ mod tests {
             }
             .initial_state(),
             TransformState::Oscillate {
+                phase: 0.0,
+                last_target: 0,
+            }
+        ));
+        assert!(matches!(
+            TransformConfig::Rotate {
+                speed_axis: "x".into(),
+                direction_axis: "y".into(),
+                scale: 0.5,
+                max_speed_hz: 5.0,
+            }
+            .initial_state(),
+            TransformState::Rotate {
                 phase: 0.0,
                 last_target: 0,
             }
