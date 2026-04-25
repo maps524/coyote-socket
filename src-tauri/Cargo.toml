@@ -1,6 +1,6 @@
 [package]
 name = "coyote-socket"
-version = "2.3.2"
+version = "2.4.0"
 description = "DG-LAB Coyote Control Interface"
 authors = ["CoyoteSocket Team"]
 edition = "2021"
