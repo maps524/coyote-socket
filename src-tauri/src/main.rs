@@ -14,13 +14,13 @@ mod gamepad;
 mod logging;
 mod lovense;
 mod modulation;
-mod net;
+pub(crate) mod net;
 mod processing;
 mod protocol;
-mod resolver;
+pub(crate) mod resolver;
 mod settings;
 pub(crate) mod settings_convert;
-mod tcode_input;
+pub(crate) mod tcode_input;
 mod waveform;
 
 // Global AppHandle for emitting events from anywhere
@@ -237,7 +237,7 @@ use settings::{
     AppSettings, BluetoothSettings, ChannelPreset, ChannelSettings as SettingsChannelSettings,
     ConnectionSettings, GamepadBindings, GeneralSettings, KeyboardShortcuts, OutputSettings,
 };
-use net::{is_server_running, set_output_options, start_server, stop_server};
+use net::{is_server_running, start_server, stop_server};
 use resolver::get_current_intensities;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -663,19 +663,44 @@ async fn sync_settings_to_state(settings: &AppSettings) {
     apply_channel_config_to_state(processing::ChannelId::B, &settings.channel_b).await;
 }
 
+/// Push the engine + peak-fill choice into ProcessingState. Thin string-to-
+/// enum wrapper around `ProcessingState::set_options` used by the
+/// `update_output_options` and `save_output_settings` Tauri commands.
+async fn set_output_options(engine: Option<String>, peak_fill: Option<String>) {
+    use processing::{OutputOptions, PeakFillStrategy, ProcessingEngineType};
+
+    let state = processing::get_processing_state().await;
+    let mut state_guard = state.write().await;
+
+    let engine_type = engine
+        .map(|e| ProcessingEngineType::from_str(&e))
+        .unwrap_or(state_guard.options.processing_engine);
+
+    let fill = peak_fill
+        .map(|s| PeakFillStrategy::from_str(&s))
+        .unwrap_or(state_guard.options.peak_fill);
+
+    state_guard.set_options(OutputOptions {
+        processing_engine: engine_type,
+        peak_fill: fill,
+    });
+}
+
 /// Apply saved settings to the running ProcessingState. Called from
 /// `start_websocket_server` so a fresh start picks up the persisted
-/// no-input behavior, decay, channel configs, and output options.
+/// no-input behavior, decay, channel configs (including Buttplug link
+/// config), and output options.
 ///
-/// Lifted out of `websocket.rs` (the file no longer exists) since this
-/// function is settings-load glue, not WS-server logic.
+/// Routes per-channel state through `apply_channel_config_to_state` so
+/// Buttplug-link config restoration matches the live save / update path
+/// — pre-refactor this function wrote `channel.config` directly and
+/// silently dropped saved Buttplug links until the next per-channel save.
 async fn apply_saved_settings_to_processing() {
     use crate::modulation::NoInputBehavior;
 
     let all_settings = settings::get_settings().await;
-    let saved = all_settings.general;
 
-    let behavior = match saved.no_input_behavior.as_str() {
+    let behavior = match all_settings.general.no_input_behavior.as_str() {
         "hold" => NoInputBehavior::Hold,
         "default" => NoInputBehavior::Default,
         "decay" => NoInputBehavior::Decay,
@@ -683,19 +708,15 @@ async fn apply_saved_settings_to_processing() {
         _ => NoInputBehavior::Hold,
     };
 
-    let channel_a_config =
-        crate::settings_convert::convert_channel_settings(&all_settings.channel_a);
-    let channel_b_config =
-        crate::settings_convert::convert_channel_settings(&all_settings.channel_b);
+    // Per-channel config + Buttplug link via the same helper save uses.
+    sync_settings_to_state(&all_settings).await;
 
+    // Cross-channel state (no-input semantics, output options) lives on
+    // ProcessingState directly; one extra write lock to set it.
     let state = processing::get_processing_state().await;
     let mut state_guard = state.write().await;
     state_guard.no_input_behavior = behavior;
-    state_guard.no_input_decay_ms = saved.no_input_decay_ms;
-    state_guard.channel_mut(processing::ChannelId::A).config = channel_a_config;
-    state_guard.channel_mut(processing::ChannelId::B).config = channel_b_config;
-
-    // Restore output options so engine + peak_fill variant survive restart.
+    state_guard.no_input_decay_ms = all_settings.general.no_input_decay_ms;
     state_guard.options.processing_engine = all_settings.output.processing_engine;
     state_guard.options.peak_fill = all_settings.output.peak_fill;
 }

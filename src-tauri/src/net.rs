@@ -14,29 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-use crate::processing::{get_processing_state, OutputOptions, PeakFillStrategy, ProcessingEngineType};
 use crate::tcode_input::handle_tcode_message;
-
-/// Update the output options from the frontend. Lives on `net` because it
-/// shares the WS-server-driven path that pushes engine + peak-fill choices
-/// into `ProcessingState`.
-pub async fn set_output_options(engine: Option<String>, peak_fill: Option<String>) {
-    let state = get_processing_state().await;
-    let mut state_guard = state.write().await;
-
-    let engine_type = engine
-        .map(|e| ProcessingEngineType::from_str(&e))
-        .unwrap_or(state_guard.options.processing_engine);
-
-    let fill = peak_fill
-        .map(|s| PeakFillStrategy::from_str(&s))
-        .unwrap_or(state_guard.options.peak_fill);
-
-    state_guard.set_options(OutputOptions {
-        processing_engine: engine_type,
-        peak_fill: fill,
-    });
-}
 
 /// Detected protocol for reporting to the frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
