@@ -1216,7 +1216,13 @@ pub struct Channel {
     pub v2: V2ChannelState,
     pub v3: V3ChannelState,
     pub downsampler: Downsampler,
+    /// TODO(sub F): replaced by transforms in
+    /// `ParameterLinkConfig.transforms` (config) +
+    /// `ParameterLinkRuntime.transform_state` (runtime). Don't add new
+    /// channels of mutable buttplug state here — they'll need rewriting
+    /// when `process_buttplug_pipeline` is deleted.
     pub buttplug_link: ButtplugLinkConfig,
+    /// TODO(sub F): see `buttplug_link` above. Same fate.
     pub buttplug_state: ButtplugChannelState,
     /// Master-intensity peak history. Only populated when V2Sustained is
     /// the active engine; idle otherwise. Lives on Channel so each channel
