@@ -329,7 +329,12 @@ pub fn resolve_parameter_at_time(
     }
 }
 
-/// Resolve a parameter source to its current value
+/// Resolve a parameter source to its current value, honoring `delay_ms`.
+///
+/// Thin wrapper over `resolve_parameter_at_time` with `target_time = now`;
+/// the inner function handles the `delay_ms` shift, staleness check, curve,
+/// midpoint, and range mapping. Keeping a single body for both call sites
+/// means a future change to the resolver pipeline only touches one place.
 pub fn resolve_parameter(
     source: &ParameterSource,
     axis_values: &HashMap<String, AxisState>,
@@ -337,47 +342,14 @@ pub fn resolve_parameter(
     current_time_ms: u64,
     no_input_decay_ms: u32,
 ) -> f64 {
-    match source.source_type {
-        ParameterSourceType::Static => source.static_value.unwrap_or(0.0),
-        ParameterSourceType::Linked => {
-            let axis = source.source_axis.as_ref();
-            let axis_state = axis.and_then(|a| axis_values.get(a));
-            let delay = source.delay_ms.unwrap_or(0) as u64;
-
-            let input = match axis_state {
-                Some(state) if state.has_data => {
-                    // Check if we should apply no-input behavior based on staleness
-                    let age_ms = current_time_ms.saturating_sub(state.timestamp);
-                    if age_ms > 1000 {
-                        // No data for over 1 second
-                        handle_no_input(no_input_behavior, source, state, age_ms, no_input_decay_ms)
-                    } else if delay > 0 {
-                        // Walk history at (now - delay) so the channel chases
-                        // live input by `delay` ms.
-                        let target = current_time_ms.saturating_sub(delay);
-                        state.value_at(target).unwrap_or(state.value)
-                    } else {
-                        state.value
-                    }
-                }
-                _ => {
-                    // No data available
-                    handle_no_input_no_state(no_input_behavior, source)
-                }
-            };
-
-            // Apply midpoint transformation if enabled (before curve)
-            let midpoint_value = if source.midpoint.unwrap_or(false) {
-                apply_midpoint(input)
-            } else {
-                input
-            };
-
-            let strength = source.curve_strength.unwrap_or(2.0);
-            let curved = apply_curve(midpoint_value, &source.curve, strength);
-            lerp(source.range_min, source.range_max, curved)
-        }
-    }
+    resolve_parameter_at_time(
+        source,
+        axis_values,
+        no_input_behavior,
+        current_time_ms,
+        no_input_decay_ms,
+        current_time_ms,
+    )
 }
 
 /// Handle no-input behavior when axis state exists but is stale
@@ -470,5 +442,83 @@ mod tests {
 
         let result = resolve_parameter(&source, &axis_values, &NoInputBehavior::Hold, 200, 1000);
         assert_eq!(result, 50.0);
+    }
+
+    #[test]
+    fn test_resolve_parameter_honors_delay_ms() {
+        // delay_ms=100, two samples 100ms apart. At now=200, delayed lookup
+        // should land on the older sample (ts=100, value=0.2), not the
+        // newer one (ts=200, value=0.8). With delay_ms=0 we must see the
+        // newer sample.
+        let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        source.delay_ms = Some(100);
+
+        let mut state = AxisState::default();
+        state.update(0.2, 100, None);
+        state.update(0.8, 200, None);
+
+        let mut axis_values = HashMap::new();
+        axis_values.insert("L0".to_string(), state);
+
+        let delayed = resolve_parameter(
+            &source,
+            &axis_values,
+            &NoInputBehavior::Hold,
+            200,
+            1000,
+        );
+        assert!(
+            (delayed - 0.2).abs() < 1e-9,
+            "delayed lookup expected 0.2, got {}",
+            delayed
+        );
+
+        source.delay_ms = Some(0);
+        let live = resolve_parameter(
+            &source,
+            &axis_values,
+            &NoInputBehavior::Hold,
+            200,
+            1000,
+        );
+        assert!(
+            (live - 0.8).abs() < 1e-9,
+            "live lookup expected 0.8, got {}",
+            live
+        );
+    }
+
+    #[test]
+    fn test_resolve_parameter_at_time_matches_resolve_parameter_when_target_is_now() {
+        // The wrapper relationship: resolve_parameter(now) must equal
+        // resolve_parameter_at_time(now, target=now). This guards the
+        // collapse from two bodies into one.
+        let mut source = ParameterSource::linked_source("R2", 10.0, 90.0, CurveType::Linear);
+        source.delay_ms = Some(40);
+
+        let mut state = AxisState::default();
+        state.update(0.1, 50, None);
+        state.update(0.9, 150, None);
+
+        let mut axis_values = HashMap::new();
+        axis_values.insert("R2".to_string(), state);
+
+        let now = 200u64;
+        let via_wrapper = resolve_parameter(
+            &source,
+            &axis_values,
+            &NoInputBehavior::Hold,
+            now,
+            1000,
+        );
+        let via_inner = resolve_parameter_at_time(
+            &source,
+            &axis_values,
+            &NoInputBehavior::Hold,
+            now,
+            1000,
+            now,
+        );
+        assert_eq!(via_wrapper, via_inner);
     }
 }
