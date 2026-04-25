@@ -9,6 +9,8 @@ use tauri::{AppHandle, Emitter, Manager};
 mod bluetooth;
 mod buttplug;
 mod device;
+mod diagnostic;
+mod gamepad;
 mod logging;
 mod modulation;
 mod processing;
@@ -62,6 +64,13 @@ pub struct ButtplugFeaturesPayload {
     pub timestamp: u64,
 }
 
+/// Payload for battery level change events
+#[derive(Clone, Serialize)]
+pub struct BatteryChangedPayload {
+    pub level: u8,
+    pub timestamp: u64,
+}
+
 /// Full connection status for HMR recovery
 #[derive(Clone, Serialize)]
 pub struct ConnectionStatus {
@@ -96,11 +105,15 @@ pub struct ChannelStateSnapshot {
 #[derive(Clone, Serialize)]
 pub struct OutputOptionsSnapshot {
     pub processing_engine: String,
-    pub channel_interplay: String,
-    pub chase_delay_ms: u32,
+    pub peak_fill: String,
 }
 
-/// Emit axis values to the frontend (called from device loop at 10Hz)
+/// Emit axis values to the frontend.
+///
+/// Fired from `websocket::handle_tcode_message` per inbound T-Code command, so
+/// the event rate matches the input stream (typically 10-60+ Hz depending on
+/// the sender) rather than the 10Hz device tick. Consumers should treat the
+/// cadence as "whenever input arrives" and not assume a fixed rate.
 pub fn emit_axis_update(axes: HashMap<String, f64>, channel_a: f64, channel_b: f64) {
     if let Some(handle) = get_app_handle() {
         let timestamp = std::time::SystemTime::now()
@@ -163,6 +176,36 @@ pub fn emit_waveform_sample(sample: waveform::WaveformSample) {
     }
 }
 
+/// Emit battery level change to frontend. Fired after the initial read on
+/// connect and from the 30s polling task in `bluetooth::start_battery_monitor`.
+pub fn emit_battery_changed(level: u8) {
+    if let Some(handle) = get_app_handle() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let payload = BatteryChangedPayload { level, timestamp };
+        let _ = handle.emit("battery-changed", payload);
+    }
+}
+
+/// Forward a backend log line to the frontend LogsPanel. Called from the
+/// ring-buffer logger so every `log_info!`/`log_error!` etc. shows up in
+/// the in-app panel, not just the on-disk file. No-ops before the app
+/// handle is initialized (early startup logs still hit the file).
+pub fn emit_backend_log(level: &str, message: &str) {
+    if let Some(handle) = get_app_handle() {
+        #[derive(serde::Serialize, Clone)]
+        struct BackendLog<'a> {
+            level: &'a str,
+            message: &'a str,
+        }
+        let _ = handle.emit("backend-log", BackendLog { level, message });
+    }
+}
+
+
 /// Emit Buttplug feature values to frontend
 pub fn emit_buttplug_features(features: HashMap<String, f64>) {
     if let Some(handle) = get_app_handle() {
@@ -189,9 +232,8 @@ use device::{
 use modulation::ParameterSource;
 use settings::{
     AppSettings, BluetoothSettings, ChannelPreset, ChannelSettings as SettingsChannelSettings,
-    ConnectionSettings, GeneralSettings, KeyboardShortcuts, OutputSettings,
+    ConnectionSettings, GamepadBindings, GeneralSettings, KeyboardShortcuts, OutputSettings,
 };
-use waveform::{get_channel_state, get_waveform_data};
 use websocket::{
     apply_saved_settings_to_processing, get_current_intensities, is_server_running,
     set_output_options, start_server, stop_server,
@@ -316,20 +358,11 @@ async fn get_axis_values() -> Result<HashMap<String, f64>, String> {
 }
 
 #[tauri::command]
-async fn get_buttplug_features() -> Result<HashMap<String, f64>, String> {
-    use crate::processing::get_processing_state;
-    let state = get_processing_state().await;
-    let state_guard = state.read().await;
-    Ok(state_guard.get_buttplug_features())
-}
-
-#[tauri::command]
 async fn update_output_options(
-    interplay: Option<String>,
     engine: Option<String>,
-    chase_delay_ms: Option<u32>,
+    peak_fill: Option<String>,
 ) -> Result<String, String> {
-    set_output_options(interplay, engine, chase_delay_ms).await;
+    set_output_options(engine, peak_fill).await;
     Ok("Output options updated".to_string())
 }
 
@@ -353,11 +386,25 @@ async fn connect_bluetooth_device(adapter_index: usize, address: String) -> Resu
                     };
 
                     drop(manager); // Release lock before starting loop
-                                   // Start the 10Hz device update loop
+
+                    // Clear BF snapshot so the first tick resends balance +
+                    // soft-limit params (device flash persists BF across
+                    // reconnects, so we can't trust what's there).
+                    device::reset_bf_snapshot().await;
+
+                    // Start the 10Hz device update loop
                     start_device_loop().await;
 
                     // Emit connection changed event for stateless frontend
                     emit_connection_changed("bluetooth", true, Some(address.clone()));
+
+                    // Push the initial battery reading and spawn the 30s
+                    // refresh task so the frontend stays in sync without
+                    // polling us for it.
+                    if let Some(level) = battery_level {
+                        emit_battery_changed(level);
+                    }
+                    bluetooth::start_battery_monitor();
 
                     let battery_info = battery_level
                         .map(|l| format!(" (Battery: {}%)", l))
@@ -378,6 +425,10 @@ async fn connect_bluetooth_device(adapter_index: usize, address: String) -> Resu
 async fn disconnect_bluetooth_device() -> Result<String, String> {
     // Stop the device loop first
     stop_device_loop().await;
+
+    // Clear BF snapshot so the next reconnect rewrites from scratch rather
+    // than assuming the device still holds our prior values.
+    device::reset_bf_snapshot().await;
 
     match get_bluetooth_manager().await {
         Ok(manager) => {
@@ -415,56 +466,6 @@ async fn send_coyote_command(command_data: Vec<u8>) -> Result<String, String> {
 #[tauri::command]
 async fn send_device_response(response: String) -> Result<String, String> {
     Ok(format!("Sent response: {}", response))
-}
-
-#[tauri::command]
-async fn update_channel_params(
-    channel: String,
-    frequency: f64,
-    freq_balance: u8,
-    int_balance: u8,
-    range_min: u8,
-    range_max: u8,
-) -> Result<String, String> {
-    let params = ChannelParams {
-        frequency,
-        freq_balance,
-        int_balance,
-        range_min,
-        range_max,
-    };
-
-    match channel.as_str() {
-        "A" | "a" => {
-            update_channel_a_params(params).await;
-            Ok("Updated Channel A parameters".to_string())
-        }
-        "B" | "b" => {
-            update_channel_b_params(params).await;
-            Ok("Updated Channel B parameters".to_string())
-        }
-        _ => Err(format!("Unknown channel: {}", channel)),
-    }
-}
-
-#[tauri::command]
-async fn get_battery_level() -> Result<u8, String> {
-    match get_bluetooth_manager().await {
-        Ok(manager) => {
-            let manager = manager.lock().await;
-            if !manager.is_connected() {
-                return Ok(0); // Return 0 if not connected
-            }
-            match manager.read_battery().await {
-                Ok(level) => Ok(level),
-                Err(e) => {
-                    println!("Failed to read battery: {}", e);
-                    Ok(0)
-                }
-            }
-        }
-        Err(_) => Ok(0),
-    }
 }
 
 #[tauri::command]
@@ -529,20 +530,20 @@ async fn get_connection_status() -> Result<ConnectionStatus, String> {
 /// This returns all live state so the frontend can restore after reload
 #[tauri::command]
 async fn get_full_state() -> Result<FullAppState, String> {
-    use crate::processing::{get_processing_state, ChannelInterplay, ProcessingEngineType};
+    use crate::processing::{get_processing_state, ProcessingEngineType};
 
-    // Get connection status
     let connection = get_connection_status().await?;
 
-    // Get channel params from device state
-    let params_a = get_channel_a_params().await;
-    let params_b = get_channel_b_params().await;
+    // Device-side mirror for frequency/balance; ranges come from processing state.
+    let params_a_dev = get_channel_a_params().await;
+    let params_b_dev = get_channel_b_params().await;
 
-    // Get current intensities
     let (intensity_a, intensity_b) = get_current_intensities().await;
 
-    // Get output options from processing state
-    let (engine_str, interplay_str, chase_delay) = {
+    // Pull engine/peak_fill + per-channel ranges from processing state in one
+    // read lock. Ranges live on the intensity ParameterSource, not on device
+    // params anymore.
+    let (engine_str, peak_fill_str, range_a, range_b) = {
         let state = get_processing_state().await;
         let state_guard = state.read().await;
         let engine = match state_guard.options.processing_engine {
@@ -551,20 +552,18 @@ async fn get_full_state() -> Result<FullAppState, String> {
             ProcessingEngineType::V2Balanced => "v2-balanced",
             ProcessingEngineType::V2Detailed => "v2-detailed",
             ProcessingEngineType::V2Dynamic => "v2-dynamic",
+            ProcessingEngineType::V2Sustained => "v2-sustained",
             ProcessingEngineType::V3Predictive => "v3-predictive",
         };
-        let interplay = match state_guard.options.channel_interplay {
-            ChannelInterplay::None => "none",
-            ChannelInterplay::Mirror => "mirror",
-            ChannelInterplay::MirrorInverted => "mirror-inverted",
-            ChannelInterplay::Chase => "chase",
-            ChannelInterplay::ChaseInverted => "chase-inverted",
-            ChannelInterplay::Alternating => "alternating",
+        let range_for = |id: crate::processing::ChannelId| -> (u8, u8) {
+            let src = &state_guard.channel(id).config.intensity;
+            (src.range_min as u8, src.range_max as u8)
         };
         (
             engine.to_string(),
-            interplay.to_string(),
-            state_guard.options.chase_delay_ms,
+            state_guard.options.peak_fill.as_str().to_string(),
+            range_for(crate::processing::ChannelId::A),
+            range_for(crate::processing::ChannelId::B),
         )
     };
 
@@ -576,25 +575,24 @@ async fn get_full_state() -> Result<FullAppState, String> {
     Ok(FullAppState {
         connection,
         channel_a: ChannelStateSnapshot {
-            frequency: params_a.frequency,
-            freq_balance: params_a.freq_balance,
-            int_balance: params_a.int_balance,
-            range_min: params_a.range_min,
-            range_max: params_a.range_max,
+            frequency: params_a_dev.frequency,
+            freq_balance: params_a_dev.freq_balance,
+            int_balance: params_a_dev.int_balance,
+            range_min: range_a.0,
+            range_max: range_a.1,
             current_intensity: intensity_a,
         },
         channel_b: ChannelStateSnapshot {
-            frequency: params_b.frequency,
-            freq_balance: params_b.freq_balance,
-            int_balance: params_b.int_balance,
-            range_min: params_b.range_min,
-            range_max: params_b.range_max,
+            frequency: params_b_dev.frequency,
+            freq_balance: params_b_dev.freq_balance,
+            int_balance: params_b_dev.int_balance,
+            range_min: range_b.0,
+            range_max: range_b.1,
             current_intensity: intensity_b,
         },
         output_options: OutputOptionsSnapshot {
             processing_engine: engine_str,
-            channel_interplay: interplay_str,
-            chase_delay_ms: chase_delay,
+            peak_fill: peak_fill_str,
         },
         timestamp,
     })
@@ -604,31 +602,37 @@ async fn get_full_state() -> Result<FullAppState, String> {
 // Settings Commands
 // ============================================================================
 
-#[tauri::command]
-async fn get_app_settings() -> Result<AppSettings, String> {
-    let settings = settings::get_settings().await;
-
-    // Sync Buttplug link configs to processing state on settings load
+/// Sync a full AppSettings to ProcessingState: channel configs + buttplug link configs.
+/// Single source of truth for settings→runtime conversion used by load and save paths.
+async fn sync_settings_to_state(settings: &AppSettings) {
     let state = processing::get_processing_state().await;
     let mut state_guard = state.write().await;
 
-    // Sync Channel A buttplug links
+    use crate::processing::ChannelId;
+    state_guard.channel_mut(ChannelId::A).config =
+        crate::websocket::convert_channel_settings(&settings.channel_a);
+    state_guard.channel_mut(ChannelId::B).config =
+        crate::websocket::convert_channel_settings(&settings.channel_b);
+
     if let Some(ref bp_links) = settings.channel_a.intensity_source.buttplug_links {
         state_guard.set_buttplug_link_config('A', bp_links.to_link_config());
     }
-
-    // Sync Channel B buttplug links
     if let Some(ref bp_links) = settings.channel_b.intensity_source.buttplug_links {
         state_guard.set_buttplug_link_config('B', bp_links.to_link_config());
     }
+}
 
-    drop(state_guard);
+#[tauri::command]
+async fn get_app_settings() -> Result<AppSettings, String> {
+    let settings = settings::get_settings().await;
+    sync_settings_to_state(&settings).await;
     Ok(settings)
 }
 
 #[tauri::command]
 async fn save_app_settings(settings: AppSettings) -> Result<String, String> {
-    settings::update_settings(settings).await?;
+    settings::update_settings(settings.clone()).await?;
+    sync_settings_to_state(&settings).await;
     Ok("Settings saved".to_string())
 }
 
@@ -637,13 +641,14 @@ async fn save_channel_settings(
     channel: String,
     channel_settings: SettingsChannelSettings,
 ) -> Result<String, String> {
-    // Extract current values for device params based on parameter source types
+    // Snapshot static fallback values for HMR recovery. When a source is
+    // linked, seed the mirror with a sensible middle-of-range so reload shows
+    // something reasonable until the next T-Code tick repopulates it.
     let frequency = if channel_settings.frequency_source.source_type
         == settings::ParameterSourceType::Static
     {
         channel_settings.frequency_source.static_value
     } else {
-        // When linked, use a reasonable default or middle of range
         (channel_settings.frequency_source.range_min + channel_settings.frequency_source.range_max)
             / 2.0
     };
@@ -664,40 +669,46 @@ async fn save_channel_settings(
         128
     };
 
-    // Intensity range comes from intensity source
-    let range_min = channel_settings.intensity_source.range_min as u8;
-    let range_max = channel_settings.intensity_source.range_max as u8;
-
-    // Update device parameters so they take effect immediately
     let params = ChannelParams {
         frequency,
         freq_balance,
         int_balance,
-        range_min,
-        range_max,
     };
+
+    // Convert settings → runtime ChannelConfig before moving channel_settings.
+    // Disk write first; on failure processing state stays consistent with disk.
+    let new_config = crate::websocket::convert_channel_settings(&channel_settings);
+    let bp_config = channel_settings
+        .intensity_source
+        .buttplug_links
+        .as_ref()
+        .map(|bp| bp.to_link_config());
 
     match channel.as_str() {
         "A" | "a" => {
-            // Sync Buttplug link config to processing state if present
-            if let Some(ref bp_links) = channel_settings.intensity_source.buttplug_links {
-                let bp_config = bp_links.to_link_config();
-                let state = processing::get_processing_state().await;
-                let mut state_guard = state.write().await;
-                state_guard.set_buttplug_link_config('A', bp_config);
-            }
             settings::update_channel_a(channel_settings).await?;
+
+            let state = processing::get_processing_state().await;
+            let mut state_guard = state.write().await;
+            state_guard.channel_mut(processing::ChannelId::A).config = new_config;
+            if let Some(cfg) = bp_config {
+                state_guard.set_buttplug_link_config('A', cfg);
+            }
+            drop(state_guard);
+
             update_channel_a_params(params).await;
         }
         "B" | "b" => {
-            // Sync Buttplug link config to processing state if present
-            if let Some(ref bp_links) = channel_settings.intensity_source.buttplug_links {
-                let bp_config = bp_links.to_link_config();
-                let state = processing::get_processing_state().await;
-                let mut state_guard = state.write().await;
-                state_guard.set_buttplug_link_config('B', bp_config);
-            }
             settings::update_channel_b(channel_settings).await?;
+
+            let state = processing::get_processing_state().await;
+            let mut state_guard = state.write().await;
+            state_guard.channel_mut(processing::ChannelId::B).config = new_config;
+            if let Some(cfg) = bp_config {
+                state_guard.set_buttplug_link_config('B', cfg);
+            }
+            drop(state_guard);
+
             update_channel_b_params(params).await;
         }
         _ => return Err(format!("Unknown channel: {}", channel)),
@@ -705,27 +716,56 @@ async fn save_channel_settings(
     Ok("Channel settings saved".to_string())
 }
 
+/// Lightweight processing-state-only update for a channel. No disk I/O.
+/// Used by the fast (50ms) frontend debounce so device output reflects UI
+/// changes immediately; `save_channel_settings` runs behind it for persistence.
+#[tauri::command]
+async fn update_channel_config(
+    channel: String,
+    channel_settings: SettingsChannelSettings,
+) -> Result<String, String> {
+    let new_config = crate::websocket::convert_channel_settings(&channel_settings);
+    let bp_config = channel_settings
+        .intensity_source
+        .buttplug_links
+        .as_ref()
+        .map(|bp| bp.to_link_config());
+
+    let channel_id = processing::ChannelId::from_str(&channel)
+        .ok_or_else(|| format!("Unknown channel: {}", channel))?;
+
+    let state = processing::get_processing_state().await;
+    let mut state_guard = state.write().await;
+    state_guard.channel_mut(channel_id).config = new_config;
+    if let Some(cfg) = bp_config {
+        state_guard.set_buttplug_link_config(channel_id.as_char(), cfg);
+    }
+    drop(state_guard);
+
+    Ok(format!("Updated channel {} config", channel))
+}
+
 #[tauri::command]
 async fn save_output_settings(
-    channel_interplay: String,
     processing_engine: String,
-    chase_delay_ms: Option<u32>,
+    peak_fill: Option<String>,
 ) -> Result<String, String> {
-    let delay = chase_delay_ms.unwrap_or(100);
+    let fill = peak_fill
+        .as_deref()
+        .map(processing::PeakFillStrategy::from_str)
+        .unwrap_or_default();
 
     // Update processing options immediately
     set_output_options(
-        Some(channel_interplay.clone()),
         Some(processing_engine.clone()),
-        Some(delay),
+        Some(fill.as_str().to_string()),
     )
     .await;
 
     // Persist to settings file
     let output_settings = OutputSettings {
-        channel_interplay: processing::ChannelInterplay::from_str(&channel_interplay),
         processing_engine: processing::ProcessingEngineType::from_str(&processing_engine),
-        chase_delay_ms: delay,
+        peak_fill: fill,
     };
     settings::update_output(output_settings).await?;
     Ok("Output settings saved".to_string())
@@ -820,6 +860,29 @@ async fn save_shortcuts(
 }
 
 #[tauri::command]
+async fn save_gamepad_bindings(bindings: GamepadBindings) -> Result<String, String> {
+    settings::update_gamepad_bindings(bindings.clone()).await?;
+    gamepad::set_active_bindings(bindings).await;
+    Ok("Gamepad bindings saved".to_string())
+}
+
+#[tauri::command]
+async fn get_gamepad_bindings() -> Result<GamepadBindings, String> {
+    Ok(settings::get_gamepad_bindings().await)
+}
+
+#[tauri::command]
+async fn set_gamepad_engine(engine: String) -> Result<String, String> {
+    let parsed = gamepad::GamepadEngine::from_str(&engine);
+    gamepad::set_engine(parsed).await;
+    // Persist the choice to general settings.
+    let mut general = settings::get_settings().await.general;
+    general.gamepad_engine = parsed.as_str().to_string();
+    settings::update_general(general).await?;
+    Ok(format!("Gamepad engine set to {}", parsed.as_str()))
+}
+
+#[tauri::command]
 async fn save_general_settings(
     no_input_behavior: String,
     no_input_decay_ms: u32,
@@ -837,6 +900,7 @@ async fn save_general_settings(
         "v2-balanced" => ProcessingEngineType::V2Balanced,
         "v2-detailed" => ProcessingEngineType::V2Detailed,
         "v2-dynamic" => ProcessingEngineType::V2Dynamic,
+        "v2-sustained" => ProcessingEngineType::V2Sustained,
         "v3-predictive" => ProcessingEngineType::V3Predictive,
         _ => ProcessingEngineType::V1,
     };
@@ -858,8 +922,8 @@ async fn save_general_settings(
         state_guard.no_input_decay_ms = no_input_decay_ms;
     }
 
-    // Get current output_paused state to preserve it
-    let current_output_paused = settings::get_output_paused().await;
+    // Get current output_paused + gamepad_engine to preserve them
+    let current = settings::get_settings().await.general;
 
     let general_settings = GeneralSettings {
         no_input_behavior,
@@ -868,10 +932,20 @@ async fn save_general_settings(
         save_rate_ms,
         show_tcode_monitor,
         processing_engine: engine,
-        output_paused: current_output_paused,
+        output_paused: current.output_paused,
+        gamepad_engine: current.gamepad_engine,
+        gamepad_stick_sensitivity: current.gamepad_stick_sensitivity,
     };
     settings::update_general(general_settings).await?;
     Ok("General settings saved".to_string())
+}
+
+#[tauri::command]
+async fn set_gamepad_stick_sensitivity(value: f64) -> Result<String, String> {
+    let mut general = settings::get_settings().await.general;
+    general.gamepad_stick_sensitivity = value.clamp(0.05, 5.0);
+    settings::update_general(general).await?;
+    Ok("Stick sensitivity saved".to_string())
 }
 
 // ============================================================================
@@ -933,42 +1007,23 @@ async fn update_parameter_source(
     let state = get_processing_state().await;
     let mut state = state.write().await;
 
-    let channel_char = match channel.as_str() {
-        "A" | "a" => 'A',
-        "B" | "b" => 'B',
-        _ => return Err(format!("Unknown channel: {}", channel)),
-    };
+    let channel_id = crate::processing::ChannelId::from_str(&channel)
+        .ok_or_else(|| format!("Unknown channel: {}", channel))?;
+    let channel_char = channel_id.as_char();
 
-    match (channel.as_str(), parameter.as_str()) {
-        ("A" | "a", "intensity") => {
-            state.channel_a_config.intensity = source;
-        }
-        ("A" | "a", "frequency") => {
-            state.channel_a_config.frequency = source;
-        }
-        ("A" | "a", "frequency_balance") => {
-            state.channel_a_config.frequency_balance = source;
-        }
-        ("A" | "a", "intensity_balance") => {
-            state.channel_a_config.intensity_balance = source;
-        }
-        ("B" | "b", "intensity") => {
-            state.channel_b_config.intensity = source;
-        }
-        ("B" | "b", "frequency") => {
-            state.channel_b_config.frequency = source;
-        }
-        ("B" | "b", "frequency_balance") => {
-            state.channel_b_config.frequency_balance = source;
-        }
-        ("B" | "b", "intensity_balance") => {
-            state.channel_b_config.intensity_balance = source;
-        }
-        _ => {
-            return Err(format!(
-                "Unknown channel/parameter: {}/{}",
-                channel, parameter
-            ))
+    {
+        let config = &mut state.channel_mut(channel_id).config;
+        match parameter.as_str() {
+            "intensity" => config.intensity = source,
+            "frequency" => config.frequency = source,
+            "frequency_balance" => config.frequency_balance = source,
+            "intensity_balance" => config.intensity_balance = source,
+            _ => {
+                return Err(format!(
+                    "Unknown channel/parameter: {}/{}",
+                    channel, parameter
+                ))
+            }
         }
     }
 
@@ -1156,6 +1211,34 @@ fn read_logs(lines: Option<usize>) -> Result<Vec<String>, String> {
 }
 
 // ============================================================================
+// Diagnostic Capture Commands
+// ============================================================================
+
+/// Start a diagnostic capture session. Returns the planned output CSV path.
+/// `duration_ms` is the auto-stop window (default 30000 if None).
+///
+/// Async on purpose: `diagnostic::start` schedules the auto-stop with
+/// `tokio::spawn`, which requires being called from a tokio runtime
+/// context. Sync Tauri commands run on a non-tokio worker and would panic.
+#[tauri::command]
+async fn start_diagnostic_capture(duration_ms: Option<u64>) -> Result<String, String> {
+    let dur = duration_ms.unwrap_or(30_000);
+    diagnostic::start(dur).map(|p| p.to_string_lossy().to_string())
+}
+
+/// Stop the active diagnostic capture and flush to CSV. Returns the file path.
+#[tauri::command]
+fn stop_diagnostic_capture() -> Result<String, String> {
+    diagnostic::stop().map(|p| p.to_string_lossy().to_string())
+}
+
+/// Read-only status of the diagnostic capture system.
+#[tauri::command]
+fn get_diagnostic_status() -> diagnostic::DiagnosticStatus {
+    diagnostic::status()
+}
+
+// ============================================================================
 // Window Management
 // ============================================================================
 
@@ -1192,14 +1275,11 @@ fn main() {
             get_websocket_status,
             get_channel_intensities,
             get_axis_values,
-            get_buttplug_features,
             update_output_options,
             connect_bluetooth_device,
             disconnect_bluetooth_device,
             send_coyote_command,
             send_device_response,
-            update_channel_params,
-            get_battery_level,
             get_device_output,
             // State query commands (HMR recovery)
             get_connection_status,
@@ -1209,11 +1289,16 @@ fn main() {
             get_app_settings,
             save_app_settings,
             save_channel_settings,
+            update_channel_config,
             save_output_settings,
             save_connection_settings,
             get_websocket_port,
             save_bluetooth_settings,
             save_shortcuts,
+            save_gamepad_bindings,
+            get_gamepad_bindings,
+            set_gamepad_engine,
+            set_gamepad_stick_sensitivity,
             save_general_settings,
             // Output pause commands
             get_output_paused,
@@ -1227,22 +1312,45 @@ fn main() {
             save_preset,
             delete_preset,
             rename_preset,
-            // Waveform commands
-            get_waveform_data,
-            get_channel_state,
             // Logging commands
             get_log_path,
-            read_logs
+            read_logs,
+            // Diagnostic capture commands
+            start_diagnostic_capture,
+            stop_diagnostic_capture,
+            get_diagnostic_status
         ])
         .setup(|app| {
             // Initialize the ring buffer logger
             // Log file will be at <app_dir>/coyote-socket.log
             let app_dir = app.path().app_data_dir().ok();
             logging::init_logger(app_dir);
+            // Diagnostic CSV captures live next to the executable so both
+            // dev (target/debug) and release builds drop the file in an
+            // easy-to-find location. Falls back to cwd if exe path can't
+            // be resolved.
+            let diag_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            diagnostic::init(diag_dir);
             log_info!("CoyoteSocket starting up");
 
             // Store the AppHandle for global event emission
             set_app_handle(app.handle().clone());
+
+            // Initialize gamepad bindings from settings + start the configured
+            // engine (gilrs / xinput / off). Runs in a detached task so setup
+            // stays sync.
+            tauri::async_runtime::spawn(async {
+                let app_settings = settings::get_settings().await;
+                let bindings = app_settings.gamepad_bindings.clone();
+                gamepad::init_active_bindings(bindings).await;
+                let engine = gamepad::GamepadEngine::from_str(
+                    &app_settings.general.gamepad_engine,
+                );
+                gamepad::set_engine(engine).await;
+            });
 
             // DEV_URL override: when set (e.g. http://localhost:1421), redirect
             // config-created windows to the Vite dev server. Allows release

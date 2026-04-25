@@ -28,10 +28,14 @@
     rangeChange: { min: number; max: number };
   }>();
 
-  // Axis button grid layout
+  // Axis button grid layout. T-Code rows + gamepad row.
   const axisRows = [
     ['L0', 'L1', 'L2'],
     ['R0', 'R1', 'R2']
+  ];
+  const gamepadAxisRows = [
+    ['GP_LX', 'GP_LY', 'GP_LT'],
+    ['GP_RX', 'GP_RY', 'GP_RT']
   ];
 
   // Curve options for dropdown
@@ -491,6 +495,24 @@
                 {/each}
               </div>
             {/each}
+            <!-- Gamepad axis rows -->
+            <div class="pt-1 border-t border-border/50 text-[10px] text-muted-foreground">Gamepad</div>
+            {#each gamepadAxisRows as row}
+              <div class="flex gap-1">
+                {#each row as axis}
+                  <button
+                    type="button"
+                    class="flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors
+                           {selectedSource === axis
+                             ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
+                             : 'bg-muted/50 hover:bg-muted text-foreground'}"
+                    on:click={() => handleAxisClick(axis)}
+                  >
+                    {axis.replace('GP_', '')}
+                  </button>
+                {/each}
+              </div>
+            {/each}
           </div>
 
           <!-- Curve selector dropdown -->
@@ -577,14 +599,18 @@
     <div
       class="absolute top-1/2 -translate-y-1/2 h-3 rounded-full {channel === 'A' ? 'bg-primary' : 'bg-secondary'} cursor-grab"
       class:cursor-grabbing={draggingMode === 'range'}
-      style="left: {minPercent}%; width: {maxPercent - minPercent}%; box-shadow: 0 0 10px var(--slider-shadow-2)"
+      style="left: calc(12px + {minPercent} * (100% - 24px) / 100); width: calc({maxPercent - minPercent} * (100% - 24px) / 100); box-shadow: 0 0 10px var(--slider-shadow-2)"
     ></div>
 
-    <!-- Current input position indicator -->
+    <!-- Current input position indicator.
+         Inset by half-thumb-width on each side so 0% / 100% align with
+         where the thumb visually sits at min / max (browsers position the
+         thumb's center at min+half-thumb on the left, max-half-thumb on
+         the right, not at the absolute edges of the input). -->
     {#if indicatorValue > 0}
     <div
       class="position-indicator absolute top-1/2 pointer-events-none z-20"
-      style="left: {indicatorPercent}%"
+      style="left: calc(12px + {indicatorPercent} * (100% - 24px) / 100);"
     >
       <!-- Outer glow (largest, most diffuse) -->
       <div
@@ -638,10 +664,10 @@
     <!-- Track background -->
     <div class="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-3 bg-muted rounded-full"></div>
 
-    <!-- Value highlight -->
+    <!-- Value highlight (inset by half-thumb to align with thumb travel) -->
     <div
       class="absolute top-1/2 -translate-y-1/2 h-3 rounded-full {channel === 'A' ? 'bg-primary' : 'bg-secondary'}"
-      style="left: 0; width: {(staticValue / max) * 100}%"
+      style="left: 12px; width: calc({(staticValue / max) * 100} * (100% - 24px) / 100);"
     ></div>
 
     <!-- Static value input -->

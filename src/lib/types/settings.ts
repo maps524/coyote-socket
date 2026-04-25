@@ -91,9 +91,8 @@ export interface BluetoothSettings {
 }
 
 export interface OutputSettings {
-    channelInterplay: string;
     processingEngine: string;
-    chaseDelayMs?: number;
+    peakFill?: string;
 }
 
 /**
@@ -117,6 +116,23 @@ export interface ChannelSettings {
     intensityBalanceSource: ParameterSourceSettings;
     intensitySource: ParameterSourceSettings;
 }
+
+export type AxisDir = 'pos' | 'neg';
+
+export type ChordPart =
+    | { kind: 'button'; index: number }
+    | { kind: 'axis'; index: number; dir: AxisDir; threshold: number };
+
+export type GamepadBinding =
+    | { kind: 'button'; index: number }
+    | { kind: 'axis'; index: number; dir: AxisDir; threshold: number }
+    | { kind: 'combo'; parts: ChordPart[] };
+
+/**
+ * Action name → gamepad binding. Free-form map so new actions can be added
+ * without schema changes. Mirrors src-tauri/src/settings.rs GamepadBindings.
+ */
+export type GamepadBindings = Record<string, GamepadBinding>;
 
 export interface KeyboardShortcuts {
     channelAFreqUp: string;
@@ -147,6 +163,8 @@ export interface GeneralSettings {
     saveRateMs: number;
     showTcodeMonitor: boolean;
     processingEngine: string;
+    gamepadEngine?: 'off' | 'gilrs' | 'xinput';
+    gamepadStickSensitivity?: number;
 }
 
 export interface AppSettings {
@@ -157,6 +175,7 @@ export interface AppSettings {
     channelB: ChannelSettings;
     shortcuts: KeyboardShortcuts;
     general?: GeneralSettings;
+    gamepadBindings?: GamepadBindings;
 }
 
 // Note: Default values are defined in Rust (src-tauri/src/settings.rs)

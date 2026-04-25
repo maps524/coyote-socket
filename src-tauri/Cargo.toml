@@ -19,6 +19,8 @@ uuid = "1.6"
 futures = "0.3"
 regex = "1"
 lazy_static = "1.4"
+gilrs = "0.10"
+rusty-xinput = "1.3"
 
 [features]
 default = ["custom-protocol"]

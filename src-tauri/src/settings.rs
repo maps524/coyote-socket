@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::processing::{ChannelInterplay, ProcessingEngineType};
+use crate::processing::ProcessingEngineType;
 
 // ============================================================================
 // Settings Structs
@@ -70,22 +70,16 @@ impl Default for BluetoothSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputSettings {
-    pub channel_interplay: ChannelInterplay,
     pub processing_engine: ProcessingEngineType,
-    #[serde(default = "default_chase_delay")]
-    pub chase_delay_ms: u32,
-}
-
-fn default_chase_delay() -> u32 {
-    100
+    #[serde(default)]
+    pub peak_fill: crate::processing::PeakFillStrategy,
 }
 
 impl Default for OutputSettings {
     fn default() -> Self {
         Self {
-            channel_interplay: ChannelInterplay::None,
             processing_engine: ProcessingEngineType::V2Smooth,
-            chase_delay_ms: 100,
+            peak_fill: crate::processing::PeakFillStrategy::default(),
         }
     }
 }
@@ -381,6 +375,62 @@ impl LegacyChannelSettings {
     }
 }
 
+/// Gamepad axis direction (positive past +threshold, negative past -threshold)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum AxisDir {
+    Pos,
+    Neg,
+}
+
+/// One part of a chord (combo). All parts must be simultaneously active for
+/// the combo to trigger — a button is "active" while held; an axis is "active"
+/// while past its threshold in the given direction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ChordPart {
+    #[serde(rename_all = "camelCase")]
+    Button { index: u8 },
+    #[serde(rename_all = "camelCase")]
+    Axis {
+        index: u8,
+        dir: AxisDir,
+        threshold: f64,
+    },
+}
+
+/// A gamepad binding — single button, single axis, or a multi-part chord.
+/// Combos fire on the *transition* of the last part to active, while all
+/// other parts are already active. Pressing additional buttons after the
+/// combo fires does not retrigger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GamepadBinding {
+    #[serde(rename_all = "camelCase")]
+    Button { index: u8 },
+    #[serde(rename_all = "camelCase")]
+    Axis {
+        index: u8,
+        dir: AxisDir,
+        threshold: f64,
+    },
+    #[serde(rename_all = "camelCase")]
+    Combo { parts: Vec<ChordPart> },
+}
+
+/// Map of action-name → gamepad binding. Action names are camelCase strings
+/// matching the frontend dispatch table (e.g. "channelAIntUp"). Free-form
+/// HashMap so new actions can be added without schema migrations.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct GamepadBindings(pub std::collections::HashMap<String, GamepadBinding>);
+
+impl GamepadBindings {
+    pub fn iter_bound(&self) -> impl Iterator<Item = (&str, &GamepadBinding)> + '_ {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+}
+
 /// Keyboard shortcuts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -423,6 +473,25 @@ pub struct GeneralSettings {
     pub processing_engine: ProcessingEngineType,
     #[serde(default)]
     pub output_paused: bool,
+    /// "off" | "gilrs" | "xinput". Default = xinput on Windows, gilrs elsewhere.
+    #[serde(default = "default_gamepad_engine")]
+    pub gamepad_engine: String,
+    /// Multiplier for continuous stick-driven action adjustments. 1.0 = neutral.
+    /// Higher = stick deflection moves values faster; lower = slower.
+    #[serde(default = "default_stick_sensitivity")]
+    pub gamepad_stick_sensitivity: f64,
+}
+
+fn default_stick_sensitivity() -> f64 {
+    1.0
+}
+
+fn default_gamepad_engine() -> String {
+    if cfg!(target_os = "windows") {
+        "xinput".to_string()
+    } else {
+        "gilrs".to_string()
+    }
 }
 
 impl Default for KeyboardShortcuts {
@@ -461,6 +530,8 @@ impl Default for GeneralSettings {
             show_tcode_monitor: false,
             processing_engine: ProcessingEngineType::V2Smooth,
             output_paused: false,
+            gamepad_engine: default_gamepad_engine(),
+            gamepad_stick_sensitivity: default_stick_sensitivity(),
         }
     }
 }
@@ -476,6 +547,8 @@ pub struct AppSettings {
     pub channel_b: ChannelSettings,
     pub shortcuts: KeyboardShortcuts,
     pub general: GeneralSettings,
+    #[serde(default)]
+    pub gamepad_bindings: GamepadBindings,
 }
 
 impl Default for AppSettings {
@@ -488,6 +561,7 @@ impl Default for AppSettings {
             channel_b: ChannelSettings::default_for_channel('B'),
             shortcuts: KeyboardShortcuts::default(),
             general: GeneralSettings::default(),
+            gamepad_bindings: GamepadBindings::default(),
         }
     }
 }
@@ -544,6 +618,7 @@ impl LegacyAppSettings {
             channel_b: self.channel_b.migrate('B'),
             shortcuts: self.shortcuts,
             general: self.general,
+            gamepad_bindings: GamepadBindings::default(),
         }
     }
 }
@@ -683,6 +758,20 @@ pub async fn update_shortcuts(shortcuts: KeyboardShortcuts) -> Result<(), String
     let mut settings = state.write().await;
     settings.shortcuts = shortcuts;
     save_settings_to_disk(&settings)
+}
+
+/// Update just gamepad bindings
+pub async fn update_gamepad_bindings(bindings: GamepadBindings) -> Result<(), String> {
+    let state = init_settings().await;
+    let mut settings = state.write().await;
+    settings.gamepad_bindings = bindings;
+    save_settings_to_disk(&settings)
+}
+
+/// Get current gamepad bindings
+pub async fn get_gamepad_bindings() -> GamepadBindings {
+    let state = init_settings().await;
+    state.read().await.gamepad_bindings.clone()
 }
 
 /// Update just general settings
