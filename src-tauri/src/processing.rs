@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 
 // Import types from modulation module (single source of truth)
 use crate::input_bus::InputBus;
-use crate::modulation::{ChannelConfig, NoInputBehavior};
+use crate::modulation::{ChannelConfig, ChannelLinkRuntime, NoInputBehavior};
 
 // Import Buttplug types for link configuration and pipeline
 use crate::buttplug::{process_buttplug_pipeline, ButtplugChannelState, ButtplugLinkConfig};
@@ -1205,6 +1205,14 @@ pub struct Channel {
     #[allow(dead_code)]
     pub id: ChannelId,
     pub config: ChannelConfig,
+    /// Per-parameter mutable transform / interpolation state. One slot per
+    /// `ChannelConfig` field (`frequency`, `frequency_balance`,
+    /// `intensity_balance`, `intensity`). Sub D fleshes out the
+    /// `TransformState` variants; sub C carries the empty shape so the
+    /// resolver rewrite in sub E can start mutating it without further
+    /// type churn on `Channel`.
+    #[allow(dead_code)] // Resolver rewrite in sub E reads this.
+    pub link_runtime: ChannelLinkRuntime,
     pub v2: V2ChannelState,
     pub v3: V3ChannelState,
     pub downsampler: Downsampler,
@@ -1235,6 +1243,7 @@ impl Channel {
         Self {
             id,
             config,
+            link_runtime: ChannelLinkRuntime::default(),
             v2: V2ChannelState::default(),
             v3: V3ChannelState::default(),
             downsampler: Downsampler::default(),
@@ -1740,7 +1749,7 @@ pub fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modulation::{CurveType, ParameterSource};
+    use crate::modulation::{CurveType, ParameterLinkConfig};
 
     #[test]
     fn test_parse_tcode_simple() {
@@ -2047,7 +2056,7 @@ mod tests {
         let mut state = ProcessingState::default();
         // Re-link B's intensity to L0 so both channels share the axis.
         state.channel_mut(ChannelId::B).config.intensity =
-            ParameterSource::linked_source("L0", 0.0, 200.0, CurveType::Linear);
+            ParameterLinkConfig::linked_source("L0", 0.0, 200.0, CurveType::Linear);
 
         let cmd = TCodeCommand {
             axis: "L0".to_string(),

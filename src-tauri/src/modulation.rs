@@ -1,7 +1,6 @@
 // Parameter Modulation Module
 // Handles dynamic parameter linking to T-Code axes with curve transformations
 
-use crate::settings::ButtplugLinksSettings;
 use serde::{Deserialize, Serialize};
 
 /// Source type for a parameter value
@@ -33,10 +32,21 @@ pub enum NoInputBehavior {
     Zero,
 }
 
-/// Configuration for a single parameter's source
+/// Configuration for a single parameter's link to a bus axis (or its
+/// static-value fallback). The serialized half of the
+/// `ParameterLinkConfig` + `ParameterLinkRuntime` split — fields here are
+/// the user-facing knobs that round-trip through `settings.json` /
+/// `presets.json`. Mutable transform / interpolation state lives on
+/// `ParameterLinkRuntime` so it can never accidentally be persisted.
+///
+/// Pre-refactor name: `ParameterSource`. The rename matches the resolver
+/// terminology in the plan doc; the struct shape is unchanged apart from
+/// the dropped `buttplug_links` field (resolver never read it; real
+/// consumer was `Channel.buttplug_link` which still lives off
+/// `ChannelSettings.intensity_source.buttplug_links` until sub F).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ParameterSource {
+pub struct ParameterLinkConfig {
     #[serde(rename = "type")]
     pub source_type: ParameterSourceType,
 
@@ -59,13 +69,9 @@ pub struct ParameterSource {
     /// = real-time. Capped at AXIS_HISTORY_MS by the lookup window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delay_ms: Option<u32>,
-
-    // For Buttplug mode (pipeline stages)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub buttplug_links: Option<ButtplugLinksSettings>,
 }
 
-impl ParameterSource {
+impl ParameterLinkConfig {
     /// Create a static parameter source
     pub fn static_source(value: f64) -> Self {
         Self {
@@ -78,7 +84,6 @@ impl ParameterSource {
             curve_strength: None,
             midpoint: None,
             delay_ms: None,
-            buttplug_links: None,
         }
     }
 
@@ -94,28 +99,68 @@ impl ParameterSource {
             curve_strength: Some(2.0),
             midpoint: None,
             delay_ms: None,
-            buttplug_links: None,
         }
     }
+}
+
+/// Mutable per-parameter runtime state. Holds whatever a transform pipeline
+/// needs to remember between resolver ticks (interpolation positions,
+/// oscillator phases, smoothing accumulators, hold peaks). Sub D fleshes
+/// out `TransformState` variants alongside the `TransformConfig` enum;
+/// for now the vector starts empty so `Channel.link_runtime` exists at
+/// the right shape without prescribing the transform model.
+///
+/// Lives on `Channel`, not on `ParameterLinkConfig`, so it can never be
+/// serialized into a preset by accident.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Read by sub D's transform model; staging shape in sub C.
+pub struct ParameterLinkRuntime {
+    pub transform_state: Vec<TransformState>,
+}
+
+/// One slot of mutable transform state, one variant per `TransformConfig`
+/// variant. Sub D will extend this with `Smooth { last_value, last_ts }`,
+/// `Hold { peak_value, peak_ts }`, `Vibrate { phase }`, etc.
+#[derive(Debug, Clone, Default)]
+pub enum TransformState {
+    /// Identity slot — placeholder until sub D introduces real transform
+    /// variants. Lets the type compile in sub C without dictating any
+    /// runtime shape; replace freely when the transform model lands.
+    #[default]
+    None,
+}
+
+/// Per-channel bundle of `ParameterLinkRuntime` slots — one per parameter
+/// the resolver writes (`frequency`, `frequency_balance`,
+/// `intensity_balance`, `intensity`). Mirrors the field layout of
+/// `ChannelConfig` so each `ParameterLinkConfig` has a co-indexed runtime
+/// neighbor.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Per-field reads land in sub E's resolver rewrite.
+pub struct ChannelLinkRuntime {
+    pub frequency: ParameterLinkRuntime,
+    pub frequency_balance: ParameterLinkRuntime,
+    pub intensity_balance: ParameterLinkRuntime,
+    pub intensity: ParameterLinkRuntime,
 }
 
 /// Complete configuration for a single channel's parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelConfig {
-    pub frequency: ParameterSource,
-    pub frequency_balance: ParameterSource,
-    pub intensity_balance: ParameterSource,
-    pub intensity: ParameterSource,
+    pub frequency: ParameterLinkConfig,
+    pub frequency_balance: ParameterLinkConfig,
+    pub intensity_balance: ParameterLinkConfig,
+    pub intensity: ParameterLinkConfig,
 }
 
 impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
-            frequency: ParameterSource::static_source(100.0),
-            frequency_balance: ParameterSource::static_source(128.0),
-            intensity_balance: ParameterSource::static_source(128.0),
-            intensity: ParameterSource::linked_source("L0", 10.0, 20.0, CurveType::Linear),
+            frequency: ParameterLinkConfig::static_source(100.0),
+            frequency_balance: ParameterLinkConfig::static_source(128.0),
+            intensity_balance: ParameterLinkConfig::static_source(128.0),
+            intensity: ParameterLinkConfig::linked_source("L0", 10.0, 20.0, CurveType::Linear),
         }
     }
 }
@@ -124,20 +169,20 @@ impl ChannelConfig {
     /// Create default configuration for Channel A (linked to L0)
     pub fn channel_a_default() -> Self {
         Self {
-            frequency: ParameterSource::static_source(100.0),
-            frequency_balance: ParameterSource::static_source(128.0),
-            intensity_balance: ParameterSource::static_source(128.0),
-            intensity: ParameterSource::linked_source("L0", 10.0, 20.0, CurveType::Linear),
+            frequency: ParameterLinkConfig::static_source(100.0),
+            frequency_balance: ParameterLinkConfig::static_source(128.0),
+            intensity_balance: ParameterLinkConfig::static_source(128.0),
+            intensity: ParameterLinkConfig::linked_source("L0", 10.0, 20.0, CurveType::Linear),
         }
     }
 
     /// Create default configuration for Channel B (linked to R2)
     pub fn channel_b_default() -> Self {
         Self {
-            frequency: ParameterSource::static_source(100.0),
-            frequency_balance: ParameterSource::static_source(128.0),
-            intensity_balance: ParameterSource::static_source(128.0),
-            intensity: ParameterSource::linked_source("R2", 10.0, 20.0, CurveType::Linear),
+            frequency: ParameterLinkConfig::static_source(100.0),
+            frequency_balance: ParameterLinkConfig::static_source(128.0),
+            intensity_balance: ParameterLinkConfig::static_source(128.0),
+            intensity: ParameterLinkConfig::linked_source("R2", 10.0, 20.0, CurveType::Linear),
         }
     }
 }
@@ -277,7 +322,7 @@ pub fn lerp(min: f64, max: f64, t: f64) -> f64 {
 /// instead of using the latest sample. Lets callers compute per-slot values
 /// within a 100ms output window (e.g. for V3 B0's 4-slot frequency array).
 pub fn resolve_parameter_at_time(
-    source: &ParameterSource,
+    source: &ParameterLinkConfig,
     bus: &crate::input_bus::InputBus,
     no_input_behavior: &NoInputBehavior,
     current_time_ms: u64,
@@ -335,7 +380,7 @@ pub fn resolve_parameter_at_time(
 /// midpoint, and range mapping. Keeping a single body for both call sites
 /// means a future change to the resolver pipeline only touches one place.
 pub fn resolve_parameter(
-    source: &ParameterSource,
+    source: &ParameterLinkConfig,
     bus: &crate::input_bus::InputBus,
     no_input_behavior: &NoInputBehavior,
     current_time_ms: u64,
@@ -354,7 +399,7 @@ pub fn resolve_parameter(
 /// Handle no-input behavior when axis state exists but is stale
 fn handle_no_input(
     behavior: &NoInputBehavior,
-    source: &ParameterSource,
+    source: &ParameterLinkConfig,
     state: &AxisState,
     age_ms: u64,
     decay_ms: u32,
@@ -372,7 +417,7 @@ fn handle_no_input(
 }
 
 /// Handle no-input behavior when no axis state exists
-fn handle_no_input_no_state(behavior: &NoInputBehavior, source: &ParameterSource) -> f64 {
+fn handle_no_input_no_state(behavior: &NoInputBehavior, source: &ParameterLinkConfig) -> f64 {
     match behavior {
         NoInputBehavior::Hold => 0.0,
         NoInputBehavior::Default => source.static_value.unwrap_or(0.0),
@@ -429,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_resolve_static_parameter() {
-        let source = ParameterSource::static_source(42.0);
+        let source = ParameterLinkConfig::static_source(42.0);
         let bus = InputBus::new();
         let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 0, 1000);
         assert_eq!(result, 42.0);
@@ -437,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_resolve_linked_parameter() {
-        let source = ParameterSource::linked_source("L0", 0.0, 100.0, CurveType::Linear);
+        let source = ParameterLinkConfig::linked_source("L0", 0.0, 100.0, CurveType::Linear);
         let mut bus = InputBus::new();
         bus.update("L0", 0.5, 100, None);
 
@@ -451,7 +496,7 @@ mod tests {
         // should land on the older sample (ts=100, value=0.2), not the
         // newer one (ts=200, value=0.8). With delay_ms=0 we must see the
         // newer sample.
-        let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        let mut source = ParameterLinkConfig::linked_source("L0", 0.0, 1.0, CurveType::Linear);
         source.delay_ms = Some(100);
 
         let mut bus = InputBus::new();
@@ -479,7 +524,7 @@ mod tests {
         // delay_ms set so target_time falls before the oldest history sample.
         // value_at scans newest→oldest, finds nothing ≤ target, then falls
         // through to history.front() (oldest available).
-        let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        let mut source = ParameterLinkConfig::linked_source("L0", 0.0, 1.0, CurveType::Linear);
         source.delay_ms = Some((AXIS_HISTORY_MS + 200) as u32);
 
         let mut bus = InputBus::new();
@@ -504,7 +549,7 @@ mod tests {
         // trigger staleness. The age check uses current_time_ms (not the
         // delayed target), so the no-input handler fires regardless of how
         // delay would have shifted the lookup window.
-        let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        let mut source = ParameterLinkConfig::linked_source("L0", 0.0, 1.0, CurveType::Linear);
         source.delay_ms = Some(500);
 
         let mut bus = InputBus::new();
@@ -526,7 +571,7 @@ mod tests {
         // 0 instead of wrapping. With a single sample at t=100, target=0
         // matches no sample (sample.ts > target), so the value_at fallback
         // hits history.front() = oldest = the sole sample. No panic.
-        let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        let mut source = ParameterLinkConfig::linked_source("L0", 0.0, 1.0, CurveType::Linear);
         source.delay_ms = Some(500);
 
         let mut bus = InputBus::new();
@@ -545,7 +590,7 @@ mod tests {
         // The wrapper relationship: resolve_parameter(now) must equal
         // resolve_parameter_at_time(now, target=now). This guards the
         // collapse from two bodies into one.
-        let mut source = ParameterSource::linked_source("R2", 10.0, 90.0, CurveType::Linear);
+        let mut source = ParameterLinkConfig::linked_source("R2", 10.0, 90.0, CurveType::Linear);
         source.delay_ms = Some(40);
 
         let mut bus = InputBus::new();
@@ -557,5 +602,26 @@ mod tests {
         let via_inner =
             resolve_parameter_at_time(&source, &bus, &NoInputBehavior::Hold, now, 1000, now);
         assert_eq!(via_wrapper, via_inner);
+    }
+
+    #[test]
+    fn test_channel_link_runtime_default_starts_with_empty_transform_state() {
+        // Sub C contract: the runtime split exists at the right shape, even
+        // though sub D defines real `TransformState` variants. Until then
+        // every parameter starts with an empty `transform_state` vector
+        // (no-op resolver path), so existing behavior is preserved
+        // bit-for-bit.
+        let runtime = ChannelLinkRuntime::default();
+        for slot in [
+            &runtime.frequency,
+            &runtime.frequency_balance,
+            &runtime.intensity_balance,
+            &runtime.intensity,
+        ] {
+            assert!(
+                slot.transform_state.is_empty(),
+                "fresh ParameterLinkRuntime must start with no transform slots"
+            );
+        }
     }
 }

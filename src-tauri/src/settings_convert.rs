@@ -5,13 +5,18 @@
 //! of how the codebase grew. They have no dependency on the WebSocket server and
 //! belong with the other settings glue.
 
-use crate::modulation::{ChannelConfig, CurveType, ParameterSource, ParameterSourceType};
+use crate::modulation::{ChannelConfig, CurveType, ParameterLinkConfig, ParameterSourceType};
 use crate::settings::{
     ChannelSettings, ParameterSourceSettings, ParameterSourceType as SettingsSourceType,
 };
 
-/// Convert a `ParameterSourceSettings` (persisted shape) into a runtime `ParameterSource`.
-pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> ParameterSource {
+/// Convert a `ParameterSourceSettings` (persisted shape) into a runtime
+/// `ParameterLinkConfig`. The `buttplug_links` field on the persisted side
+/// stays — its consumer is `apply_channel_config_to_state` reading
+/// `ChannelSettings.intensity_source.buttplug_links` directly to populate
+/// `Channel.buttplug_link`. Sub C's drop is on the *runtime* mirror only;
+/// sub F removes the persisted side once the transform model lands.
+pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> ParameterLinkConfig {
     let curve = match source.curve.as_str() {
         "exponential" => CurveType::Exponential,
         "logarithmic" => CurveType::Logarithmic,
@@ -21,7 +26,7 @@ pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> Para
     };
 
     match source.source_type {
-        SettingsSourceType::Static => ParameterSource {
+        SettingsSourceType::Static => ParameterLinkConfig {
             source_type: ParameterSourceType::Static,
             static_value: Some(source.static_value),
             source_axis: None,
@@ -35,9 +40,8 @@ pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> Para
             } else {
                 None
             },
-            buttplug_links: source.buttplug_links.clone(),
         },
-        SettingsSourceType::Linked => ParameterSource {
+        SettingsSourceType::Linked => ParameterLinkConfig {
             source_type: ParameterSourceType::Linked,
             // Static value stays around as a fallback if the link is later cleared
             // without rewriting the saved file.
@@ -53,13 +57,12 @@ pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> Para
             } else {
                 None
             },
-            buttplug_links: source.buttplug_links.clone(),
         },
     }
 }
 
 /// Convert `ChannelSettings` (persisted shape) into a runtime `ChannelConfig`
-/// by converting each of the four `ParameterSource` slots.
+/// by converting each of the four `ParameterLinkConfig` slots.
 pub(crate) fn convert_channel_settings(settings: &ChannelSettings) -> ChannelConfig {
     ChannelConfig {
         frequency: convert_parameter_source(&settings.frequency_source),

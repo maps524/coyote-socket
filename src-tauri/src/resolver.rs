@@ -1,4 +1,4 @@
-//! Read-side helpers over `ProcessingState` that resolve `ParameterSource`
+//! Read-side helpers over `ProcessingState` that resolve `ParameterLinkConfig`
 //! configs into concrete values for downstream consumers (the device tick,
 //! the frontend mirror, the diagnostic capture, etc.).
 //!

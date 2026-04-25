@@ -543,7 +543,7 @@ async fn get_full_state() -> Result<FullAppState, String> {
     let (intensity_a, intensity_b) = get_current_intensities().await;
 
     // Pull engine/peak_fill + per-channel ranges from processing state in one
-    // read lock. Ranges live on the intensity ParameterSource, not on device
+    // read lock. Ranges live on the intensity ParameterLinkConfig, not on device
     // params anymore.
     let (engine_str, peak_fill_str, range_a, range_b) = {
         let state = get_processing_state().await;
