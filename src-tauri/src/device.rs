@@ -510,7 +510,7 @@ async fn send_device_update() -> Result<(), String> {
 
                     // [V3 Predictive Mode] - Smooth Follow Simulation
                     ProcessingEngineType::V3Predictive => {
-                        (vals[0] * 0.1 + vals[1] * 0.2 + vals[2] * 0.3 + vals[3] * 0.4)
+                        vals[0] * 0.1 + vals[1] * 0.2 + vals[2] * 0.3 + vals[3] * 0.4
                     }
                 }
             };

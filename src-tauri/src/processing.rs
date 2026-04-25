@@ -279,6 +279,7 @@ struct CriticalPoint {
     /// Position at this point (0-200)
     position: u8,
     /// True if this is a peak (local maximum), false if valley (local minimum)
+    #[allow(dead_code)]
     is_peak: bool,
 }
 
@@ -555,11 +556,6 @@ impl V3ChannelState {
         }
 
         position
-    }
-
-    /// Get buffer status (for debugging)
-    pub fn buffer_size(&self) -> usize {
-        self.command_buffer.len()
     }
 
     /// Reset to zero
@@ -1212,13 +1208,6 @@ impl ChannelId {
         }
     }
 
-    /// Default T-Code source axis for a freshly-initialized channel.
-    pub fn default_axis(&self) -> &'static str {
-        match self {
-            ChannelId::A => "L0",
-            ChannelId::B => "R2",
-        }
-    }
 }
 
 /// Rolling per-channel master-intensity peak tracker for V2Sustained.
@@ -1269,6 +1258,7 @@ impl IntensityPeakHold {
 /// per-channel logic lives in one place. `ProcessingState` holds `[Channel; 2]`
 /// and only owns truly shared state (axis values, options, interplay history).
 pub struct Channel {
+    #[allow(dead_code)]
     pub id: ChannelId,
     pub config: ChannelConfig,
     pub v1: V1ChannelState,
@@ -1300,12 +1290,6 @@ impl Channel {
             buttplug_state: ButtplugChannelState::default(),
             peak_hold: IntensityPeakHold::default(),
         }
-    }
-
-    /// Whether this channel's intensity is a linked (not static) source.
-    pub fn intensity_is_linked(&self) -> bool {
-        use crate::modulation::ParameterSourceType;
-        self.config.intensity.source_type == ParameterSourceType::Linked
     }
 
     /// Whether this channel's intensity is linked to the given T-Code axis.
@@ -1473,20 +1457,6 @@ impl ProcessingState {
     pub fn channel_mut(&mut self, id: ChannelId) -> &mut Channel {
         &mut self.channels[id as usize]
     }
-
-    // Back-compat helpers used by external callers that predate the refactor.
-    pub fn channel_a(&self) -> &Channel {
-        self.channel(ChannelId::A)
-    }
-    pub fn channel_b(&self) -> &Channel {
-        self.channel(ChannelId::B)
-    }
-    pub fn channel_a_mut(&mut self) -> &mut Channel {
-        self.channel_mut(ChannelId::A)
-    }
-    pub fn channel_b_mut(&mut self) -> &mut Channel {
-        self.channel_mut(ChannelId::B)
-    }
 }
 
 impl ProcessingState {
@@ -1640,25 +1610,11 @@ impl ProcessingState {
         self.buttplug_features.insert(key, value.clamp(0.0, 1.0));
     }
 
-    /// Clear a specific Buttplug feature
-    pub fn clear_buttplug_feature(&mut self, key: &str) {
-        self.buttplug_features.remove(key);
-    }
-
     /// Clear all Buttplug features (on stop commands)
     pub fn clear_all_buttplug_features(&mut self) {
         self.buttplug_features.clear();
         self.buttplug_linear_commands.clear();
         self.buttplug_rotate_directions.clear();
-    }
-
-    /// Look up a cached T-Code axis value. Returns the last `value` seen
-    /// (0.0-1.0) or `None` if the axis has never been reported.
-    pub fn get_axis_value(&self, axis: &str) -> Option<f64> {
-        self.axis_values
-            .get(axis)
-            .filter(|s| s.has_data)
-            .map(|s| s.value)
     }
 
     /// Get all Buttplug feature values
@@ -1676,11 +1632,6 @@ impl ProcessingState {
                 std::time::Instant::now(),
             ),
         );
-    }
-
-    /// Clear processed linear commands (call after pipeline processing)
-    pub fn clear_buttplug_linear_commands(&mut self) {
-        self.buttplug_linear_commands.clear();
     }
 
     /// Set a Rotate direction
@@ -1716,11 +1667,6 @@ impl ProcessingState {
         }
     }
 
-    /// Get the Buttplug link configuration for a channel
-    pub fn get_buttplug_link_config(&self, channel: char) -> &ButtplugLinkConfig {
-        let id = ChannelId::from_char(channel).unwrap_or(ChannelId::A);
-        &self.channel(id).buttplug_link
-    }
 }
 
 // ============================================================================

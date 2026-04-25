@@ -4,21 +4,18 @@
 /// where each output type serves a distinct role in shaping the final output.
 ///
 /// Pipeline order: Position → Motion (Rotate/Oscillate) → Vibrate → Constrict → Output
+#[allow(dead_code)]
 pub mod handler;
+#[allow(dead_code, non_snake_case)]
 pub mod messages;
+#[allow(dead_code)]
 pub mod pipeline;
+#[allow(dead_code)]
 pub mod state;
+#[allow(dead_code)]
 pub mod types;
 
 // Re-export commonly used items
-pub use handler::handle_buttplug_message;
-pub use messages::{
-    parse_buttplug_messages, serialize_buttplug_messages, ButtplugClientMessage,
-    ButtplugServerMessage,
-};
 pub use pipeline::process_buttplug_pipeline;
-pub use state::{ButtplugChannelState, ButtplugFeatureValues, PositionDurationState};
-pub use types::{
-    ButtplugFeatureConfig, ButtplugFeatureType, ButtplugLinkConfig, ConstrictionMethod,
-    FeatureTypeConfig,
-};
+pub use state::{ButtplugChannelState, ButtplugFeatureValues};
+pub use types::{ButtplugFeatureConfig, ButtplugLinkConfig, ConstrictionMethod, FeatureTypeConfig};
