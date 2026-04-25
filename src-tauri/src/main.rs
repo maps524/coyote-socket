@@ -12,6 +12,7 @@ mod device;
 mod diagnostic;
 mod gamepad;
 mod logging;
+mod lovense;
 mod modulation;
 mod processing;
 mod protocol;
@@ -75,7 +76,7 @@ pub struct BatteryChangedPayload {
 #[derive(Clone, Serialize)]
 pub struct ConnectionStatus {
     pub websocket_running: bool,
-    pub detected_input_protocol: String, // "none", "tcode", or "buttplug"
+    pub detected_input_protocol: String, // "none", "tcode", "buttplug", or "lovense"
     pub bluetooth_connected: bool,
     pub bluetooth_device_address: Option<String>,
     pub battery_level: Option<u8>,

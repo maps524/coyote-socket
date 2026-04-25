@@ -28,7 +28,7 @@ export interface BluetoothDevice {
 
 export interface ConnectionStatus {
   websocket_running: boolean;
-  detected_input_protocol: 'none' | 'tcode' | 'buttplug';
+  detected_input_protocol: 'none' | 'tcode' | 'buttplug' | 'lovense';
   bluetooth_connected: boolean;
   bluetooth_device_address: string | null;
   battery_level: number | null;

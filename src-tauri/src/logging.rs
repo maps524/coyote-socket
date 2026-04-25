@@ -115,6 +115,12 @@ pub fn flush() {
     }
 }
 
+/// Public alias for `flush` — kept distinct so callers signal intent (force a
+/// flush *now*, regardless of the periodic flush interval).
+pub fn flush_now() {
+    flush();
+}
+
 /// Get the path to the log file
 pub fn get_log_path() -> Option<PathBuf> {
     LOGGER

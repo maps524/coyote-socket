@@ -271,10 +271,14 @@
   // Event listener unsubscribe functions
   let unlistenOutputPause: UnlistenFn | null = null;
 
-  // Derive current ecosystem from input source
-  $: currentEcosystem = ($currentInputSource === 'tcode' || $currentInputSource === 'buttplug')
-    ? $currentInputSource as PresetEcosystem
-    : 'tcode' as PresetEcosystem;  // Default to tcode when no input
+  // Derive current ecosystem from input source. Lovense input is funneled
+  // through the Buttplug feature pipeline, so it shares the buttplug ecosystem
+  // for preset filtering and channel-routing UI.
+  $: currentEcosystem = $currentInputSource === 'tcode'
+    ? ('tcode' as PresetEcosystem)
+    : ($currentInputSource === 'buttplug' || $currentInputSource === 'lovense')
+      ? ('buttplug' as PresetEcosystem)
+      : ('tcode' as PresetEcosystem);  // Default to tcode when no input
 
   // Get selected preset name from store based on current ecosystem
   $: selectedPresetName = $presetSelectionStore[currentEcosystem];

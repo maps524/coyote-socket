@@ -19,8 +19,8 @@
 
   // Determine label and icon based on input source
   $: inputSource = $currentInputSource;
-  $: label = inputSource === 'tcode' ? 'T-Code' : inputSource === 'buttplug' ? 'Buttplug' : 'Input';
-  $: icon = inputSource === 'tcode' ? Plug : inputSource === 'buttplug' ? Gamepad2 : RefreshCw;
+  $: label = inputSource === 'tcode' ? 'T-Code' : inputSource === 'buttplug' ? 'Buttplug' : inputSource === 'lovense' ? 'Lovense' : 'Input';
+  $: icon = inputSource === 'tcode' ? Plug : inputSource === 'buttplug' ? Gamepad2 : inputSource === 'lovense' ? Gamepad2 : RefreshCw;
   $: isSpinning = inputSource === 'none';
 </script>
 

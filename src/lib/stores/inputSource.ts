@@ -1,7 +1,7 @@
 import { writable, derived } from 'svelte/store';
 import { connectionState } from './stateSync';
 
-export type InputSource = 'none' | 'tcode' | 'buttplug';
+export type InputSource = 'none' | 'tcode' | 'buttplug' | 'lovense';
 
 export interface ButtplugFeatureValue {
   featureType: string;  // 'Position', 'Vibrate', etc.
@@ -27,7 +27,7 @@ export const currentInputSource = derived(
   ([$connectionState, $inputSourceState]) => {
     // Use the detected protocol from the backend (auto-detected from first message)
     const detected = $connectionState.detected_input_protocol;
-    if (detected === 'tcode' || detected === 'buttplug') {
+    if (detected === 'tcode' || detected === 'buttplug' || detected === 'lovense') {
       return detected as InputSource;
     }
 

@@ -7,6 +7,11 @@
   import { currentInputSource, inputSourceState } from '$lib/stores/inputSource.js';
   import { type ParameterSource, type ButtplugLinks, applySourceTransform } from '$lib/types/modulation.js';
 
+  // Lovense input feeds the same Buttplug feature pipeline, so the link UI
+  // (RangeSliderWithIndicator → ButtplugLinkPanel) only knows about
+  // 'tcode' | 'buttplug' | 'none'. Translate at the boundary.
+  $: effectiveInputMode = ($currentInputSource === 'lovense' ? 'buttplug' : $currentInputSource) as 'tcode' | 'buttplug' | 'none';
+
   // Helper: Get Buttplug feature value from the current features based on linked config
   // Returns 0-1 normalized value or 0 if not found
   function getButtplugIndicatorValue(links: ButtplugLinks | undefined): number {
@@ -140,7 +145,7 @@
   // Get indicator values based on linked source axis or Buttplug features
   // In Buttplug mode, use Buttplug feature values; in T-Code mode, use axis values
   $: freqIndicator = (() => {
-    if ($currentInputSource === 'buttplug' && frequencySource.buttplugLinks) {
+    if (($currentInputSource === 'buttplug' || $currentInputSource === 'lovense') && frequencySource.buttplugLinks) {
       return getButtplugIndicatorValue(frequencySource.buttplugLinks);
     }
     if (frequencySource.type === 'linked' && frequencySource.sourceAxis) {
@@ -150,7 +155,7 @@
   })();
 
   $: freqBalIndicator = (() => {
-    if ($currentInputSource === 'buttplug' && frequencyBalanceSource.buttplugLinks) {
+    if (($currentInputSource === 'buttplug' || $currentInputSource === 'lovense') && frequencyBalanceSource.buttplugLinks) {
       return getButtplugIndicatorValue(frequencyBalanceSource.buttplugLinks);
     }
     if (frequencyBalanceSource.type === 'linked' && frequencyBalanceSource.sourceAxis) {
@@ -160,7 +165,7 @@
   })();
 
   $: intBalIndicator = (() => {
-    if ($currentInputSource === 'buttplug' && intensityBalanceSource.buttplugLinks) {
+    if (($currentInputSource === 'buttplug' || $currentInputSource === 'lovense') && intensityBalanceSource.buttplugLinks) {
       return getButtplugIndicatorValue(intensityBalanceSource.buttplugLinks);
     }
     if (intensityBalanceSource.type === 'linked' && intensityBalanceSource.sourceAxis) {
@@ -170,7 +175,7 @@
   })();
 
   $: intensityIndicator = (() => {
-    if ($currentInputSource === 'buttplug' && intensitySource.buttplugLinks) {
+    if (($currentInputSource === 'buttplug' || $currentInputSource === 'lovense') && intensitySource.buttplugLinks) {
       return getButtplugIndicatorValue(intensitySource.buttplugLinks);
     }
     if (intensitySource.type === 'linked' && intensitySource.sourceAxis) {
@@ -329,7 +334,7 @@
       showWrapper={false}
       tooltip={freqTooltip}
       wheelStep={frequencyWheelStep}
-      inputMode={$currentInputSource}
+      inputMode={effectiveInputMode}
       on:sourceChange={handleFrequencySourceChange}
     />
 
@@ -346,7 +351,7 @@
       showLabels={true}
       showWrapper={false}
       tooltip={freqBalTooltip}
-      inputMode={$currentInputSource}
+      inputMode={effectiveInputMode}
       on:sourceChange={handleFrequencyBalanceSourceChange}
     />
 
@@ -363,7 +368,7 @@
       showLabels={true}
       showWrapper={false}
       tooltip={intBalTooltip}
-      inputMode={$currentInputSource}
+      inputMode={effectiveInputMode}
       on:sourceChange={handleIntensityBalanceSourceChange}
     />
 
@@ -383,7 +388,7 @@
       showWrapper={false}
       tooltip={intensityTooltip}
       isIntensity={true}
-      inputMode={$currentInputSource}
+      inputMode={effectiveInputMode}
       on:sourceChange={handleIntensitySourceChange}
     />
   </div>

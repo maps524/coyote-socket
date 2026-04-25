@@ -36,6 +36,7 @@ pub enum InputProtocol {
     None,
     TCode,
     Buttplug,
+    Lovense,
 }
 
 impl InputProtocol {
@@ -44,6 +45,7 @@ impl InputProtocol {
             InputProtocol::None => "none",
             InputProtocol::TCode => "tcode",
             InputProtocol::Buttplug => "buttplug",
+            InputProtocol::Lovense => "lovense",
         }
     }
 }
@@ -84,9 +86,13 @@ pub async fn start_server(port: u16) -> Result<(), Box<dyn std::error::Error + S
         return Err("WebSocket server is already running".into());
     }
 
-    let addr = format!("127.0.0.1:{}", port);
+    // Bind to 0.0.0.0 so LAN clients (e.g. a game on the same machine reaching
+    // us via the host's 192.168.x.x address, or the Lovense Remote app's
+    // *-lovense.club wildcard DNS that resolves to the LAN IP) can connect.
+    let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
-    crate::log_info!("WebSocket server listening on: {}", addr);
+    crate::log_info!("WebSocket server listening on: {} (all interfaces)", addr);
+    eprintln!("[net] listening on {} (all interfaces)", addr);
 
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     server_guard.shutdown_tx = Some(shutdown_tx.clone());
@@ -102,11 +108,13 @@ pub async fn start_server(port: u16) -> Result<(), Box<dyn std::error::Error + S
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, addr)) => {
-                            crate::log_info!("New WebSocket connection from: {}", addr);
+                            eprintln!("[net] accept from {}", addr);
+                            crate::log_info!("Accepted TCP connection from: {}", addr);
                             let shutdown_rx = shutdown_tx.subscribe();
                             tokio::spawn(handle_connection(stream, addr, shutdown_rx));
                         }
                         Err(e) => {
+                            eprintln!("[net] accept error: {}", e);
                             crate::log_error!("Failed to accept connection: {}", e);
                         }
                     }
@@ -168,22 +176,102 @@ fn detect_protocol(message: &str) -> DetectedProtocol {
     DetectedProtocol::Unknown
 }
 
-/// Handle a single WebSocket connection with protocol auto-detection
+/// Handle a single connection. Peeks the first bytes to distinguish a
+/// WebSocket upgrade (T-Code / Buttplug) from a plain HTTP request (Lovense
+/// Standard API). The peek does not consume bytes, so the WebSocket handshake
+/// re-reads the same buffer when we hand the stream to `accept_async`.
 async fn handle_connection(
     stream: TcpStream,
     addr: SocketAddr,
     shutdown_rx: broadcast::Receiver<()>,
 ) {
-    let ws_stream = match accept_async(stream).await {
-        Ok(ws) => ws,
+    let mut peek_buf = vec![0u8; 1024];
+    let n = match peek_request_head(&stream, &mut peek_buf).await {
+        Ok(n) => n,
         Err(e) => {
-            eprintln!("WebSocket handshake failed for {}: {}", addr, e);
+            eprintln!("[net] {} peek failed: {}", addr, e);
+            crate::log_warn!("peek failed for {}: {}", addr, e);
             return;
         }
     };
 
-    // Handle connection with auto-detection
-    handle_auto_detect_connection(ws_stream, addr, shutdown_rx).await;
+    let preview_full = String::from_utf8_lossy(&peek_buf[..n]);
+    let preview_head: String = preview_full
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect();
+    let is_ws = crate::lovense::is_websocket_upgrade(&peek_buf[..n]);
+    eprintln!(
+        "[net] {} peeked {} bytes — first line: {:?} → route={}",
+        addr,
+        n,
+        preview_head,
+        if is_ws { "websocket" } else { "http" }
+    );
+    crate::log_info!(
+        "Peeked {} bytes from {}: '{}' → {}",
+        n,
+        addr,
+        preview_head,
+        if is_ws { "websocket" } else { "http" }
+    );
+    crate::logging::flush_now();
+
+    if is_ws {
+        let ws_stream = match accept_async(stream).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                eprintln!("[net] {} WS handshake failed: {}", addr, e);
+                crate::log_warn!("WS handshake failed for {}: {}", addr, e);
+                return;
+            }
+        };
+        handle_auto_detect_connection(ws_stream, addr, shutdown_rx).await;
+    } else {
+        crate::lovense::handle_http_connection(stream, addr).await;
+    }
+}
+
+/// Peek bytes off the TCP stream until we have either the end of the HTTP
+/// header block (`\r\n\r\n`) or the buffer is full. peek() does not advance
+/// the read pointer, so the bytes remain available to the next consumer.
+async fn peek_request_head(stream: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::time::Duration;
+
+    // Bound the wait so a connection that never sends anything doesn't hang
+    // a worker forever. 5s mirrors typical WS / HTTP client timeouts.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut last_len = 0usize;
+
+    loop {
+        // peek waits for at least one byte to be available, then returns
+        // however much is currently in the kernel buffer.
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(last_len);
+        }
+        let remaining = deadline - now;
+        let n = match tokio::time::timeout(remaining, stream.peek(buf)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Ok(last_len),
+        };
+        if n == 0 {
+            return Ok(last_len);
+        }
+        if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") || n == buf.len() {
+            return Ok(n);
+        }
+        if n == last_len {
+            // No new bytes arrived since the last call; back off briefly so
+            // we don't busy-spin while the client is mid-send.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        last_len = n;
+    }
 }
 
 /// Handle WebSocket connection with protocol auto-detection on first message

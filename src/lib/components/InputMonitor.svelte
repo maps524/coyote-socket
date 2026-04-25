@@ -230,8 +230,8 @@
             Waiting for T-Code...
           </div>
         {/if}
-      {:else if inputSource === 'buttplug'}
-        <!-- Buttplug Mode: Show feature values with icons -->
+      {:else if inputSource === 'buttplug' || inputSource === 'lovense'}
+        <!-- Buttplug Mode (also Lovense, which writes into the same feature map) -->
         {#if buttplugFeatures.length > 0}
           <div class="grid grid-cols-2 gap-1 font-mono text-[10px]">
             {#each buttplugFeatures as feature (feature.key)}
@@ -252,7 +252,7 @@
           </div>
         {:else}
           <div class="flex-1 flex items-center justify-center text-muted-foreground text-[10px]">
-            Waiting for Buttplug...
+            Waiting for {inputSource === 'lovense' ? 'Lovense' : 'Buttplug'}...
           </div>
         {/if}
       {:else}
