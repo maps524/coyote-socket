@@ -333,7 +333,7 @@
         updateRateMs: settings.general?.updateRateMs ?? 50,
         saveRateMs: settings.general?.saveRateMs ?? 500,
         showTCodeMonitor: settings.connection.showTcodeMonitor,
-        processingEngine: (settings.output.processingEngine as ProcessingEngine) ?? 'v1',
+        processingEngine: (settings.output.processingEngine as ProcessingEngine) ?? 'v2-balanced',
         peakFill: (settings.output.peakFill as PeakFillStrategy) ?? 'forward',
         channelAMaxIntensity: settings.general?.channelAMaxIntensity ?? 200,
         channelBMaxIntensity: settings.general?.channelBMaxIntensity ?? 200
@@ -347,7 +347,7 @@
 
       // Apply output settings
       $outputOptions = {
-        processingEngine: (settings.output.processingEngine as ProcessingEngine) ?? 'v1',
+        processingEngine: (settings.output.processingEngine as ProcessingEngine) ?? 'v2-balanced',
         peakFill: (settings.output.peakFill as PeakFillStrategy) ?? 'forward'
       };
 
@@ -717,7 +717,7 @@
     if (outputUpdateTimer) clearTimeout(outputUpdateTimer);
     outputUpdateTimer = setTimeout(() => {
       invoke('update_output_options', {
-        engine: $generalSettings.processingEngine ?? 'v1',
+        engine: $generalSettings.processingEngine ?? 'v2-balanced',
         peakFill: $generalSettings.peakFill ?? 'forward'
       }).catch(() => {});
     }, UPDATE_DEBOUNCE);
@@ -725,7 +725,7 @@
     if (outputSaveTimer) clearTimeout(outputSaveTimer);
     outputSaveTimer = setTimeout(() => {
       invoke('save_output_settings', {
-        processingEngine: $generalSettings.processingEngine ?? 'v1',
+        processingEngine: $generalSettings.processingEngine ?? 'v2-balanced',
         peakFill: $generalSettings.peakFill ?? 'forward'
       }).catch((e) => console.error('[Settings] Failed to save output settings:', e));
     }, SAVE_DEBOUNCE);

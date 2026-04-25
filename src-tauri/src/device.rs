@@ -254,8 +254,8 @@ async fn send_device_update() -> Result<(), String> {
     // When not connected AND no diagnostic capture is running, take the
     // cheap path: mark output disconnected and bail without advancing the
     // engine. While diagnostic is active we run the engine anyway so the
-    // capture mirrors real tick behavior (V1 queue draining, V2 ramp
-    // advancement, etc.) — we just skip the BLE write at the end.
+    // capture mirrors real tick behavior (V2 ramp advancement, V3
+    // lookahead buffer drain, etc.) — we just skip the BLE write at the end.
     if !is_connected && !diag_active {
         // Still update output storage to show disconnected state
         let storage = get_last_output_storage().await;
@@ -482,9 +482,6 @@ async fn send_device_update() -> Result<(), String> {
                 let min = vals.iter().fold(1.0f32, |a, &b| a.min(b));
 
                 match engine_type {
-                    // [V1 Original Mode] -Hardest, Strongest
-                    ProcessingEngineType::V1 => 1.0,
-
                     // [V2 Smooth Soft Mode] -Delicate, smooth
                     ProcessingEngineType::V2Smooth => avg,
 

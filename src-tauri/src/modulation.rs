@@ -150,7 +150,7 @@ pub const AXIS_HISTORY_MS: u64 = 1500;
 
 /// One entry in the per-axis history ring. `interval_ms` is the ramp duration
 /// from the original T-Code command (preserved so tick-side replay can feed
-/// V1/V2 the same ramp semantics they'd see at command-arrival time).
+/// the V2 ramp the same semantics it'd see at command-arrival time).
 #[derive(Debug, Clone, Copy)]
 pub struct AxisSample {
     pub timestamp: u64,

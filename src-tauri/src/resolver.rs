@@ -148,8 +148,8 @@ pub async fn get_current_intensities() -> (f64, f64) {
 }
 
 /// Pull the next 100ms waveform data for both channels. Called at 10Hz by
-/// the device tick. Mutates engine state (advances V2 ramps, drains V1
-/// queue, etc.) so it takes a write lock.
+/// the device tick. Mutates engine state (advances V2 ramps, advances V3
+/// lookahead buffer, etc.) so it takes a write lock.
 pub async fn get_next_waveform_data() -> (WaveformData, WaveformData) {
     let state = get_processing_state().await;
     let mut state_guard = state.write().await;

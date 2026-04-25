@@ -18,11 +18,6 @@ export const connectionState = writable<ConnectionState>({
  */
 export const PROCESSING_ENGINES = [
   {
-    value: 'v1',
-    label: 'v1 Queued',
-    description: 'Original queue-based ramping. Each tick advances toward the latest target at a fixed rate, so big jumps take several ticks to reach. Predictable but lags fast input.',
-  },
-  {
     value: 'v2-smooth',
     label: 'v2 Smooth',
     description: 'Averages incoming samples within each output bucket. Smooths out noisy or rapidly-changing input — best for ambient or sustained sensations.',

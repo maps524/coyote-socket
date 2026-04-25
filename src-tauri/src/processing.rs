@@ -26,16 +26,21 @@ lazy_static::lazy_static! {
 // Processing Engine Type
 // ============================================================================
 
-/// Processing engine type - determines how input is processed
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Processing engine type - determines how input is processed.
+///
+/// The pre-refactor `V1` (queue-based ramping) variant is gone; saved
+/// presets that referenced it deserialize to `V2Balanced` via the
+/// `deserialize_with` wrapper below. See `docs/plans/pipeline-refactor.md`
+/// Step 4.5 for the rationale (V1 was structurally misaligned with the
+/// sample-driven pipeline and known-inaccurate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProcessingEngineType {
-    /// Original queue-based implementation
-    #[default]
-    V1,
     /// State-based with smooth (averaging) downsampling
     V2Smooth,
-    /// State-based with balanced (linear interpolation) downsampling
+    /// State-based with balanced (linear interpolation) downsampling.
+    /// Default — V1's substitute for migrated presets.
+    #[default]
     V2Balanced,
     /// State-based with detailed (peak-preserving) downsampling
     V2Detailed,
@@ -51,17 +56,30 @@ pub enum ProcessingEngineType {
     V3Predictive,
 }
 
+impl<'de> Deserialize<'de> for ProcessingEngineType {
+    /// String-based deserialize that falls back to the default on any
+    /// unknown variant. Catches the legacy `"v1"` and any future renames
+    /// without crashing settings load.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::from_str(&s))
+    }
+}
+
 impl ProcessingEngineType {
     pub fn from_str(s: &str) -> Self {
         match s {
-            "v1" => Self::V1,
             "v2-smooth" => Self::V2Smooth,
             "v2-balanced" => Self::V2Balanced,
             "v2-detailed" => Self::V2Detailed,
             "v2-dynamic" => Self::V2Dynamic,
             "v2-sustained" => Self::V2Sustained,
             "v3-predictive" => Self::V3Predictive,
-            _ => Self::V1,
+            // Includes legacy "v1" and any unknown future-removed variants.
+            _ => Self::default(),
         }
     }
 }
@@ -1006,112 +1024,6 @@ impl Downsampler {
 }
 
 // ============================================================================
-// V1 Channel State (Queue-based - original implementation)
-// ============================================================================
-
-/// V1 Channel state using queue-based ramping (original implementation)
-#[derive(Debug, Clone)]
-pub struct V1ChannelState {
-    pub current_intensity: u8, // 0-200 (device native units)
-    pub target_intensity: u8,  // 0-200 (device native units)
-    pub ramp_queue: Vec<u8>,   // Queue of intensity values for ramping (0-200)
-    pub prev_intensity: u8,    // Last sent intensity (for repeating when queue empty)
-}
-
-impl Default for V1ChannelState {
-    fn default() -> Self {
-        Self {
-            current_intensity: 0,
-            target_intensity: 0,
-            ramp_queue: Vec::new(),
-            prev_intensity: 0,
-        }
-    }
-}
-
-impl V1ChannelState {
-    /// Apply intensity command with optional ramping (V1 queue-based)
-    pub fn apply_command(&mut self, target: f64, interval_ms: Option<u32>) {
-        // Convert normalized (0.0-1.0) to device units (0-200)
-        let target_u8 = (target * 200.0).round().clamp(0.0, 200.0) as u8;
-
-        if let Some(interval) = interval_ms {
-            // Calculate ramp steps (at 25ms intervals like the old implementation)
-            let steps = (interval / 25).max(1) as i32;
-
-            // Get current power level from queue or previous value
-            let current_pwr = self.prev_intensity as i32;
-
-            // Reduce previous data if queue is getting too long
-            if self.ramp_queue.len() > 4 {
-                let last = *self.ramp_queue.last().unwrap_or(&self.prev_intensity) as i32;
-                let second = self
-                    .ramp_queue
-                    .get(1)
-                    .copied()
-                    .unwrap_or(self.prev_intensity) as i32;
-                let delta = (last - second) / 2;
-                self.ramp_queue = vec![second as u8, (second + delta) as u8, last as u8];
-            }
-
-            // Generate list of intensities to output every 100ms ramping towards the target
-            let target_pwr = target_u8 as i32;
-            let increment = (target_pwr - current_pwr) as f64 / steps as f64;
-
-            for i in 1..=steps {
-                let val = (current_pwr as f64 + (i as f64 * increment)).round();
-                self.ramp_queue.push(val.clamp(0.0, 200.0) as u8);
-            }
-
-            self.target_intensity = target_u8;
-        } else {
-            // Immediate set - clear queue and set directly
-            self.ramp_queue.clear();
-            self.ramp_queue.push(target_u8);
-            self.current_intensity = target_u8;
-            self.target_intensity = target_u8;
-        }
-    }
-
-    /// Get next 4 values from queue
-    pub fn get_next_four(&mut self) -> [u8; 4] {
-        let prev = self.prev_intensity;
-
-        // Get next 4 values from queue
-        let mut next_four: Vec<u8> = self
-            .ramp_queue
-            .drain(..self.ramp_queue.len().min(4))
-            .collect();
-
-        // Pad to 4 values if needed
-        if next_four.is_empty() {
-            // No new data - repeat previous value
-            next_four = vec![prev, prev, prev, prev];
-        } else if next_four.len() < 4 {
-            // Pad with last value
-            let last = *next_four.last().unwrap();
-            while next_four.len() < 4 {
-                next_four.push(last);
-            }
-        }
-
-        // Update prev_intensity to last value sent
-        self.prev_intensity = next_four[3];
-        self.current_intensity = next_four[3];
-
-        [next_four[0], next_four[1], next_four[2], next_four[3]]
-    }
-
-    /// Reset to zero
-    pub fn reset(&mut self) {
-        self.current_intensity = 0;
-        self.target_intensity = 0;
-        self.prev_intensity = 0;
-        self.ramp_queue.clear();
-    }
-}
-
-// ============================================================================
 // Output Options
 // ============================================================================
 
@@ -1128,7 +1040,7 @@ pub struct OutputOptions {
 impl Default for OutputOptions {
     fn default() -> Self {
         Self {
-            processing_engine: ProcessingEngineType::V1,
+            processing_engine: ProcessingEngineType::default(),
             peak_fill: PeakFillStrategy::default(),
         }
     }
@@ -1273,7 +1185,6 @@ pub struct Channel {
     #[allow(dead_code)]
     pub id: ChannelId,
     pub config: ChannelConfig,
-    pub v1: V1ChannelState,
     pub v2: V2ChannelState,
     pub v3: V3ChannelState,
     pub downsampler: Downsampler,
@@ -1298,7 +1209,6 @@ impl Channel {
         Self {
             id,
             config,
-            v1: V1ChannelState::default(),
             v2: V2ChannelState::default(),
             v3: V3ChannelState::default(),
             downsampler: Downsampler::default(),
@@ -1311,7 +1221,7 @@ impl Channel {
 
     /// Apply a T-Code command to all engine states for this channel.
     /// Runs midpoint → curve transform, converts to device 0-200 u8, then
-    /// feeds V1 queue, V2 ramp, downsampler, and V3 lookahead buffer.
+    /// feeds V2 ramp, downsampler, and V3 lookahead buffer.
     /// Range mapping is intentionally skipped here — it happens later in
     /// `device.rs::scale_intensity` using the intensity source's range.
     pub fn apply_tcode(&mut self, value: f64, interval_ms: Option<u32>, timestamp: u64) {
@@ -1329,7 +1239,6 @@ impl Channel {
 
         let intensity_u8 = (curved * 200.0).round().clamp(0.0, 200.0) as u8;
 
-        self.v1.apply_command(curved, interval_ms);
         self.v2
             .set_target(intensity_u8, interval_ms.unwrap_or(0), timestamp);
         self.downsampler.add_sample(intensity_u8, timestamp);
@@ -1347,7 +1256,6 @@ impl Channel {
         peak_fill: PeakFillStrategy,
     ) -> [u8; 4] {
         match engine {
-            ProcessingEngineType::V1 => self.v1.get_next_four(),
             ProcessingEngineType::V2Smooth => {
                 if self.downsampler.has_samples_in_window(window_start, now_ms) {
                     self.downsampler.downsample_smooth(window_start, now_ms)
@@ -1386,19 +1294,17 @@ impl Channel {
 
     /// Reset all engine states to zero; leaves config + buttplug_link untouched.
     pub fn reset_engines(&mut self) {
-        self.v1.reset();
         self.v2.reset();
         self.v3.reset();
         self.downsampler.clear();
         self.peak_hold.clear();
     }
 
-    /// Current intensity in 0-1 range (for UI display).
-    pub fn current_intensity_normalized(&self, engine: ProcessingEngineType, now: u64) -> f64 {
-        match engine {
-            ProcessingEngineType::V1 => self.v1.current_intensity as f64 / 200.0,
-            _ => self.v2.get_value_at(now) as f64 / 200.0,
-        }
+    /// Current intensity in 0-1 range (for UI display). All remaining engines
+    /// share the V2-state ramp/interpolation surface; V3 advances `current_position`
+    /// only on tick, so V2 is the most accurate UI indicator for both.
+    pub fn current_intensity_normalized(&self, _engine: ProcessingEngineType, now: u64) -> f64 {
+        self.v2.get_value_at(now) as f64 / 200.0
     }
 }
 
@@ -1807,10 +1713,6 @@ mod tests {
     #[test]
     fn test_processing_engine_from_str() {
         assert_eq!(
-            ProcessingEngineType::from_str("v1"),
-            ProcessingEngineType::V1
-        );
-        assert_eq!(
             ProcessingEngineType::from_str("v2-smooth"),
             ProcessingEngineType::V2Smooth
         );
@@ -1830,6 +1732,48 @@ mod tests {
             ProcessingEngineType::from_str("v3-predictive"),
             ProcessingEngineType::V3Predictive
         );
+    }
+
+    #[test]
+    fn test_processing_engine_legacy_v1_falls_back_to_default() {
+        // Saved presets that referenced the retired V1 variant should
+        // deserialize cleanly to the default (V2-Balanced) instead of
+        // failing or being silently kept as V1.
+        assert_eq!(
+            ProcessingEngineType::from_str("v1"),
+            ProcessingEngineType::default()
+        );
+        assert_eq!(ProcessingEngineType::default(), ProcessingEngineType::V2Balanced);
+    }
+
+    #[test]
+    fn test_processing_engine_unknown_falls_back_to_default() {
+        // Forward-compat: any unknown engine string (including ones we
+        // remove in future refactors) lands on the default.
+        assert_eq!(
+            ProcessingEngineType::from_str("totally-bogus"),
+            ProcessingEngineType::default()
+        );
+        assert_eq!(
+            ProcessingEngineType::from_str(""),
+            ProcessingEngineType::default()
+        );
+    }
+
+    #[test]
+    fn test_processing_engine_deserializes_legacy_v1() {
+        // The custom Deserialize impl routes through from_str, so a saved
+        // settings file containing `"v1"` deserializes to V2-Balanced
+        // without erroring out the entire load.
+        let v1: ProcessingEngineType = serde_json::from_str("\"v1\"").unwrap();
+        assert_eq!(v1, ProcessingEngineType::V2Balanced);
+
+        let bogus: ProcessingEngineType = serde_json::from_str("\"future-engine-x\"").unwrap();
+        assert_eq!(bogus, ProcessingEngineType::V2Balanced);
+
+        // Sanity: a known variant still parses correctly.
+        let smooth: ProcessingEngineType = serde_json::from_str("\"v2-smooth\"").unwrap();
+        assert_eq!(smooth, ProcessingEngineType::V2Smooth);
     }
 
     // Note: Curve transformation tests are in modulation.rs
@@ -1910,9 +1854,6 @@ mod tests {
         let mut ch = Channel::new(ChannelId::A);
         ch.apply_tcode(0.5, None, 1000);
 
-        // V1 queue should have been populated via apply_command (immediate set)
-        assert!(!ch.v1.ramp_queue.is_empty() || ch.v1.current_intensity > 0);
-
         // V2 target should reflect curved value × 200
         assert_eq!(ch.v2.target_value, 100);
 
@@ -1931,7 +1872,6 @@ mod tests {
 
         ch.reset_engines();
         assert_eq!(ch.v2.target_value, 0);
-        assert_eq!(ch.v1.current_intensity, 0);
         assert_eq!(ch.v3.buffer_size(), 0);
         // Config untouched by reset
         assert_eq!(ch.config.intensity.source_axis.as_deref(), Some("L0"));

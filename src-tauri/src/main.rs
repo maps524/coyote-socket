@@ -548,7 +548,6 @@ async fn get_full_state() -> Result<FullAppState, String> {
         let state = get_processing_state().await;
         let state_guard = state.read().await;
         let engine = match state_guard.options.processing_engine {
-            ProcessingEngineType::V1 => "v1",
             ProcessingEngineType::V2Smooth => "v2-smooth",
             ProcessingEngineType::V2Balanced => "v2-balanced",
             ProcessingEngineType::V2Detailed => "v2-detailed",
@@ -968,16 +967,9 @@ async fn save_general_settings(
     use crate::modulation::NoInputBehavior;
     use crate::processing::{get_processing_state, ProcessingEngineType};
 
-    let engine = match processing_engine.as_str() {
-        "v1" => ProcessingEngineType::V1,
-        "v2-smooth" => ProcessingEngineType::V2Smooth,
-        "v2-balanced" => ProcessingEngineType::V2Balanced,
-        "v2-detailed" => ProcessingEngineType::V2Detailed,
-        "v2-dynamic" => ProcessingEngineType::V2Dynamic,
-        "v2-sustained" => ProcessingEngineType::V2Sustained,
-        "v3-predictive" => ProcessingEngineType::V3Predictive,
-        _ => ProcessingEngineType::V1,
-    };
+    // Single source of truth for engine string parsing — same fallback
+    // (legacy "v1" → default V2-Balanced) the deserialize wrapper uses.
+    let engine = ProcessingEngineType::from_str(&processing_engine);
 
     // Parse no_input_behavior string to enum
     let behavior = match no_input_behavior.as_str() {
