@@ -629,6 +629,38 @@ For input-bus updates, fire on every `bus.update(...)` write. Bursty inputs (T-C
 
 ---
 
+## Status (as of branch `worktree-pipeline-refactor`)
+
+| Step | Status | Commits |
+|---|---|---|
+| 1 — `delay_ms` resolver wiring | ✅ shipped | `9b5a6e8`, `663249a` |
+| 2 — Lift settings_convert out of `websocket.rs` | ✅ shipped | `9eebd24`, `7c22882` |
+| 3 — Collapse 4 sync paths into `apply_channel_config` | ✅ shipped | `f4fcb02`, `de5819e` |
+| 4 — Split `websocket.rs` into `net.rs` + `tcode_input.rs` + `resolver.rs` | ✅ shipped | `09173ca`, `86f1885` |
+| 4.5 — Drop V1 engine | ✅ shipped | `a30d115`, `6379c22` |
+| **5+6+7 (bundled)** — Bus + Transforms + drop `buttplug_links` | 🚧 in progress | sub A only — see substep table below |
+| 8 — Introduce `InputSource` trait | ⏳ pending | — |
+
+Each shipped step landed with three reviewer passes (correctness / DRY / design gaps) and follow-up commits addressing in-scope findings.
+
+### Bundled phase substeps
+
+The plan called for Steps 5+6+7 as a single PR. In practice the work is large enough (the original 1800–2400 line estimate is accurate) that breaking it into reviewable sub-commits inside the same logical PR is the only sane way to ship without losing the thread. Order:
+
+| Sub | Status | Description |
+|---|---|---|
+| A — Introduce `InputBus` foundation | ✅ shipped (`df8a715`) | New `input_bus.rs` module with `update`, `value`, `value_at`, `age_ms`, `get`, `iter`, `clear`, `clear_prefix`, `has_any_with_prefix`, `latest_timestamp`. `ProcessingState.axis_values` renamed to `input_bus`. Resolver signatures take `&InputBus`. Six resolver tests rebuilt; eight bus tests added. **The 3 buttplug HashMaps still live alongside the bus — folding them in is the next sub.** |
+| B — Lift the 3 buttplug HashMaps into the bus | ⏳ pending | Delete `ProcessingState.buttplug_features`, `buttplug_linear_commands`, `buttplug_rotate_directions`. Rewrite `set_buttplug_*` / `get_buttplug_*` / `has_buttplug_input` / `clear_all_buttplug_features` as bus-backed shims. Convert pipeline + state from `Instant` to `u64 ms` timestamps so the bus's `AxisState.timestamp` (wall-clock ms) round-trips through `process_buttplug_pipeline`. Per-channel `last_buttplug_replay_ts` watermark replaces the post-tick `clear()` of `buttplug_linear_commands`. |
+| C — Split `ParameterSource` → `ParameterLinkConfig` + `ParameterLinkRuntime` | ⏳ pending | Settings struct stays serializable; transform phase / interp state moves to `Channel.link_runtime`. Transform-state mutation no longer touches the persisted shape. Drop `ParameterSource.buttplug_links` field — its consumer (`Channel.buttplug_link`) becomes a `Vec<TransformConfig>` populated from settings during convert. |
+| D — `TransformConfig` enum + transform variants | ⏳ pending | Generic primitives in `transforms.rs` (`Smooth`, `Scale`, `Clamp`, `Invert`, `Hold`, `Mix`). Buttplug semantic wrappers in `transforms/buttplug.rs` (`Vibrate`, `Oscillate`, `Constrict`) built atop the generics. Each transform declares its modifier axes via `declared_axes()` so the resolver pre-fetches them at `target_time`. |
+| E — Resolver rewrite to take `InputBusSnapshot` + pre-fetched modifiers | ⏳ pending | Removes the intensity short-circuit at the old `processing.rs:1546`. Buttplug-driven intensity now flows through curve / midpoint / range like every other source. Validates the layered architecture end-to-end. |
+| F — Delete `buttplug/pipeline.rs`, `buttplug/state.rs`, most of `buttplug/types.rs` | ⏳ pending | Per the deletion manifest. By this point nothing reads them; the substep is purely a `git rm`. |
+| G — Frontend resolved-state event stream | ⏳ pending | New Tauri event `resolved-update` carrying per-parameter `ResolvedSampleSnapshot`. Replaces `axis-update` for the unified case. New stores `resolvedState.ts` + `inputBus.ts` (replacing `inputPosition.ts`). Linked-parameter UI cards render the post-curve position line. |
+
+Sub A is the only sub that ships without behavior change. Subs B–G land semantic changes; per the plan they validate as a coherent set on a beta branch before merge to `main`.
+
+---
+
 ## Ship order
 
 | Phase | Steps | Risk | Ship as |

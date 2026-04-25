@@ -69,6 +69,17 @@ impl InputBus {
         self.channels.get(axis)
     }
 
+    /// Timestamp of the latest sample on `axis`, or `None` if never written.
+    /// Used by per-channel watermarks (e.g. the bundled phase's
+    /// `bp:LinearCmd_<n>` "new arrival since last tick" check) to detect
+    /// fresh writes without re-reading the full `AxisState`.
+    pub fn latest_timestamp(&self, axis: &str) -> Option<u64> {
+        self.channels
+            .get(axis)
+            .filter(|s| s.has_data)
+            .map(|s| s.timestamp)
+    }
+
     /// Iterate every named axis. Order is unspecified (HashMap).
     pub fn iter(&self) -> impl Iterator<Item = (&String, &AxisState)> {
         self.channels.iter()
@@ -157,6 +168,18 @@ mod tests {
         bus.update("bp:Vibrate_0", 0.4, 100, None);
         assert!(bus.has_any_with_prefix("bp:"));
         assert!(bus.has_any_with_prefix("L"));
+    }
+
+    #[test]
+    fn latest_timestamp_tracks_most_recent_write() {
+        let mut bus = InputBus::new();
+        assert_eq!(bus.latest_timestamp("L0"), None);
+        bus.update("L0", 0.2, 100, None);
+        assert_eq!(bus.latest_timestamp("L0"), Some(100));
+        bus.update("L0", 0.5, 250, None);
+        assert_eq!(bus.latest_timestamp("L0"), Some(250));
+        // Never-written axis stays None.
+        assert_eq!(bus.latest_timestamp("R2"), None);
     }
 
     #[test]
