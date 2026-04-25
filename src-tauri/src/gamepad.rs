@@ -45,6 +45,9 @@ struct GamepadActive {
     /// Combos that already fired and are waiting for any part to release
     /// before they can fire again.
     armed_combos: HashSet<String>,
+    /// Per-action repeat state: (first_observed, last_fired). Used to
+    /// generate auto-repeat for button-only bindings while held.
+    held_repeat: HashMap<String, (std::time::Instant, std::time::Instant)>,
 }
 
 static ACTIVE_STATE: tokio::sync::OnceCell<Arc<Mutex<GamepadActive>>> =
@@ -363,6 +366,81 @@ async fn emit_continuous_axis_actions() {
 }
 
 const RATE_TICK_MS: u64 = 80;
+
+/// Auto-repeat held button-only bindings (single Button or pure-button Combo).
+/// First fire happens via `on_button_press` / `evaluate_combos`. Once a binding
+/// is currently active, this tick records its first-observed time; after
+/// `delay_ms` of continuous activity, it fires again every `interval_ms`.
+async fn emit_repeat_button_actions(delay_ms: u64, interval_ms: u64) {
+    let active_cell = match ACTIVE_STATE.get() {
+        Some(a) => a,
+        None => return,
+    };
+    let bindings = match ACTIVE_BINDINGS.get() {
+        Some(b) => b.read().await.clone(),
+        None => return,
+    };
+    let now = std::time::Instant::now();
+
+    let mut active = active_cell.lock().await;
+
+    // Build the set of currently-active button-only bindings.
+    let mut active_actions: Vec<String> = Vec::new();
+    for (action, binding) in bindings.iter_bound() {
+        match binding {
+            GamepadBinding::Button { index } => {
+                if active.buttons.contains(index) {
+                    active_actions.push(action.to_string());
+                }
+            }
+            GamepadBinding::Combo { parts } => {
+                if combo_has_axis_part(parts) {
+                    continue; // axis combos repeat via continuous magnitude
+                }
+                let all_active = parts.iter().all(|p| match p {
+                    ChordPart::Button { index } => active.buttons.contains(index),
+                    _ => false,
+                });
+                if !all_active {
+                    continue;
+                }
+                if combo_superseded(parts, &bindings, &active) {
+                    continue;
+                }
+                active_actions.push(action.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    // Drop entries for actions no longer active.
+    let active_set: std::collections::HashSet<String> = active_actions.iter().cloned().collect();
+    active.held_repeat.retain(|k, _| active_set.contains(k));
+
+    let mut to_fire: Vec<String> = Vec::new();
+    for action in &active_actions {
+        match active.held_repeat.get(action).copied() {
+            None => {
+                // First sighting — initial fire already happened on press.
+                // Record start time; auto-repeat begins after `delay_ms`.
+                active.held_repeat.insert(action.clone(), (now, now));
+            }
+            Some((first, last)) => {
+                if now.duration_since(first) >= Duration::from_millis(delay_ms)
+                    && now.duration_since(last) >= Duration::from_millis(interval_ms)
+                {
+                    to_fire.push(action.clone());
+                    active.held_repeat.insert(action.clone(), (first, now));
+                }
+            }
+        }
+    }
+    drop(active);
+
+    for action in to_fire {
+        emit_action(&action);
+    }
+}
 
 /// Standard gamepad axis names exposed to the parameter linking system.
 /// Sticks normalize from -1..1 to 0..1 ((v+1)/2). Triggers are 0..1 native.
@@ -738,6 +816,12 @@ async fn gilrs_loop() {
         if last_rate_tick.elapsed() >= Duration::from_millis(RATE_TICK_MS) {
             last_rate_tick = std::time::Instant::now();
             emit_continuous_axis_actions().await;
+            let g = crate::settings::get_settings().await.general;
+            emit_repeat_button_actions(
+                g.gamepad_button_repeat_delay_ms as u64,
+                g.gamepad_button_repeat_interval_ms as u64,
+            )
+            .await;
             feed_gamepad_axes_to_processing().await;
         }
 
@@ -896,6 +980,12 @@ async fn xinput_loop() {
         if last_rate_tick.elapsed() >= Duration::from_millis(RATE_TICK_MS) {
             last_rate_tick = std::time::Instant::now();
             emit_continuous_axis_actions().await;
+            let g = crate::settings::get_settings().await.general;
+            emit_repeat_button_actions(
+                g.gamepad_button_repeat_delay_ms as u64,
+                g.gamepad_button_repeat_interval_ms as u64,
+            )
+            .await;
             feed_gamepad_axes_to_processing().await;
         }
 

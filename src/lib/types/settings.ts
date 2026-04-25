@@ -165,6 +165,8 @@ export interface GeneralSettings {
     processingEngine: string;
     gamepadEngine?: 'off' | 'gilrs' | 'xinput';
     gamepadStickSensitivity?: number;
+    gamepadButtonRepeatDelayMs?: number;
+    gamepadButtonRepeatIntervalMs?: number;
 }
 
 export interface AppSettings {

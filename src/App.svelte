@@ -96,6 +96,9 @@
   let gamepadEngine: 'off' | 'gilrs' | 'xinput' = 'xinput';
   let gamepadStickSensitivity = 1.0;
   let sensitivitySaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let gamepadRepeatDelay = 400;
+  let gamepadRepeatInterval = 100;
+  let repeatSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   // When non-null, the rebind UI is capturing the next keyboard/gamepad event
   // for this action — keyboard handler short-circuits to avoid firing the action.
@@ -216,6 +219,26 @@
       invoke('set_gamepad_stick_sensitivity', { value })
         .catch((e) => console.error('[Gamepad] Failed to save sensitivity:', e));
     }, 250);
+  }
+
+  function scheduleRepeatSave() {
+    if (repeatSaveTimer) clearTimeout(repeatSaveTimer);
+    repeatSaveTimer = setTimeout(() => {
+      invoke('set_gamepad_button_repeat', {
+        delayMs: Math.round(gamepadRepeatDelay),
+        intervalMs: Math.round(gamepadRepeatInterval),
+      }).catch((e) => console.error('[Gamepad] Failed to save repeat:', e));
+    }, 250);
+  }
+
+  function onRepeatDelayInput(e: Event) {
+    gamepadRepeatDelay = parseFloat((e.currentTarget as HTMLInputElement).value);
+    scheduleRepeatSave();
+  }
+
+  function onRepeatIntervalInput(e: Event) {
+    gamepadRepeatInterval = parseFloat((e.currentTarget as HTMLInputElement).value);
+    scheduleRepeatSave();
   }
 
   function onGamepadEngineChange(e: Event) {
@@ -359,6 +382,8 @@
       // Apply gamepad engine selection
       gamepadEngine = (settings.general?.gamepadEngine ?? 'xinput') as typeof gamepadEngine;
       gamepadStickSensitivity = settings.general?.gamepadStickSensitivity ?? 1.0;
+      gamepadRepeatDelay = settings.general?.gamepadButtonRepeatDelayMs ?? 400;
+      gamepadRepeatInterval = settings.general?.gamepadButtonRepeatIntervalMs ?? 100;
 
       // Load output paused state from backend
       try {
@@ -585,6 +610,7 @@
     if (shortcutsSaveTimer) clearTimeout(shortcutsSaveTimer);
     if (gamepadBindingsSaveTimer) clearTimeout(gamepadBindingsSaveTimer);
     if (sensitivitySaveTimer) clearTimeout(sensitivitySaveTimer);
+    if (repeatSaveTimer) clearTimeout(repeatSaveTimer);
     if (unlistenInputAction) unlistenInputAction();
     if (unlistenGamepadRaw) unlistenGamepadRaw();
   });
@@ -1885,6 +1911,46 @@
               step="0.05"
               value={gamepadStickSensitivity}
               on:input={onSensitivityInput}
+              class="w-32"
+            />
+          </div>
+
+          <div class="flex items-center justify-between gap-3 pb-2 border-b">
+            <div class="flex flex-col flex-1">
+              <label for="repeat-delay" class="text-xs">Repeat Delay</label>
+              <span class="text-[10px] text-muted-foreground">
+                How long to hold a button-only binding before auto-repeat kicks in.
+              </span>
+            </div>
+            <span class="text-xs font-mono w-14 text-right">{Math.round(gamepadRepeatDelay)}ms</span>
+            <input
+              id="repeat-delay"
+              type="range"
+              min="50"
+              max="2000"
+              step="10"
+              value={gamepadRepeatDelay}
+              on:input={onRepeatDelayInput}
+              class="w-32"
+            />
+          </div>
+
+          <div class="flex items-center justify-between gap-3 pb-2 border-b">
+            <div class="flex flex-col flex-1">
+              <label for="repeat-interval" class="text-xs">Repeat Interval</label>
+              <span class="text-[10px] text-muted-foreground">
+                Time between auto-repeat fires once it kicks in. Lower = faster.
+              </span>
+            </div>
+            <span class="text-xs font-mono w-14 text-right">{Math.round(gamepadRepeatInterval)}ms</span>
+            <input
+              id="repeat-interval"
+              type="range"
+              min="20"
+              max="1000"
+              step="10"
+              value={gamepadRepeatInterval}
+              on:input={onRepeatIntervalInput}
               class="w-32"
             />
           </div>

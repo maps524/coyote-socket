@@ -935,6 +935,8 @@ async fn save_general_settings(
         output_paused: current.output_paused,
         gamepad_engine: current.gamepad_engine,
         gamepad_stick_sensitivity: current.gamepad_stick_sensitivity,
+        gamepad_button_repeat_delay_ms: current.gamepad_button_repeat_delay_ms,
+        gamepad_button_repeat_interval_ms: current.gamepad_button_repeat_interval_ms,
     };
     settings::update_general(general_settings).await?;
     Ok("General settings saved".to_string())
@@ -946,6 +948,15 @@ async fn set_gamepad_stick_sensitivity(value: f64) -> Result<String, String> {
     general.gamepad_stick_sensitivity = value.clamp(0.05, 5.0);
     settings::update_general(general).await?;
     Ok("Stick sensitivity saved".to_string())
+}
+
+#[tauri::command]
+async fn set_gamepad_button_repeat(delay_ms: u32, interval_ms: u32) -> Result<String, String> {
+    let mut general = settings::get_settings().await.general;
+    general.gamepad_button_repeat_delay_ms = delay_ms.clamp(50, 5000);
+    general.gamepad_button_repeat_interval_ms = interval_ms.clamp(20, 2000);
+    settings::update_general(general).await?;
+    Ok("Button repeat saved".to_string())
 }
 
 // ============================================================================
@@ -1299,6 +1310,7 @@ fn main() {
             get_gamepad_bindings,
             set_gamepad_engine,
             set_gamepad_stick_sensitivity,
+            set_gamepad_button_repeat,
             save_general_settings,
             // Output pause commands
             get_output_paused,

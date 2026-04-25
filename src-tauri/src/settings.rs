@@ -480,10 +480,24 @@ pub struct GeneralSettings {
     /// Higher = stick deflection moves values faster; lower = slower.
     #[serde(default = "default_stick_sensitivity")]
     pub gamepad_stick_sensitivity: f64,
+    /// How long to hold a button-only gamepad binding before it starts
+    /// repeating, in ms. Lower = sooner repeat; higher = more dwell before
+    /// auto-fire kicks in.
+    #[serde(default = "default_button_repeat_delay_ms")]
+    pub gamepad_button_repeat_delay_ms: u32,
+    /// Spacing between repeat fires once auto-repeat has begun, in ms.
+    #[serde(default = "default_button_repeat_interval_ms")]
+    pub gamepad_button_repeat_interval_ms: u32,
 }
 
 fn default_stick_sensitivity() -> f64 {
     1.0
+}
+fn default_button_repeat_delay_ms() -> u32 {
+    400
+}
+fn default_button_repeat_interval_ms() -> u32 {
+    100
 }
 
 fn default_gamepad_engine() -> String {
@@ -532,6 +546,8 @@ impl Default for GeneralSettings {
             output_paused: false,
             gamepad_engine: default_gamepad_engine(),
             gamepad_stick_sensitivity: default_stick_sensitivity(),
+            gamepad_button_repeat_delay_ms: default_button_repeat_delay_ms(),
+            gamepad_button_repeat_interval_ms: default_button_repeat_interval_ms(),
         }
     }
 }
