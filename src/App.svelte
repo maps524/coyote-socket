@@ -364,10 +364,10 @@
         period: Math.round(1000 / (freqA.type === 'static' ? freqA.staticValue : 100)),
         rangeMin: intA.rangeMin,
         rangeMax: intA.rangeMax,
-        frequencySource: { ...freqA, curve: freqA.curve as any, buttplugLinks: settingsToButtplugLinks(freqA.buttplugLinks) },
-        frequencyBalanceSource: { ...freqBalA, curve: freqBalA.curve as any, buttplugLinks: settingsToButtplugLinks(freqBalA.buttplugLinks) },
-        intensityBalanceSource: { ...intBalA, curve: intBalA.curve as any, buttplugLinks: settingsToButtplugLinks(intBalA.buttplugLinks) },
-        intensitySource: { ...intA, curve: intA.curve as any, buttplugLinks: settingsToButtplugLinks(intA.buttplugLinks) }
+        frequencySource: { ...freqA, curve: freqA.curve as any, buttplugLinks: settingsToButtplugLinks(freqA.buttplugLinks), delayMs: freqA.delayEnabled ? freqA.delayMs : undefined },
+        frequencyBalanceSource: { ...freqBalA, curve: freqBalA.curve as any, buttplugLinks: settingsToButtplugLinks(freqBalA.buttplugLinks), delayMs: freqBalA.delayEnabled ? freqBalA.delayMs : undefined },
+        intensityBalanceSource: { ...intBalA, curve: intBalA.curve as any, buttplugLinks: settingsToButtplugLinks(intBalA.buttplugLinks), delayMs: intBalA.delayEnabled ? intBalA.delayMs : undefined },
+        intensitySource: { ...intA, curve: intA.curve as any, buttplugLinks: settingsToButtplugLinks(intA.buttplugLinks), delayMs: intA.delayEnabled ? intA.delayMs : undefined }
       };
 
       // Apply channel B settings with new ParameterSource format
@@ -383,10 +383,10 @@
         period: Math.round(1000 / (freqB.type === 'static' ? freqB.staticValue : 100)),
         rangeMin: intB.rangeMin,
         rangeMax: intB.rangeMax,
-        frequencySource: { ...freqB, curve: freqB.curve as any, buttplugLinks: settingsToButtplugLinks(freqB.buttplugLinks) },
-        frequencyBalanceSource: { ...freqBalB, curve: freqBalB.curve as any, buttplugLinks: settingsToButtplugLinks(freqBalB.buttplugLinks) },
-        intensityBalanceSource: { ...intBalB, curve: intBalB.curve as any, buttplugLinks: settingsToButtplugLinks(intBalB.buttplugLinks) },
-        intensitySource: { ...intB, curve: intB.curve as any, buttplugLinks: settingsToButtplugLinks(intB.buttplugLinks) }
+        frequencySource: { ...freqB, curve: freqB.curve as any, buttplugLinks: settingsToButtplugLinks(freqB.buttplugLinks), delayMs: freqB.delayEnabled ? freqB.delayMs : undefined },
+        frequencyBalanceSource: { ...freqBalB, curve: freqBalB.curve as any, buttplugLinks: settingsToButtplugLinks(freqBalB.buttplugLinks), delayMs: freqBalB.delayEnabled ? freqBalB.delayMs : undefined },
+        intensityBalanceSource: { ...intBalB, curve: intBalB.curve as any, buttplugLinks: settingsToButtplugLinks(intBalB.buttplugLinks), delayMs: intBalB.delayEnabled ? intBalB.delayMs : undefined },
+        intensitySource: { ...intB, curve: intB.curve as any, buttplugLinks: settingsToButtplugLinks(intB.buttplugLinks), delayMs: intB.delayEnabled ? intB.delayMs : undefined }
       };
 
       // Apply keyboard shortcuts
@@ -746,6 +746,9 @@
         rangeMax: ch.frequencySource?.rangeMax ?? 200,
         curve: ch.frequencySource?.curve ?? 'linear',
         curveStrength: ch.frequencySource?.curveStrength ?? 2.0,
+        midpoint: ch.frequencySource?.midpoint ?? false,
+        delayEnabled: ch.frequencySource?.delayMs !== undefined,
+        delayMs: ch.frequencySource?.delayMs ?? 0,
         buttplugLinks: ch.frequencySource?.buttplugLinks
       },
       frequencyBalanceSource: {
@@ -756,6 +759,9 @@
         rangeMax: ch.frequencyBalanceSource?.rangeMax ?? 255,
         curve: ch.frequencyBalanceSource?.curve ?? 'linear',
         curveStrength: ch.frequencyBalanceSource?.curveStrength ?? 2.0,
+        midpoint: ch.frequencyBalanceSource?.midpoint ?? false,
+        delayEnabled: ch.frequencyBalanceSource?.delayMs !== undefined,
+        delayMs: ch.frequencyBalanceSource?.delayMs ?? 0,
         buttplugLinks: ch.frequencyBalanceSource?.buttplugLinks
       },
       intensityBalanceSource: {
@@ -766,6 +772,9 @@
         rangeMax: ch.intensityBalanceSource?.rangeMax ?? 255,
         curve: ch.intensityBalanceSource?.curve ?? 'linear',
         curveStrength: ch.intensityBalanceSource?.curveStrength ?? 2.0,
+        midpoint: ch.intensityBalanceSource?.midpoint ?? false,
+        delayEnabled: ch.intensityBalanceSource?.delayMs !== undefined,
+        delayMs: ch.intensityBalanceSource?.delayMs ?? 0,
         buttplugLinks: ch.intensityBalanceSource?.buttplugLinks
       },
       intensitySource: {
@@ -776,6 +785,9 @@
         rangeMax: ch.intensitySource?.rangeMax ?? ch.rangeMax,
         curve: ch.intensitySource?.curve ?? 'linear',
         curveStrength: ch.intensitySource?.curveStrength ?? 2.0,
+        midpoint: ch.intensitySource?.midpoint ?? false,
+        delayEnabled: ch.intensitySource?.delayMs !== undefined,
+        delayMs: ch.intensitySource?.delayMs ?? 0,
         buttplugLinks: ch.intensitySource?.buttplugLinks
       }
     };
@@ -980,8 +992,8 @@
       case 'channelBFreqRangeMinDown': adjustFrequencyRangeBound('B', 'min', -5 * m); break;
       case 'channelBFreqRangeMaxUp':   adjustFrequencyRangeBound('B', 'max', 5 * m); break;
       case 'channelBFreqRangeMaxDown': adjustFrequencyRangeBound('B', 'max', -5 * m); break;
-      case 'help':                 helpOpen = true; break;
-      case 'settings':             settingsOpen = true; break;
+      case 'help':                 helpOpen = !helpOpen; break;
+      case 'settings':             settingsOpen = !settingsOpen; break;
       case 'toggleOutputPause':    toggleOutputPause(); break;
     }
   }
@@ -1235,7 +1247,9 @@
           rangeMax: $channelA.frequencySource?.rangeMax ?? 200,
           curve: $channelA.frequencySource?.curve ?? 'linear',
           curveStrength: $channelA.frequencySource?.curveStrength ?? 2.0,
-          midpoint: $channelA.frequencySource?.midpoint
+          midpoint: $channelA.frequencySource?.midpoint,
+          delayEnabled: $channelA.frequencySource?.delayMs !== undefined,
+          delayMs: $channelA.frequencySource?.delayMs ?? 0
         },
         frequencyBalanceSource: {
           type: $channelA.frequencyBalanceSource?.type ?? 'static',
@@ -1245,7 +1259,9 @@
           rangeMax: $channelA.frequencyBalanceSource?.rangeMax ?? 255,
           curve: $channelA.frequencyBalanceSource?.curve ?? 'linear',
           curveStrength: $channelA.frequencyBalanceSource?.curveStrength ?? 2.0,
-          midpoint: $channelA.frequencyBalanceSource?.midpoint
+          midpoint: $channelA.frequencyBalanceSource?.midpoint,
+          delayEnabled: $channelA.frequencyBalanceSource?.delayMs !== undefined,
+          delayMs: $channelA.frequencyBalanceSource?.delayMs ?? 0
         },
         intensityBalanceSource: {
           type: $channelA.intensityBalanceSource?.type ?? 'static',
@@ -1255,7 +1271,9 @@
           rangeMax: $channelA.intensityBalanceSource?.rangeMax ?? 255,
           curve: $channelA.intensityBalanceSource?.curve ?? 'linear',
           curveStrength: $channelA.intensityBalanceSource?.curveStrength ?? 2.0,
-          midpoint: $channelA.intensityBalanceSource?.midpoint
+          midpoint: $channelA.intensityBalanceSource?.midpoint,
+          delayEnabled: $channelA.intensityBalanceSource?.delayMs !== undefined,
+          delayMs: $channelA.intensityBalanceSource?.delayMs ?? 0
         },
         intensitySource: {
           type: $channelA.intensitySource?.type ?? 'linked',
@@ -1265,7 +1283,9 @@
           rangeMax: $channelA.intensitySource?.rangeMax ?? $channelA.rangeMax,
           curve: $channelA.intensitySource?.curve ?? 'linear',
           curveStrength: $channelA.intensitySource?.curveStrength ?? 2.0,
-          midpoint: $channelA.intensitySource?.midpoint
+          midpoint: $channelA.intensitySource?.midpoint,
+          delayEnabled: $channelA.intensitySource?.delayMs !== undefined,
+          delayMs: $channelA.intensitySource?.delayMs ?? 0
         }
       },
       channelB: {
@@ -1277,7 +1297,9 @@
           rangeMax: $channelB.frequencySource?.rangeMax ?? 200,
           curve: $channelB.frequencySource?.curve ?? 'linear',
           curveStrength: $channelB.frequencySource?.curveStrength ?? 2.0,
-          midpoint: $channelB.frequencySource?.midpoint
+          midpoint: $channelB.frequencySource?.midpoint,
+          delayEnabled: $channelB.frequencySource?.delayMs !== undefined,
+          delayMs: $channelB.frequencySource?.delayMs ?? 0
         },
         frequencyBalanceSource: {
           type: $channelB.frequencyBalanceSource?.type ?? 'static',
@@ -1287,7 +1309,9 @@
           rangeMax: $channelB.frequencyBalanceSource?.rangeMax ?? 255,
           curve: $channelB.frequencyBalanceSource?.curve ?? 'linear',
           curveStrength: $channelB.frequencyBalanceSource?.curveStrength ?? 2.0,
-          midpoint: $channelB.frequencyBalanceSource?.midpoint
+          midpoint: $channelB.frequencyBalanceSource?.midpoint,
+          delayEnabled: $channelB.frequencyBalanceSource?.delayMs !== undefined,
+          delayMs: $channelB.frequencyBalanceSource?.delayMs ?? 0
         },
         intensityBalanceSource: {
           type: $channelB.intensityBalanceSource?.type ?? 'static',
@@ -1297,7 +1321,9 @@
           rangeMax: $channelB.intensityBalanceSource?.rangeMax ?? 255,
           curve: $channelB.intensityBalanceSource?.curve ?? 'linear',
           curveStrength: $channelB.intensityBalanceSource?.curveStrength ?? 2.0,
-          midpoint: $channelB.intensityBalanceSource?.midpoint
+          midpoint: $channelB.intensityBalanceSource?.midpoint,
+          delayEnabled: $channelB.intensityBalanceSource?.delayMs !== undefined,
+          delayMs: $channelB.intensityBalanceSource?.delayMs ?? 0
         },
         intensitySource: {
           type: $channelB.intensitySource?.type ?? 'linked',
@@ -1307,7 +1333,9 @@
           rangeMax: $channelB.intensitySource?.rangeMax ?? $channelB.rangeMax,
           curve: $channelB.intensitySource?.curve ?? 'linear',
           curveStrength: $channelB.intensitySource?.curveStrength ?? 2.0,
-          midpoint: $channelB.intensitySource?.midpoint
+          midpoint: $channelB.intensitySource?.midpoint,
+          delayEnabled: $channelB.intensitySource?.delayMs !== undefined,
+          delayMs: $channelB.intensitySource?.delayMs ?? 0
         }
       }
     };
@@ -1327,10 +1355,10 @@
       period: Math.round(1000 / (aFreq.type === 'static' ? aFreq.staticValue : 100)),
       rangeMin: aInt.rangeMin,
       rangeMax: aInt.rangeMax,
-      frequencySource: { ...aFreq, curve: aFreq.curve as any, buttplugLinks: settingsToButtplugLinks(aFreq.buttplugLinks) },
-      frequencyBalanceSource: { ...aFreqBal, curve: aFreqBal.curve as any, buttplugLinks: settingsToButtplugLinks(aFreqBal.buttplugLinks) },
-      intensityBalanceSource: { ...aIntBal, curve: aIntBal.curve as any, buttplugLinks: settingsToButtplugLinks(aIntBal.buttplugLinks) },
-      intensitySource: { ...aInt, curve: aInt.curve as any, buttplugLinks: settingsToButtplugLinks(aInt.buttplugLinks) }
+      frequencySource: { ...aFreq, curve: aFreq.curve as any, buttplugLinks: settingsToButtplugLinks(aFreq.buttplugLinks), delayMs: aFreq.delayEnabled ? aFreq.delayMs : undefined },
+      frequencyBalanceSource: { ...aFreqBal, curve: aFreqBal.curve as any, buttplugLinks: settingsToButtplugLinks(aFreqBal.buttplugLinks), delayMs: aFreqBal.delayEnabled ? aFreqBal.delayMs : undefined },
+      intensityBalanceSource: { ...aIntBal, curve: aIntBal.curve as any, buttplugLinks: settingsToButtplugLinks(aIntBal.buttplugLinks), delayMs: aIntBal.delayEnabled ? aIntBal.delayMs : undefined },
+      intensitySource: { ...aInt, curve: aInt.curve as any, buttplugLinks: settingsToButtplugLinks(aInt.buttplugLinks), delayMs: aInt.delayEnabled ? aInt.delayMs : undefined }
     };
 
     // Apply channel B
@@ -1346,10 +1374,10 @@
       period: Math.round(1000 / (bFreq.type === 'static' ? bFreq.staticValue : 100)),
       rangeMin: bInt.rangeMin,
       rangeMax: bInt.rangeMax,
-      frequencySource: { ...bFreq, curve: bFreq.curve as any, buttplugLinks: settingsToButtplugLinks(bFreq.buttplugLinks) },
-      frequencyBalanceSource: { ...bFreqBal, curve: bFreqBal.curve as any, buttplugLinks: settingsToButtplugLinks(bFreqBal.buttplugLinks) },
-      intensityBalanceSource: { ...bIntBal, curve: bIntBal.curve as any, buttplugLinks: settingsToButtplugLinks(bIntBal.buttplugLinks) },
-      intensitySource: { ...bInt, curve: bInt.curve as any, buttplugLinks: settingsToButtplugLinks(bInt.buttplugLinks) }
+      frequencySource: { ...bFreq, curve: bFreq.curve as any, buttplugLinks: settingsToButtplugLinks(bFreq.buttplugLinks), delayMs: bFreq.delayEnabled ? bFreq.delayMs : undefined },
+      frequencyBalanceSource: { ...bFreqBal, curve: bFreqBal.curve as any, buttplugLinks: settingsToButtplugLinks(bFreqBal.buttplugLinks), delayMs: bFreqBal.delayEnabled ? bFreqBal.delayMs : undefined },
+      intensityBalanceSource: { ...bIntBal, curve: bIntBal.curve as any, buttplugLinks: settingsToButtplugLinks(bIntBal.buttplugLinks), delayMs: bIntBal.delayEnabled ? bIntBal.delayMs : undefined },
+      intensitySource: { ...bInt, curve: bInt.curve as any, buttplugLinks: settingsToButtplugLinks(bInt.buttplugLinks), delayMs: bInt.delayEnabled ? bInt.delayMs : undefined }
     };
 
     // Store state for dirty tracking

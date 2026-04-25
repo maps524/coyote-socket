@@ -58,6 +58,11 @@
   let selectedCurve: CurveType = source.curve ?? 'linear';
   let curveStrength: number = source.curveStrength ?? 2.0;
   let midpointEnabled: boolean = source.midpoint ?? false;
+  // Input delay (chase). The off-state is encoded as `delayMs: undefined` so
+  // toggling on with a zero-value slider stays distinguishable from "disabled"
+  // after a round-trip. The number itself is the lag in ms (0-200, step 25).
+  let delayMs: number = source.delayMs ?? 0;
+  $: delayEnabled = source.delayMs !== undefined;
 
   // Does the selected curve support strength adjustment?
   $: curveSupportsStrength = selectedCurve === 'exponential' || selectedCurve === 'logarithmic';
@@ -74,6 +79,7 @@
     selectedCurve = source.curve ?? 'linear';
     curveStrength = source.curveStrength ?? 2.0;
     midpointEnabled = source.midpoint ?? false;
+    delayMs = source.delayMs ?? 0;
 
     if (source.type === 'linked') {
       selectedSource = source.sourceAxis ?? 'L0';
@@ -174,7 +180,8 @@
         rangeMin: minValue,
         rangeMax: maxValue,
         curve: selectedCurve,
-        midpoint: midpointEnabled
+        midpoint: midpointEnabled,
+        delayMs: source.delayMs
       });
     } else {
       // Select this axis
@@ -187,7 +194,8 @@
         rangeMax: maxValue,
         curve: selectedCurve,
         curveStrength: curveStrength,
-        midpoint: midpointEnabled
+        midpoint: midpointEnabled,
+        delayMs: source.delayMs
       });
     }
   }
@@ -242,6 +250,41 @@
       curve: selectedCurve,
       curveStrength: curveStrength,
       midpoint: midpointEnabled
+    });
+  }
+
+  // Handle delay toggle. Off-state encodes as `delayMs: undefined` (so a
+  // round-trip can distinguish "disabled" from "enabled with value 0"); on-state
+  // sends the current slider value. The reactive `delayEnabled` re-derives from
+  // the round-tripped source, so the checkbox follows persistence rather than
+  // transient local state.
+  function handleDelayToggle(event: Event) {
+    const target = event.target as HTMLInputElement;
+    const enable = target.checked;
+    dispatch('sourceChange', {
+      ...source,
+      staticValue: staticValue,
+      rangeMin: minValue,
+      rangeMax: maxValue,
+      curve: selectedCurve,
+      curveStrength: curveStrength,
+      midpoint: midpointEnabled,
+      delayMs: enable ? delayMs : undefined
+    });
+  }
+
+  // Handle delay slider change. Snap to 25ms steps to match device slot timing.
+  function handleDelayChange(event: CustomEvent<number>) {
+    delayMs = Math.max(0, Math.min(1000, Math.round(event.detail / 25) * 25));
+    dispatch('sourceChange', {
+      ...source,
+      staticValue: staticValue,
+      rangeMin: minValue,
+      rangeMax: maxValue,
+      curve: selectedCurve,
+      curveStrength: curveStrength,
+      midpoint: midpointEnabled,
+      delayMs
     });
   }
 
@@ -562,6 +605,36 @@
               class="w-4 h-4 rounded border-border bg-background text-primary focus:ring-primary focus:ring-offset-0 cursor-pointer"
             />
           </label>
+
+          <!-- Input Delay toggle -->
+          <label class="mt-2 flex items-center justify-between cursor-pointer">
+            <span class="text-[10px] text-muted-foreground">Input Delay</span>
+            <input
+              type="checkbox"
+              checked={delayEnabled}
+              on:change={handleDelayToggle}
+              class="w-4 h-4 rounded border-border bg-background text-primary focus:ring-primary focus:ring-offset-0 cursor-pointer"
+            />
+          </label>
+
+          <!-- Delay slider — visible only when toggle is on. -->
+          {#if delayEnabled}
+          <div class="mt-1 space-y-1">
+            <div class="flex justify-between items-center text-[10px] text-muted-foreground">
+              <span>Lag</span>
+              <span class="font-mono">{delayMs} ms</span>
+            </div>
+            <Slider
+              value={delayMs}
+              min={0}
+              max={1000}
+              step={25}
+              variant={channel === 'A' ? 'primary' : 'secondary'}
+              on:change={handleDelayChange}
+              class="h-3"
+            />
+          </div>
+          {/if}
         {:else if inputMode === 'buttplug'}
           <!-- Buttplug Mode: Feature selection grid (TCode options hidden) -->
           <ButtplugLinkPanel
@@ -613,7 +686,7 @@
          where the thumb visually sits at min / max (browsers position the
          thumb's center at min+half-thumb on the left, max-half-thumb on
          the right, not at the absolute edges of the input). -->
-    {#if indicatorValue > 0}
+    {#if isLinked}
     <div
       class="position-indicator absolute top-1/2 pointer-events-none z-20"
       style="left: calc(12px + {indicatorPercent} * (100% - 24px) / 100);"

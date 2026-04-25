@@ -64,6 +64,12 @@ let currentB = 0;
 let targetAxes: AxisValues = {};
 let currentAxes: AxisValues = {};
 
+// Per-axis raw sample history with timestamps (for delayed indicator lookup).
+// Trimmed at write time to AXIS_HISTORY_MS so memory stays bounded. Sized to
+// cover the maximum supported input delay (1000ms) with headroom.
+const AXIS_HISTORY_MS = 1500;
+const axisHistory: Map<string, Array<{ ts: number; value: number }>> = new Map();
+
 // Smoothing factor (0-1, higher = faster response). Applied each RAF tick
 // (~60Hz), so 0.4 roughly halves distance-to-target every 2 frames — fast
 // enough to stay responsive when inputs arrive at 20-60Hz, slow enough to
@@ -113,6 +119,20 @@ function handleAxisUpdate(payload: AxisUpdatePayload) {
   targetB = payload.channel_b;
   targetAxes = payload.axes;
 
+  // Append raw samples to per-axis history for delayed-indicator lookup.
+  const cutoff = payload.timestamp - AXIS_HISTORY_MS;
+  for (const axis in payload.axes) {
+    let ring = axisHistory.get(axis);
+    if (!ring) {
+      ring = [];
+      axisHistory.set(axis, ring);
+    }
+    ring.push({ ts: payload.timestamp, value: payload.axes[axis] });
+    while (ring.length > 0 && ring[0].ts < cutoff) {
+      ring.shift();
+    }
+  }
+
   // Update raw stores (unsmoothed values)
   rawPosition.set({
     channelA: payload.channel_a,
@@ -121,6 +141,47 @@ function handleAxisUpdate(payload: AxisUpdatePayload) {
   });
 
   axisValues.set(payload.axes);
+}
+
+/**
+ * Look up an axis value at `msAgo` milliseconds in the past, linearly
+ * interpolating between bracketing samples so the indicator slides smoothly
+ * between input events instead of stair-stepping at the input cadence.
+ *
+ * - Target between two samples → linear interp by timestamp.
+ * - Target newer than the latest sample → return latest (held).
+ * - Target older than the oldest retained sample → return oldest.
+ * - No history at all → 0.
+ *
+ * Used by the indicator when a parameter has `delayMs` set, so the visual
+ * position reflects what the device is *actually* outputting (which lags
+ * the live input by `delayMs`).
+ */
+export function axisValueAt(axis: string, msAgo: number): number {
+  const ring = axisHistory.get(axis);
+  if (!ring || ring.length === 0) return 0;
+  if (msAgo <= 0) return ring[ring.length - 1].value;
+  const target = Date.now() - msAgo;
+
+  // Newer than newest sample → hold latest.
+  const last = ring[ring.length - 1];
+  if (target >= last.ts) return last.value;
+  // Older than oldest retained sample → return oldest.
+  if (target <= ring[0].ts) return ring[0].value;
+
+  // Walk newest → oldest to find the first sample at-or-before `target`.
+  // Its successor (one index higher) is the first sample strictly after.
+  for (let i = ring.length - 1; i > 0; i--) {
+    const after = ring[i];
+    const before = ring[i - 1];
+    if (before.ts <= target && target <= after.ts) {
+      const span = after.ts - before.ts;
+      if (span <= 0) return after.value;
+      const t = (target - before.ts) / span;
+      return before.value + (after.value - before.value) * t;
+    }
+  }
+  return last.value;
 }
 
 /**

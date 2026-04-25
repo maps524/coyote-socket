@@ -58,6 +58,8 @@ export interface ParameterSourceSettings {
     curve: string;            // Curve type as string for serialization
     curveStrength: number;    // Curve strength (default 2.0)
     midpoint?: boolean;       // If true, use distance from center as input
+    delayEnabled?: boolean;   // Whether input delay is active (separate from value)
+    delayMs?: number;         // Input delay in ms (0-200, step 25); only honored if delayEnabled
     buttplugLinks?: ButtplugLinksSettings; // Buttplug feature links for this parameter
 }
 
@@ -197,7 +199,9 @@ export function parameterSourceToSettings(source: ParameterSource): ParameterSou
         rangeMax: source.rangeMax,
         curve: source.curve,
         curveStrength: source.curveStrength ?? 2.0,
-        midpoint: source.midpoint
+        midpoint: source.midpoint,
+        delayEnabled: source.delayMs !== undefined,
+        delayMs: source.delayMs ?? 0
     };
 }
 
@@ -213,7 +217,8 @@ export function settingsToParameterSource(settings: ParameterSourceSettings): Pa
         rangeMax: settings.rangeMax,
         curve: settings.curve as CurveType,
         curveStrength: settings.curveStrength,
-        midpoint: settings.midpoint
+        midpoint: settings.midpoint,
+        delayMs: settings.delayEnabled ? (settings.delayMs ?? 0) : undefined
     };
 }
 

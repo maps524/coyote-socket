@@ -55,6 +55,11 @@ pub struct ParameterSource {
     pub curve_strength: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub midpoint: Option<bool>, // If true, input is distance from center (0.5 → 0, 0 or 1 → 1)
+    /// Input delay in ms. The resolver looks up axis history at `now - delay_ms`
+    /// instead of the latest sample, so the channel "chases" live input. 0/None
+    /// = real-time. Capped at AXIS_HISTORY_MS by the lookup window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u32>,
 
     // For Buttplug mode (pipeline stages)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,6 +78,7 @@ impl ParameterSource {
             curve: CurveType::Linear,
             curve_strength: None,
             midpoint: None,
+            delay_ms: None,
             buttplug_links: None,
         }
     }
@@ -88,6 +94,7 @@ impl ParameterSource {
             curve,
             curve_strength: Some(2.0),
             midpoint: None,
+            delay_ms: None,
             buttplug_links: None,
         }
     }
@@ -136,21 +143,31 @@ impl ChannelConfig {
     }
 }
 
-/// Retention window for per-axis sample history. Slightly wider than the
-/// 100ms output window so per-slot lookups at `ws+0..+75` can always find a
-/// sample at or before the target time, even when input is sparse.
-pub const AXIS_HISTORY_MS: u64 = 500;
+/// Retention window for per-axis sample history. Generous enough to cover the
+/// per-slot lookup window plus the maximum supported input delay (1000ms),
+/// with headroom so backdated lookups at the edge can still find a sample.
+pub const AXIS_HISTORY_MS: u64 = 1500;
+
+/// One entry in the per-axis history ring. `interval_ms` is the ramp duration
+/// from the original T-Code command (preserved so tick-side replay can feed
+/// V1/V2 the same ramp semantics they'd see at command-arrival time).
+#[derive(Debug, Clone, Copy)]
+pub struct AxisSample {
+    pub timestamp: u64,
+    pub value: f64,
+    pub interval_ms: Option<u32>,
+}
 
 /// State tracking for a single T-Code axis. `value`/`timestamp` hold the most
 /// recent sample (cheap hot-path access); `history` preserves timestamped
-/// samples for per-slot lookups (e.g. sub-100ms frequency modulation).
+/// samples for per-slot lookups and delayed-replay ingest.
 #[derive(Debug, Clone)]
 pub struct AxisState {
     pub value: f64,     // 0.0-1.0 normalized (most recent)
     pub timestamp: u64, // When last updated (milliseconds)
     pub has_data: bool, // Has received any data this session
     /// Ordered-by-time ring of recent samples. Trimmed to AXIS_HISTORY_MS.
-    pub history: std::collections::VecDeque<(u64, f64)>,
+    pub history: std::collections::VecDeque<AxisSample>,
 }
 
 impl Default for AxisState {
@@ -170,7 +187,7 @@ impl AxisState {
     pub fn new(value: f64, timestamp: u64) -> Self {
         let v = value.clamp(0.0, 1.0);
         let mut history = std::collections::VecDeque::with_capacity(64);
-        history.push_back((timestamp, v));
+        history.push_back(AxisSample { timestamp, value: v, interval_ms: None });
         Self {
             value: v,
             timestamp,
@@ -180,15 +197,15 @@ impl AxisState {
     }
 
     /// Update the axis value and append to history, trimming old samples.
-    pub fn update(&mut self, value: f64, timestamp: u64) {
+    pub fn update(&mut self, value: f64, timestamp: u64, interval_ms: Option<u32>) {
         let v = value.clamp(0.0, 1.0);
         self.value = v;
         self.timestamp = timestamp;
         self.has_data = true;
-        self.history.push_back((timestamp, v));
+        self.history.push_back(AxisSample { timestamp, value: v, interval_ms });
         let cutoff = timestamp.saturating_sub(AXIS_HISTORY_MS);
-        while let Some(&(ts, _)) = self.history.front() {
-            if ts < cutoff {
+        while let Some(front) = self.history.front() {
+            if front.timestamp < cutoff {
                 self.history.pop_front();
             } else {
                 break;
@@ -205,14 +222,23 @@ impl AxisState {
         }
         // Scan from newest back; first sample with ts <= target wins.
         let mut best: Option<f64> = None;
-        for &(ts, v) in self.history.iter().rev() {
-            if ts <= target_time {
-                best = Some(v);
+        for s in self.history.iter().rev() {
+            if s.timestamp <= target_time {
+                best = Some(s.value);
                 break;
             }
         }
         // target predates all samples → clamp to oldest available.
-        best.or_else(|| self.history.front().map(|&(_, v)| v))
+        best.or_else(|| self.history.front().map(|s| s.value))
+    }
+
+    /// Iterate samples with timestamps in `(after, up_to]`, oldest-first.
+    /// Used by the device tick to replay TCode samples into engine state at
+    /// the (possibly delayed) effective time.
+    pub fn samples_in_range(&self, after: u64, up_to: u64) -> impl Iterator<Item = &AxisSample> {
+        self.history
+            .iter()
+            .filter(move |s| s.timestamp > after && s.timestamp <= up_to)
     }
 }
 
@@ -264,6 +290,8 @@ pub fn resolve_parameter_at_time(
         ParameterSourceType::Linked => {
             let axis = source.source_axis.as_ref();
             let axis_state = axis.and_then(|a| axis_values.get(a));
+            let delay = source.delay_ms.unwrap_or(0) as u64;
+            let lookup_time = target_time_ms.saturating_sub(delay);
 
             let input = match axis_state {
                 Some(state) if state.has_data => {
@@ -281,7 +309,7 @@ pub fn resolve_parameter_at_time(
                         )
                     } else {
                         state
-                            .value_at(target_time_ms)
+                            .value_at(lookup_time)
                             .unwrap_or(state.value)
                     }
                 }
@@ -314,6 +342,7 @@ pub fn resolve_parameter(
         ParameterSourceType::Linked => {
             let axis = source.source_axis.as_ref();
             let axis_state = axis.and_then(|a| axis_values.get(a));
+            let delay = source.delay_ms.unwrap_or(0) as u64;
 
             let input = match axis_state {
                 Some(state) if state.has_data => {
@@ -322,6 +351,11 @@ pub fn resolve_parameter(
                     if age_ms > 1000 {
                         // No data for over 1 second
                         handle_no_input(no_input_behavior, source, state, age_ms, no_input_decay_ms)
+                    } else if delay > 0 {
+                        // Walk history at (now - delay) so the channel chases
+                        // live input by `delay` ms.
+                        let target = current_time_ms.saturating_sub(delay);
+                        state.value_at(target).unwrap_or(state.value)
                     } else {
                         state.value
                     }
@@ -414,7 +448,7 @@ mod tests {
         let mut state = AxisState::default();
         assert!(!state.has_data);
 
-        state.update(0.75, 1000);
+        state.update(0.75, 1000, None);
         assert!(state.has_data);
         assert_eq!(state.value, 0.75);
         assert_eq!(state.timestamp, 1000);

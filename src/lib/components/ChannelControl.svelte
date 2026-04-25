@@ -3,7 +3,7 @@
   import { Zap } from 'lucide-svelte';
   import { channelA, channelB } from '$lib/stores/channels.js';
   import { generalSettings } from '$lib/stores/generalSettings.js';
-  import { allAxisValues } from '$lib/stores/inputPosition.js';
+  import { allAxisValues, axisValueAt, type AxisValues } from '$lib/stores/inputPosition.js';
   import { currentInputSource, inputSourceState } from '$lib/stores/inputSource.js';
   import { type ParameterSource, type ButtplugLinks, applySourceTransform } from '$lib/types/modulation.js';
 
@@ -149,6 +149,18 @@
     curve: 'linear' as const
   };
 
+  // Resolve the indicator's input value for a linked source. When the source
+  // has `delayMs` set, walks the per-axis history at `now - delayMs` so the
+  // visual indicator chases the live input by the same lag the engines see.
+  // Reads `$allAxisValues` so the reactive re-runs each animation frame.
+  function linkedAxisInput(source: ParameterSource, smooth: AxisValues): number {
+    if (!source.sourceAxis) return 0;
+    if (source.delayMs && source.delayMs > 0) {
+      return axisValueAt(source.sourceAxis, source.delayMs);
+    }
+    return smooth[source.sourceAxis] ?? 0;
+  }
+
   // Get indicator values based on linked source axis or Buttplug features
   // In Buttplug mode, use Buttplug feature values; in T-Code mode, use axis values
   $: freqIndicator = (() => {
@@ -156,7 +168,7 @@
       return getButtplugIndicatorValue(frequencySource.buttplugLinks);
     }
     if (frequencySource.type === 'linked' && frequencySource.sourceAxis) {
-      return applySourceTransform($allAxisValues[frequencySource.sourceAxis] ?? 0, frequencySource);
+      return applySourceTransform(linkedAxisInput(frequencySource, $allAxisValues), frequencySource);
     }
     return 0;
   })();
@@ -166,7 +178,7 @@
       return getButtplugIndicatorValue(frequencyBalanceSource.buttplugLinks);
     }
     if (frequencyBalanceSource.type === 'linked' && frequencyBalanceSource.sourceAxis) {
-      return applySourceTransform($allAxisValues[frequencyBalanceSource.sourceAxis] ?? 0, frequencyBalanceSource);
+      return applySourceTransform(linkedAxisInput(frequencyBalanceSource, $allAxisValues), frequencyBalanceSource);
     }
     return 0;
   })();
@@ -176,7 +188,7 @@
       return getButtplugIndicatorValue(intensityBalanceSource.buttplugLinks);
     }
     if (intensityBalanceSource.type === 'linked' && intensityBalanceSource.sourceAxis) {
-      return applySourceTransform($allAxisValues[intensityBalanceSource.sourceAxis] ?? 0, intensityBalanceSource);
+      return applySourceTransform(linkedAxisInput(intensityBalanceSource, $allAxisValues), intensityBalanceSource);
     }
     return 0;
   })();
@@ -186,7 +198,7 @@
       return getButtplugIndicatorValue(intensitySource.buttplugLinks);
     }
     if (intensitySource.type === 'linked' && intensitySource.sourceAxis) {
-      return applySourceTransform($allAxisValues[intensitySource.sourceAxis] ?? 0, intensitySource);
+      return applySourceTransform(linkedAxisInput(intensitySource, $allAxisValues), intensitySource);
     }
     return 0;
   })();

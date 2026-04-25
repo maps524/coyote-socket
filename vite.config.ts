@@ -34,8 +34,16 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell vite to ignore watching paths it doesn't need to react to.
+      //    src-tauri churns on every Rust rebuild; .claude/docs/dist/target
+      //    are agent state and build artifacts, never frontend sources.
+      ignored: [
+        "**/src-tauri/**",
+        "**/.claude/**",
+        "**/docs/**",
+        "**/dist/**",
+        "**/target/**",
+      ],
     },
   },
 }));
