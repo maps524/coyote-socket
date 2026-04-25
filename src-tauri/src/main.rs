@@ -937,9 +937,29 @@ async fn save_general_settings(
         gamepad_stick_sensitivity: current.gamepad_stick_sensitivity,
         gamepad_button_repeat_delay_ms: current.gamepad_button_repeat_delay_ms,
         gamepad_button_repeat_interval_ms: current.gamepad_button_repeat_interval_ms,
+        channel_a_max_intensity: current.channel_a_max_intensity,
+        channel_b_max_intensity: current.channel_b_max_intensity,
     };
     settings::update_general(general_settings).await?;
     Ok("General settings saved".to_string())
+}
+
+/// Set per-channel device intensity cap ("soft mode"). 0-200 (clamped).
+/// Persisted in general settings; device.rs reads it per tick to set the BF
+/// soft limit and clamp scaled values.
+#[tauri::command]
+async fn set_channel_max_intensity(channel: String, value: u8) -> Result<String, String> {
+    let clamped = value.min(200);
+    let mut general = settings::get_settings().await.general;
+    match channel.as_str() {
+        "A" | "a" => general.channel_a_max_intensity = clamped,
+        "B" | "b" => general.channel_b_max_intensity = clamped,
+        _ => return Err(format!("Unknown channel: {}", channel)),
+    }
+    settings::update_general(general).await?;
+    // Force BF resend on next tick so the new cap reaches the device immediately.
+    device::reset_bf_snapshot().await;
+    Ok(format!("Channel {} max intensity set to {}", channel, clamped))
 }
 
 #[tauri::command]
@@ -1312,6 +1332,7 @@ fn main() {
             set_gamepad_stick_sensitivity,
             set_gamepad_button_repeat,
             save_general_settings,
+            set_channel_max_intensity,
             // Output pause commands
             get_output_paused,
             set_output_paused,

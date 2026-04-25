@@ -320,7 +320,9 @@
         saveRateMs: settings.general?.saveRateMs ?? 500,
         showTCodeMonitor: settings.connection.showTcodeMonitor,
         processingEngine: (settings.output.processingEngine as ProcessingEngine) ?? 'v1',
-        peakFill: (settings.output.peakFill as PeakFillStrategy) ?? 'forward'
+        peakFill: (settings.output.peakFill as PeakFillStrategy) ?? 'forward',
+        channelAMaxIntensity: settings.general?.channelAMaxIntensity ?? 200,
+        channelBMaxIntensity: settings.general?.channelBMaxIntensity ?? 200
       };
 
       // Apply bluetooth settings (discovered devices come from backend, not settings)

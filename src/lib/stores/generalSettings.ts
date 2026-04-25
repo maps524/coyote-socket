@@ -14,6 +14,8 @@ export interface GeneralSettings {
   showTCodeMonitor: boolean;    // Toggle T-Code monitor visibility
   processingEngine: ProcessingEngine;  // Moved from outputOptions for centralization
   peakFill: PeakFillStrategy;   // V2 Detailed variant: legacy cascade vs forward-fill
+  channelAMaxIntensity: number; // 0-200, "soft mode" device intensity cap for channel A
+  channelBMaxIntensity: number; // 0-200, "soft mode" device intensity cap for channel B
 }
 
 /**
@@ -26,7 +28,9 @@ export const defaultGeneralSettings: GeneralSettings = {
   saveRateMs: 500,
   showTCodeMonitor: false,
   processingEngine: 'v2-smooth',
-  peakFill: 'forward'
+  peakFill: 'forward',
+  channelAMaxIntensity: 200,
+  channelBMaxIntensity: 200
 };
 
 /**

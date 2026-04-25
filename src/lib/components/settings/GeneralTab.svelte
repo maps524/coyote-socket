@@ -1,10 +1,12 @@
 <script lang="ts">
   import { generalSettings } from '$lib/stores/generalSettings';
+  import { channelA, channelB } from '$lib/stores/channels';
   import Select from '$lib/components/ui/Select.svelte';
   import Toggle from '$lib/components/ui/Toggle.svelte';
   import Tooltip from '$lib/components/ui/Tooltip.svelte';
   import Slider from '$lib/components/ui/Slider.svelte';
   import { Info } from 'lucide-svelte';
+  import { invoke } from '@tauri-apps/api/core';
 
   // Local state bound to the store
   let noInputBehavior = $generalSettings.noInputBehavior;
@@ -23,6 +25,55 @@
       saveRateMs,
       showTCodeMonitor
     }));
+  }
+
+  // Per-channel device intensity cap ("soft mode"). Push to backend + clamp the
+  // channel's modulation range to fit inside the new cap, so stored rangeMax
+  // values can't render past the slider's visible end.
+  async function applyMaxIntensity(channel: 'A' | 'B', value: number) {
+    const clamped = Math.max(0, Math.min(200, Math.round(value)));
+    generalSettings.update(s => ({
+      ...s,
+      channelAMaxIntensity: channel === 'A' ? clamped : s.channelAMaxIntensity,
+      channelBMaxIntensity: channel === 'B' ? clamped : s.channelBMaxIntensity
+    }));
+
+    try {
+      await invoke('set_channel_max_intensity', { channel, value: clamped });
+    } catch (e) {
+      console.error(`[GeneralTab] set_channel_max_intensity failed:`, e);
+    }
+
+    const store = channel === 'A' ? channelA : channelB;
+    const params = channel === 'A' ? $channelA : $channelB;
+    const src = params.intensitySource;
+    if (src) {
+      const newMin = Math.min(src.rangeMin, clamped);
+      const newMax = Math.min(src.rangeMax, clamped);
+      if (newMin !== src.rangeMin || newMax !== src.rangeMax) {
+        const updated = { ...src, rangeMin: newMin, rangeMax: newMax };
+        store.update(s => ({ ...s, intensitySource: updated, rangeMin: newMin, rangeMax: newMax }));
+        try {
+          await invoke('update_parameter_source', {
+            channel,
+            parameter: 'intensity',
+            source: updated
+          });
+        } catch (e) {
+          console.error(`[GeneralTab] clamp intensity range failed:`, e);
+        }
+      }
+    }
+  }
+
+  // "Soft mode" preset (legacy app: fixed cap toggle). 100 = 50% of device max.
+  function applySoftMode() {
+    applyMaxIntensity('A', 100);
+    applyMaxIntensity('B', 100);
+  }
+  function clearCaps() {
+    applyMaxIntensity('A', 200);
+    applyMaxIntensity('B', 200);
   }
 </script>
 
@@ -135,6 +186,80 @@
       </div>
       <Toggle bind:checked={showTCodeMonitor} />
     </div>
+  </div>
+
+  <!-- Safety Limits -->
+  <div class="space-y-3 pt-3 border-t border-border">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <h3 class="text-sm font-medium text-foreground">Safety Limits</h3>
+        <Tooltip content="Per-channel cap on device intensity. Channel sliders downsample to fit inside the cap, so 100% on the channel slider matches the cap you set here. The device itself enforces the limit too.">
+          <Info class="h-3 w-3 text-muted-foreground cursor-help" />
+        </Tooltip>
+      </div>
+      <div class="flex items-center gap-1">
+        <button
+          type="button"
+          class="text-xs px-2 py-1 rounded border border-border bg-muted hover:bg-muted/70 text-foreground"
+          on:click={applySoftMode}
+        >
+          Soft Mode
+        </button>
+        <button
+          type="button"
+          class="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-muted/40 text-muted-foreground"
+          on:click={clearCaps}
+        >
+          Clear
+        </button>
+      </div>
+    </div>
+
+    <!-- Channel A max intensity -->
+    <div class="space-y-2">
+      <div class="flex items-center justify-between">
+        <label for="ch-a-max" class="text-xs text-muted-foreground">
+          Channel A Max Intensity
+        </label>
+        <span class="text-xs font-mono text-foreground">
+          {Math.round($generalSettings.channelAMaxIntensity / 2)}%
+        </span>
+      </div>
+      <Slider
+        id="ch-a-max"
+        value={$generalSettings.channelAMaxIntensity}
+        min={0}
+        max={200}
+        step={2}
+        variant="primary"
+        on:change={(e) => applyMaxIntensity('A', e.detail)}
+      />
+    </div>
+
+    <!-- Channel B max intensity -->
+    <div class="space-y-2">
+      <div class="flex items-center justify-between">
+        <label for="ch-b-max" class="text-xs text-muted-foreground">
+          Channel B Max Intensity
+        </label>
+        <span class="text-xs font-mono text-foreground">
+          {Math.round($generalSettings.channelBMaxIntensity / 2)}%
+        </span>
+      </div>
+      <Slider
+        id="ch-b-max"
+        value={$generalSettings.channelBMaxIntensity}
+        min={0}
+        max={200}
+        step={2}
+        variant="secondary"
+        on:change={(e) => applyMaxIntensity('B', e.detail)}
+      />
+    </div>
+
+    <p class="text-xs text-muted-foreground">
+      Soft Mode caps both channels at 50%. Channel intensity sliders rescale so 100% always matches the cap.
+    </p>
   </div>
 
   <div class="pt-3 border-t border-border">

@@ -167,6 +167,8 @@ export interface GeneralSettings {
     gamepadStickSensitivity?: number;
     gamepadButtonRepeatDelayMs?: number;
     gamepadButtonRepeatIntervalMs?: number;
+    channelAMaxIntensity?: number;
+    channelBMaxIntensity?: number;
 }
 
 export interface AppSettings {

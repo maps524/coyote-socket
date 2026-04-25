@@ -2,6 +2,7 @@
   import RangeSliderWithIndicator from './ui/RangeSliderWithIndicator.svelte';
   import { Zap } from 'lucide-svelte';
   import { channelA, channelB } from '$lib/stores/channels.js';
+  import { generalSettings } from '$lib/stores/generalSettings.js';
   import { allAxisValues } from '$lib/stores/inputPosition.js';
   import { currentInputSource, inputSourceState } from '$lib/stores/inputSource.js';
   import { type ParameterSource, type ButtplugLinks, applySourceTransform } from '$lib/types/modulation.js';
@@ -366,14 +367,16 @@
       on:sourceChange={handleIntensityBalanceSourceChange}
     />
 
-    <!-- Intensity Limits with Source Selection (no divider) -->
+    <!-- Intensity Limits with Source Selection (no divider).
+         Slider max is downsampled to per-channel "soft mode" cap so the visible
+         range matches the device's enforced ceiling. -->
     <RangeSliderWithIndicator
       {channel}
       parameterName="Intensity"
       source={intensitySource}
       indicatorValue={intensityIndicator}
       min={0}
-      max={200}
+      max={channel === 'A' ? $generalSettings.channelAMaxIntensity : $generalSettings.channelBMaxIntensity}
       step={2}
       compact={compact}
       showLabels={true}

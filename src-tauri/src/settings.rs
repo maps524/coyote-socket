@@ -533,6 +533,14 @@ pub struct GeneralSettings {
     /// Spacing between repeat fires once auto-repeat has begun, in ms.
     #[serde(default = "default_button_repeat_interval_ms")]
     pub gamepad_button_repeat_interval_ms: u32,
+    /// Per-channel device intensity cap (0-200). Sent as the V3 BF soft upper
+    /// limit and also enforced in software before the B0 write so the cap
+    /// holds during the ~100ms window before BF lands on first connect.
+    /// Default 200 = no cap. Used as a "soft mode" safety knob.
+    #[serde(default = "default_channel_max_intensity")]
+    pub channel_a_max_intensity: u8,
+    #[serde(default = "default_channel_max_intensity")]
+    pub channel_b_max_intensity: u8,
 }
 
 fn default_stick_sensitivity() -> f64 {
@@ -543,6 +551,9 @@ fn default_button_repeat_delay_ms() -> u32 {
 }
 fn default_button_repeat_interval_ms() -> u32 {
     100
+}
+fn default_channel_max_intensity() -> u8 {
+    200
 }
 
 fn default_gamepad_engine() -> String {
@@ -593,6 +604,8 @@ impl Default for GeneralSettings {
             gamepad_stick_sensitivity: default_stick_sensitivity(),
             gamepad_button_repeat_delay_ms: default_button_repeat_delay_ms(),
             gamepad_button_repeat_interval_ms: default_button_repeat_interval_ms(),
+            channel_a_max_intensity: default_channel_max_intensity(),
+            channel_b_max_intensity: default_channel_max_intensity(),
         }
     }
 }

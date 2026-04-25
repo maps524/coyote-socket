@@ -319,6 +319,15 @@ async fn send_device_update() -> Result<(), String> {
         scale_intensity(waveform_b.intensity, range_min_b, range_max_b)
     };
 
+    // Per-channel device intensity cap ("soft mode"). Hardware enforces this
+    // via BF below, but clamp here too — covers the brief window before the
+    // first BF lands after a (re)connect.
+    let general = crate::settings::get_settings().await.general;
+    let max_a = general.channel_a_max_intensity.min(200);
+    let max_b = general.channel_b_max_intensity.min(200);
+    let scaled_a = scaled_a.min(max_a);
+    let scaled_b = scaled_b.min(max_b);
+
     // Get timestamp for both output storage and waveform recording
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -399,11 +408,13 @@ async fn send_device_update() -> Result<(), String> {
             // BF. The natural upper bound on write rate is the 10Hz device
             // tick combined with the frontend's 50ms debounce on slider
             // changes — effectively ≤10 BF writes/sec during a drag, zero
-            // when idle. Soft limits pinned at 200 since `scale_intensity`
-            // already clamps per-sample in software.
+            // when idle. Soft limits come from the per-channel cap setting
+            // ("soft mode") — hardware enforces them across reconnects via
+            // device flash; software also clamps `scaled_*` above as a
+            // belt-and-suspenders for the brief pre-BF window.
             let desired_bf: BfSnapshot = (
-                200,
-                200,
+                max_a,
+                max_b,
                 params_a.freq_balance,
                 params_b.freq_balance,
                 params_a.int_balance,
