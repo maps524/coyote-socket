@@ -686,8 +686,27 @@ async fn save_app_settings(settings: AppSettings) -> Result<String, String> {
 /// `persist=false` is the fast path the frontend uses while a slider is being
 /// dragged — runtime state updates immediately, no disk I/O. `persist=true`
 /// runs behind a longer debounce, writes to disk first (so on failure the
-/// processing state stays consistent with disk), and refreshes the
-/// HMR-recovery `ChannelParams` mirror in `device.rs`.
+/// processing state stays consistent with disk), then refreshes the
+/// HMR-recovery `ChannelParams` mirror in `device.rs`, then writes runtime
+/// state. `persist=true` is therefore a strict superset of `persist=false`
+/// — both update runtime state, only `persist=true` also writes disk + mirror.
+///
+/// **Failure semantics:**
+/// - An invalid `channel` string returns an error before any disk write or
+///   state mutation. No partial application possible from a bad channel name.
+/// - A disk-write failure (`persist=true`) propagates and skips the mirror +
+///   runtime-state writes, leaving the runtime consistent with disk.
+///
+/// **Concurrency:** the three steps (disk → mirror → runtime state) hold
+/// three independent locks; this function does NOT serialize concurrent
+/// calls for the same channel. Two overlapping `persist=true` calls or a
+/// `persist=false` racing the trailing `persist=true` from the same drag can
+/// interleave such that disk reflects payload N while runtime ends on N-1.
+/// Pre-refactor `save_channel_settings` had the same disk→state lock split;
+/// this function adds the params-mirror update between them but does not
+/// fundamentally change the contention model. The bundled phase
+/// (Steps 5+6+7 in `docs/plans/pipeline-refactor.md`) replaces this
+/// orchestration with a snapshot-based bus model that addresses the race.
 #[tauri::command]
 async fn apply_channel_config(
     channel: String,
@@ -1249,4 +1268,152 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{
+        ButtplugLinksSettings, ChannelSettings, ParameterSourceSettings, ParameterSourceType,
+    };
+
+    fn static_source(value: f64) -> ParameterSourceSettings {
+        ParameterSourceSettings {
+            source_type: ParameterSourceType::Static,
+            static_value: value,
+            source_axis: "L0".to_string(),
+            range_min: 0.0,
+            range_max: 200.0,
+            curve: "linear".to_string(),
+            curve_strength: 2.0,
+            midpoint: false,
+            delay_enabled: false,
+            delay_ms: 0,
+            buttplug_links: None,
+        }
+    }
+
+    fn linked_source(min: f64, max: f64) -> ParameterSourceSettings {
+        ParameterSourceSettings {
+            source_type: ParameterSourceType::Linked,
+            static_value: 0.0,
+            source_axis: "L0".to_string(),
+            range_min: min,
+            range_max: max,
+            curve: "linear".to_string(),
+            curve_strength: 2.0,
+            midpoint: false,
+            delay_enabled: false,
+            delay_ms: 0,
+            buttplug_links: None,
+        }
+    }
+
+    fn channel_with(
+        frequency: ParameterSourceSettings,
+        frequency_balance: ParameterSourceSettings,
+        intensity_balance: ParameterSourceSettings,
+        intensity: ParameterSourceSettings,
+    ) -> ChannelSettings {
+        ChannelSettings {
+            frequency_source: frequency,
+            frequency_balance_source: frequency_balance,
+            intensity_balance_source: intensity_balance,
+            intensity_source: intensity,
+        }
+    }
+
+    #[test]
+    fn hmr_params_use_static_value_when_source_is_static() {
+        // All four parameter sources static → mirror should pull each
+        // static_value directly. (intensity isn't on ChannelParams; it's
+        // sourced from the engine instead, so only freq/freq_bal/int_bal
+        // matter here.)
+        let settings = channel_with(
+            static_source(150.0),
+            static_source(100.0),
+            static_source(75.0),
+            static_source(50.0),
+        );
+        let p = derive_hmr_channel_params(&settings);
+        assert_eq!(p.frequency, 150.0);
+        assert_eq!(p.freq_balance, 100);
+        assert_eq!(p.int_balance, 75);
+    }
+
+    #[test]
+    fn hmr_params_seed_midpoint_when_source_is_linked() {
+        // Linked sources can't be sampled at HMR-recovery time, so the
+        // mirror seeds frequency to the midpoint of its range and balances
+        // to a neutral 128. Until the next input tick repopulates the bus,
+        // these defaults drive the device-side mirror.
+        let settings = channel_with(
+            linked_source(20.0, 80.0),
+            linked_source(0.0, 255.0),
+            linked_source(0.0, 255.0),
+            linked_source(10.0, 90.0),
+        );
+        let p = derive_hmr_channel_params(&settings);
+        assert_eq!(p.frequency, 50.0);
+        assert_eq!(p.freq_balance, 128);
+        assert_eq!(p.int_balance, 128);
+    }
+
+    #[test]
+    fn hmr_params_mix_static_and_linked_per_field() {
+        // Each field decides independently: static frequency keeps its
+        // value, linked balances fall back to neutral 128.
+        let settings = channel_with(
+            static_source(120.0),
+            linked_source(0.0, 255.0),
+            static_source(200.0),
+            linked_source(10.0, 90.0),
+        );
+        let p = derive_hmr_channel_params(&settings);
+        assert_eq!(p.frequency, 120.0);
+        assert_eq!(p.freq_balance, 128);
+        assert_eq!(p.int_balance, 200);
+    }
+
+    #[test]
+    fn hmr_params_intensity_source_does_not_affect_output() {
+        // intensity_source isn't part of ChannelParams (the device-side
+        // mirror), so changing it shouldn't move freq / freq_bal / int_bal.
+        let base = channel_with(
+            static_source(100.0),
+            static_source(128.0),
+            static_source(128.0),
+            static_source(50.0),
+        );
+        let mut variant = base.clone();
+        variant.intensity_source = linked_source(10.0, 90.0);
+
+        let a = derive_hmr_channel_params(&base);
+        let b = derive_hmr_channel_params(&variant);
+        assert_eq!(a.frequency, b.frequency);
+        assert_eq!(a.freq_balance, b.freq_balance);
+        assert_eq!(a.int_balance, b.int_balance);
+    }
+
+    #[test]
+    fn hmr_params_freq_balance_truncates_static_value_to_u8() {
+        // freq_balance / int_balance are u8 on the mirror; static_value is
+        // f64 on settings. Confirm the cast doesn't panic on out-of-range
+        // and that a sane in-range value round-trips.
+        let settings = channel_with(
+            static_source(100.0),
+            static_source(255.0),
+            static_source(0.0),
+            static_source(50.0),
+        );
+        let p = derive_hmr_channel_params(&settings);
+        assert_eq!(p.freq_balance, 255);
+        assert_eq!(p.int_balance, 0);
+    }
+
+    // Suppresses "unused" if test fixtures grow new fields.
+    #[allow(dead_code)]
+    fn _touch_buttplug_links() -> Option<ButtplugLinksSettings> {
+        None
+    }
 }
