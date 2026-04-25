@@ -421,13 +421,58 @@ pub enum GamepadBinding {
 /// Map of action-name → gamepad binding. Action names are camelCase strings
 /// matching the frontend dispatch table (e.g. "channelAIntUp"). Free-form
 /// HashMap so new actions can be added without schema migrations.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GamepadBindings(pub std::collections::HashMap<String, GamepadBinding>);
 
 impl GamepadBindings {
     pub fn iter_bound(&self) -> impl Iterator<Item = (&str, &GamepadBinding)> + '_ {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+}
+
+impl Default for GamepadBindings {
+    /// Stock Xbox layout. Channel A modulated with LT held, channel B with RT.
+    /// Left-stick Y = intensity / freq main. D-pad up/down = balance.
+    /// A/B/X/Y = range min/max edges. View = help, Start = toggle pause.
+    fn default() -> Self {
+        use std::collections::HashMap;
+        let mut map: HashMap<String, GamepadBinding> = HashMap::new();
+        map.insert("channelAFreqBalDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 4 }, ChordPart::Button { index: 13 }] });
+        map.insert("channelAFreqBalUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 4 }, ChordPart::Button { index: 12 }] });
+        map.insert("channelAFreqDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 4 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelAFreqRangeMaxDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 4 }, ChordPart::Button { index: 2 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelAFreqRangeMaxUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 4 }, ChordPart::Button { index: 2 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelAFreqRangeMinDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 4 }, ChordPart::Button { index: 0 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelAFreqRangeMinUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 4 }, ChordPart::Button { index: 0 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelAFreqUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 4 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelAIntBalDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 4, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 13 }] });
+        map.insert("channelAIntBalUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 4, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 12 }] });
+        map.insert("channelAIntDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 4, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelAIntRangeMaxDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 4, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 2 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelAIntRangeMaxUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 4, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 2 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelAIntRangeMinDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 4, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 0 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelAIntRangeMinUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 4, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 0 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelAIntUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 4, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelBFreqBalDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 5 }, ChordPart::Button { index: 13 }] });
+        map.insert("channelBFreqBalUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 5 }, ChordPart::Button { index: 12 }] });
+        map.insert("channelBFreqDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 5 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelBFreqRangeMaxDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 5 }, ChordPart::Button { index: 2 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelBFreqRangeMaxUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 5 }, ChordPart::Button { index: 2 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelBFreqRangeMinDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 5 }, ChordPart::Button { index: 0 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelBFreqRangeMinUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 5 }, ChordPart::Button { index: 0 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelBFreqUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Button { index: 5 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelBIntBalDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 5, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 13 }] });
+        map.insert("channelBIntBalUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 5, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 12 }] });
+        map.insert("channelBIntDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 5, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelBIntRangeMaxDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 5, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 2 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelBIntRangeMaxUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 5, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 2 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelBIntRangeMinDown".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 5, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 0 }, ChordPart::Axis { index: 1, dir: AxisDir::Pos, threshold: 0.5 }] });
+        map.insert("channelBIntRangeMinUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 5, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Button { index: 0 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("channelBIntUp".to_string(), GamepadBinding::Combo { parts: vec![ChordPart::Axis { index: 5, dir: AxisDir::Pos, threshold: 0.5 }, ChordPart::Axis { index: 1, dir: AxisDir::Neg, threshold: 0.5 }] });
+        map.insert("help".to_string(), GamepadBinding::Button { index: 8 });
+        map.insert("toggleOutputPause".to_string(), GamepadBinding::Button { index: 9 });
+        Self(map)
     }
 }
 
@@ -491,7 +536,7 @@ pub struct GeneralSettings {
 }
 
 fn default_stick_sensitivity() -> f64 {
-    1.0
+    0.3
 }
 fn default_button_repeat_delay_ms() -> u32 {
     400
