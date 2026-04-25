@@ -14,6 +14,14 @@ use std::collections::HashMap;
 
 use crate::modulation::AxisState;
 
+/// Resolver-side handle to the bus. Today an alias for `&'a InputBus`,
+/// taken under one read/write lock at the start of a tick. Sub G's
+/// frozen-frame work (`InputBus::snapshot()` returning a copy-on-write
+/// view) replaces the alias body without touching call sites — every
+/// `resolve_link*` signature already names the type so the swap is a
+/// typedef edit, not per-callsite churn.
+pub type InputBusSnapshot<'a> = &'a InputBus;
+
 /// Container for every named axis the runtime cares about. `AxisState`
 /// already owns the per-axis history ring + staleness check; the bus is a
 /// thin namespace + lookup layer over that.

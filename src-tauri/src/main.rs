@@ -636,7 +636,9 @@ async fn apply_channel_config_to_state(
     // gone, so the assignment is effectively a no-op for hot-path
     // behavior. Removing the call here would leave `set_buttplug_link_config`
     // unreferenced — pull the trigger in sub F alongside the field.
+    // `#[allow(deprecated)]` is intentional: write-only path, no reader.
     if let Some(cfg) = bp_config {
+        #[allow(deprecated)]
         state_guard.set_buttplug_link_config(channel_id.as_char(), cfg);
     }
 }

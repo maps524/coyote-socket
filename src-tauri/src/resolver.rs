@@ -8,7 +8,7 @@
 //! since they're the lazy-resolve mirror of `modulation::resolve_parameter`.
 
 use crate::modulation::NoInputBehavior;
-use crate::processing::{current_time_ms, get_processing_state, ChannelId, WaveformData};
+use crate::processing::{current_time_ms, get_processing_state, WaveformData};
 
 /// Resolved channel parameters for device output.
 #[derive(Debug, Clone)]
@@ -37,12 +37,7 @@ pub async fn get_resolved_channel_params() -> (ResolvedChannelParams, ResolvedCh
     let no_input_behavior = state_guard.no_input_behavior.clone();
     let decay_ms = state_guard.no_input_decay_ms;
 
-    // Disjoint-field borrow: the bus is a sibling field of `channels`, so
-    // Rust's split-borrow rule lets us hold `&InputBus` and
-    // `&mut Channel[i]` simultaneously. Deref the lock guard once to get a
-    // plain `&mut ProcessingState`, then take both borrows from it.
-    let state_inner = &mut *state_guard;
-    let bus = &state_inner.input_bus;
+    let (bus, channels) = state_guard.split_bus_and_channels();
 
     let resolve_one = |ch: &mut crate::processing::Channel| -> ResolvedChannelParams {
         let intensity_is_static = ch.config.intensity.source_type == ParameterSourceType::Static;
@@ -87,7 +82,7 @@ pub async fn get_resolved_channel_params() -> (ResolvedChannelParams, ResolvedCh
         }
     };
 
-    let [a, b] = &mut state_inner.channels;
+    let [a, b] = channels;
     (resolve_one(a), resolve_one(b))
 }
 
@@ -113,8 +108,7 @@ pub async fn get_per_slot_frequencies(window_start: u64) -> ([f64; 4], [f64; 4])
     let no_input_behavior = state_guard.no_input_behavior.clone();
     let decay_ms = state_guard.no_input_decay_ms;
 
-    let state_inner = &mut *state_guard;
-    let bus = &state_inner.input_bus;
+    let (bus, channels) = state_guard.split_bus_and_channels();
 
     let resolve_slots = |ch: &mut crate::processing::Channel| -> [f64; 4] {
         let mut out = [0.0f64; 4];
@@ -135,7 +129,7 @@ pub async fn get_per_slot_frequencies(window_start: u64) -> ([f64; 4], [f64; 4])
         out
     };
 
-    let [a, b] = &mut state_inner.channels;
+    let [a, b] = channels;
     (resolve_slots(a), resolve_slots(b))
 }
 

@@ -413,7 +413,7 @@ impl ResolvedSample {
 pub fn resolve_link_at_time(
     cfg: &ParameterLinkConfig,
     runtime: &mut ParameterLinkRuntime,
-    bus: &crate::input_bus::InputBus,
+    bus: crate::input_bus::InputBusSnapshot<'_>,
     no_input_behavior: &NoInputBehavior,
     current_time_ms: u64,
     no_input_decay_ms: u32,
@@ -502,7 +502,7 @@ pub fn resolve_link_at_time(
 pub fn resolve_link(
     cfg: &ParameterLinkConfig,
     runtime: &mut ParameterLinkRuntime,
-    bus: &crate::input_bus::InputBus,
+    bus: crate::input_bus::InputBusSnapshot<'_>,
     no_input_behavior: &NoInputBehavior,
     current_time_ms: u64,
     no_input_decay_ms: u32,

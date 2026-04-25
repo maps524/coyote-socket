@@ -52,6 +52,7 @@ Each step shipped with three reviewer passes (correctness / DRY / design gaps) b
 | `695cd9a` | Bundled sub D: `transforms/` module. `TransformConfig` + `TransformState` enums with generic primitives (Smooth, Scale, Clamp, Invert, Hold, Mix) and Buttplug semantic wrappers (Vibrate, Oscillate, Constrict). `apply_transform` dispatch with pre-fetched modifier slice — transforms cannot read the bus directly. `ParameterLinkConfig.transforms: Vec<TransformConfig>` field with `#[serde(default, skip_serializing_if = "Vec::is_empty")]`. 20 new tests; module gated `#[allow(dead_code)]` for the staging window. |
 | `f37aa41` | Bundled sub D follow-up: deduped Vibrate/Oscillate phase-state guards into `step_phase_state` helper; dropped the third `lerp` copy (now imports `crate::modulation::lerp`); renamed `oscillate_passes_through_on_first_call` test to reflect that the assertion pins the trough, not pass-through; captured Constrict centering shift in handoff sub G migration note. |
 | `297f10c` | Plan doc: bundled-phase substep table marked subs A-D shipped with commit refs + sub E carry-forward notes. |
+| `b575447` | Bundled sub E: unified resolver via transforms — drop Buttplug pipeline short-circuit. `TransformConfig::Rotate` variant + `apply_rotate` (paired speed/direction modifier axes). `ResolvedSample` struct in `modulation.rs` (sub G's wire format shape). `resolve_link` / `resolve_link_at_time` thread `&mut ParameterLinkRuntime` through midpoint → curve → transforms → range. `settings_convert::convert_parameter_source` translates `ButtplugLinksSettings` → ordered `Vec<TransformConfig>` (Position is source axis, then Motion/Vibrate/Constrict). `apply_channel_config_to_state` resets `Channel.link_runtime` via `ChannelLinkRuntime::for_config`. Per-batch `arrival_ts_ms` argument on `set_buttplug_feature` / `set_buttplug_linear_cmd` / `set_buttplug_rotate_direction` — handlers compute once per logical command. `Channel.buttplug_link` consumer gone, field marked `#[deprecated]` (write-only path until sub F). `get_resolved_channel_params` + `get_per_slot_frequencies` switched to write locks for stateful transform threading. **Gate intentionally narrow**: only `bp:`-prefixed source axes route through the resolver — T-Code / gamepad intensity stays on V2/V3 engine path, transforms attached to non-`bp:` links are silently ignored until sub G. |
 
 The two pre-existing test failures (`buttplug::pipeline::tests::test_pipeline_oscillate`, `processing::tests::test_parse_tcode_with_interval`) are not new — they live on `main` as well and are out of scope for this refactor. The same two failures persist across subs B-D; total pass count grew from 67 (pre-refactor) → 72 (sub B) → 73 (sub C) → 93 (sub D's 20 transform tests).
 
@@ -104,61 +105,70 @@ These cost time. Don't repeat them.
 
 ---
 
-## Next concrete action: sub E
+## Sub E reviewer carry-forward (for sub F + sub G)
 
-Sub E is the bundled phase's load-bearing commit. The previous session shipped subs A-D (foundation: bus + lifted Buttplug + runtime split + transforms module); sub E is what makes any of it produce different output. **Land it carefully — this is the feel-affecting change.**
+Sub E shipped at `b575447` with three reviewer passes (correctness / DRY / design gaps). Out-of-scope findings captured for the right substep:
 
-### What changes
+- **T-Code intensity ↔ resolver split (sub G).** Sub E's gate is `bp:`-prefix only. Any `transforms` attached to a T-Code-driven intensity link is silently dropped because the engine path runs instead of the resolver. Sub G's `resolved-update` event needs to either (a) synthesize a `ResolvedSample` from V2 ramp / V3 lookahead state for engine-path channels so frontend telemetry isn't blank, or (b) close the gate fully (run resolver after the engine path, or thread engine output through a tail of the resolver pipeline). The settings UI already exposes the transforms editor for any link, so option (a) without option (b) leaves a "transforms attached but inert" UX hazard.
 
-The unified resolver replaces the Buttplug pipeline short-circuit in `processing.rs::get_next_waveform_data`. Today (post-sub D) the function still calls `process_buttplug_pipeline` for every channel whose `ch.buttplug_link.has_any_links()` is true and short-circuits the engine path with the result. Sub E rips that out and routes intensity through the same `resolve_parameter`-style path that already handles frequency / freq_balance / int_balance, with `ParameterLinkConfig.transforms` as the new shaping pipeline.
+- **Constrict centering migration (release notes).** Sub D's centering shift (Constrict centers on post-prior-transforms `value`, not `state.base_position`) now affects real Buttplug-driven sessions as of sub E. A saved Vibrate+Constrict preset will narrow around the wobbled value rather than the un-wobbled base. Draft release-notes line: *"Buttplug presets that combine Vibrate and Constrict will now constrict around the wobbled position, not the un-wobbled base. The change is intentional and matches the layered transform model."* Beta feel-test against a known fixture before tagging the release that includes the bundled phase.
 
-| Today (post-sub D) | After sub E |
-|---|---|
-| `process_buttplug_pipeline` runs in `get_next_waveform_data` and short-circuits the engine | All four parameters (frequency, freq_balance, int_balance, intensity) resolve via one unified function. Buttplug-driven intensity flows through midpoint → curve → transforms → range like T-Code. |
-| `Channel.buttplug_link: ButtplugLinkConfig` is read by the pipeline | Read by sub E's settings-load conversion **once** to seed `ChannelConfig.intensity.transforms`, then never read again. (Field stays for sub F to delete.) |
-| Resolver fns take `&InputBus` | Introduce `InputBusSnapshot` type alias / wrapper (even `&'a InputBus` named for clarity). Plan doc says "even if it's just `&'a InputBus`, name it." |
-| Pre-fetch contract is implicit | For each transform: `let modifiers: Vec<f64> = cfg.declared_axes().iter().map(|axis| snapshot.value_at(axis, target).unwrap_or(0.0)).collect()`. Pass into `apply_transform`. |
+- **Rotate variant asymmetry (future-work note).** `TransformConfig::Rotate` carries two declared axes (`speed_axis`, `direction_axis`); other Buttplug variants carry one. `step_phase_state` has been widened twice (sub D for Vibrate/Oscillate, sub E for Rotate). A third semantic variant with `N >= 3` modifiers would widen it again. If the variant set keeps growing, migrate to `modifiers: Vec<AxisRef>` rather than named slots. Not in scope for sub F or sub G; capture only.
 
-### Settings-load conversion (the bit sub C deferred)
+- **`ArrivalTs(u64)` / `TargetTs(u64)` newtypes (sub G or step 8).** Sub E uses `u64` for both arrival timestamps (`set_buttplug_feature` / `*_linear_cmd` / `*_rotate_direction`) and target timestamps (`resolve_link_at_time`). Two semantically distinct timestamps share a primitive type. A future caller could pass `target_time_ms` to a `set_buttplug_*` write site (or vice versa) without a compile error. Wrap in newtypes when the resolver-engine unification work in step 8 cleans up the timestamp story.
 
-`settings_convert::convert_parameter_source` currently sets `transforms: Vec::new()`. Sub E should populate it: when the persisted `ParameterSourceSettings.buttplug_links` is `Some(_)`, translate each non-None feature link into the matching `TransformConfig` variant:
+- **`ResolvedSample` additional fields (sub G).** Plan doc (line 572-585) and sub E ship the same 5-field shape. Sub G's UI cards may want `delay_applied_ms: u32` (= `current_time_ms - target_time_ms`) and `transforms_applied: u8` for the debug overlay. Both are pure additive — sub G can land them without breaking sub E's struct shape.
 
-| `ButtplugLinksSettings` field | Sub E's emitted `TransformConfig` |
-|---|---|
-| `vibrate_feature: Some(i)` + `vibrate_config { distance }` | `TransformConfig::Vibrate { speed_axis: format!("bp:Vibrate_{i}"), distance: distance.unwrap_or(0.2) }` |
-| `oscillate_feature: Some(i)` + `oscillate_config { scale, max_speed }` | `TransformConfig::Oscillate { speed_axis: format!("bp:Oscillate_{i}"), scale: ..., max_speed_hz: ... }` |
-| `constrict_feature: Some(i)` + `constrict_config { min_floor, use_midpoint, method }` | `TransformConfig::Constrict { amount_axis: format!("bp:Constrict_{i}"), min_floor: ..., use_midpoint: ..., method: ... }` |
-| `position_feature` / `pos_dur_feature` | The base linked axis, NOT a transform. The persisted `intensity_source.source_axis` should already be `bp:Position_{i}` or `bp:PositionWithDuration_{i}` (post-sub-B handler shapes the namespace). Verify and update `convert_parameter_source` to set the source axis correspondingly when `buttplug_links` carries Position. |
-| `rotate_feature` | Rotate uses paired `bp:Rotate_{i}` + `bp:RotateDir_{i}` — sub D didn't define a Rotate transform. **Decision needed**: either (a) add a new `TransformConfig::Rotate` variant (matches the deletion-manifest "process_buttplug_pipeline replaced by ordered transforms" claim), or (b) compose Rotate from `Oscillate` + a sign-flip via `Mix`/`Scale` (closer to "generic primitives compose"). Plan doc lists Vibrate/Oscillate/Constrict as the 3 wrappers; Rotate is absent. **Recommend asking the maintainer** before extending the variant set. |
+Follow-up commit `<TBD>` after sub E addressed the in-scope reviewer findings: tightened the routing gate to `bp:`-only (correctness), extracted `ProcessingState::split_bus_and_channels` helper (DRY), added `pub type InputBusSnapshot<'a>` typedef (design), and `#[deprecated]` markers on `Channel.buttplug_link` / `buttplug_state` / `set_buttplug_link_config` (design — prevents accidental sub-F-blocking re-use).
 
-The order matters for the resolver loop. Plan doc's "transforms apply post-curve, pre-range, in declared order" — so the conversion should produce the same effective stage order as `process_buttplug_pipeline`: Position is the source (not a transform), then Oscillate / Rotate, then Vibrate, then Constrict. Mirror that ordering when emitting the vec.
+---
 
-### Files touched (estimated)
+## Next concrete action: sub F (`git rm` + field deletion)
 
-- `src-tauri/src/modulation.rs` or new `src-tauri/src/resolver_v2.rs` — unified `resolve_link(cfg, runtime, snapshot, now, no_input_behavior, decay_ms) -> ResolvedSample`. `ResolvedSample { raw_input, normalized_pre_range, device_value, target_time_ms, source_axis }`. Pre-fetch transforms' modifiers; thread state through `runtime.transform_state[i]`. Sub G's wire format already specs this struct shape — define it once now.
-- `src-tauri/src/processing.rs::get_next_waveform_data` — drop the `bp_intensities` block + `process_buttplug_pipeline` call. Resolve intensity per channel via the new function. Convert resolved 0..1 to 0..200 u8 → feed engines.
-- `src-tauri/src/processing.rs::Channel` — initialize `link_runtime.{frequency,freq_balance,int_balance,intensity}.transform_state` from `config.{...}.transforms.iter().map(|t| t.initial_state()).collect()` whenever config changes. The init point is `apply_channel_config_to_state` in `main.rs` — after writing `state_guard.channel_mut(channel_id).config = new_config`, also reset `link_runtime` to match.
-- `src-tauri/src/settings_convert.rs` — populate `transforms` from `buttplug_links`. Adjust the source-axis for Position / PositionWithDuration features.
-- `src-tauri/src/resolver.rs` — `get_resolved_channel_params` / `get_per_slot_frequencies` migrate to take a snapshot + the new resolver. Frequency is the per-slot 25ms case; verify the new resolver works correctly with varying `target_time_ms` per call (sub D's transforms already handle this).
+Sub E shipped the unified resolver and the gate that routes Buttplug-namespaced intensity through it. Sub F is the cleanup: now that `process_buttplug_pipeline` has no live callers and `Channel.buttplug_link` has no readers, delete them.
 
-### Carry-forward notes from sub D's reviewers
+### What goes away
 
-- **Must drop the `Channel.buttplug_link` consumer in the same commit that wires `ParameterLinkConfig.transforms`.** Otherwise the resolver double-applies (transforms run via the new path AND `process_buttplug_pipeline` runs via the old short-circuit). Sub D's design reviewer flagged this as a sub E precondition.
-- **Constrict centering changed** in sub D: `value` (post-prior-transforms) instead of `state.base_position`. In the new layered model these are the same value once Position is the source axis, but a saved preset with both Vibrate and Constrict will now constrict around the wobbled value rather than the un-wobbled base. Capture in beta release notes; consider a feel-test of a known Vibrate+Constrict preset before merging sub E.
-- **Per-write timestamp coherence** (sub B's deferred-to-sub-E note): each `set_buttplug_feature` call stamps its own `current_time_ms()`. A 6-feature `ScalarCmd` produces 6 monotonically-different bus timestamps. For latest-wins reads it's benign; for the LinearCmd new-arrival watermark a tick boundary lands inside the batch could split one logical command across two ticks. Sub E should consider a per-batch timestamp argument on `set_buttplug_feature` (called once per `ScalarCmd` in `buttplug/handler.rs`) so all features in a batch share an arrival timestamp.
+| Symbol | Where | Why it can go now |
+|---|---|---|
+| `process_buttplug_pipeline` (fn + 5 tests) | `src-tauri/src/buttplug/pipeline.rs` | Sub E removed the only caller in `processing.rs::get_next_waveform_data`. The re-export in `buttplug/mod.rs` is already gone. |
+| `ButtplugChannelState`, `PositionDurationState` | `src-tauri/src/buttplug/state.rs` | Pipeline-only state. `ButtplugFeatureValues::from_input_bus` is the only thing in this file the bundled phase still uses (called by `processing.rs::get_buttplug_feature_values` — also dead in sub E, slated for the same delete). |
+| `ButtplugFeatureValues`, `get_buttplug_feature_values`, `has_buttplug_input` | `state.rs` + `processing.rs` | Both methods on `ProcessingState` are now dead-flagged by `cargo check`. The bus snapshot replaces them. |
+| `Channel.buttplug_link`, `Channel.buttplug_state` | `processing.rs` | `#[deprecated]` markers in sub E follow-up; sub F drops the fields plus the constructor entries plus `set_buttplug_link_config`. |
+| `set_buttplug_link_config`, `apply_channel_config_to_state`'s `bp_config` write | `processing.rs` + `main.rs` | Write-only path kept alive in sub E so the field had a coherent value. With the field gone, the call goes too. |
+| `ButtplugLinkConfig`, `FeatureTypeConfig`, `ButtplugLinksSettings::to_link_config` | `buttplug/types.rs`, `settings.rs` | `to_link_config` is the only caller of `ButtplugLinkConfig::default()` left after sub E. Settings-load goes through `settings_convert::buttplug_links_to_transforms` directly now. Trim `types.rs` to what `buttplug/handler.rs` still needs (`ButtplugFeatureConfig` for advertising the device descriptor; possibly `ButtplugFeatureType`). |
+| `ConstrictionMethod` re-export from `buttplug` | `buttplug/types.rs` (canonical definition) → `transforms/buttplug.rs` | Move the canonical enum into `transforms/buttplug.rs` so the resolver layer owns its own type. Drop the `pub use crate::buttplug::ConstrictionMethod` re-export in `transforms/mod.rs`. |
+| `BUTTPLUG_MAX_FEATURES` constant | `processing.rs:22` | Used only by `get_buttplug_feature_values`; dies with it. |
+| `InputBus::has_any_with_prefix`, `clear`, `age_ms`, `latest_timestamp` | `input_bus.rs` | All flagged dead by `cargo check`. Kept for sub G's input-monitor work — verify before deleting. |
 
-### Acceptance for sub E
+### Files deleted entirely (per deletion manifest, plan doc lines 365-371)
 
-- `cargo check` clean. `cargo test` shows 93+ passes (sub D's count is the floor), 2 pre-existing failures, no new failures.
-- `git grep "process_buttplug_pipeline"` returns hits ONLY in `buttplug/pipeline.rs` itself (the function definition + tests; sub F deletes the file). No callers.
-- `git grep "Channel\.buttplug_link"` returns hits ONLY in `processing.rs` field declaration + `apply_channel_config_to_state` write site. No reads.
-- Tests pinning the new shape: a `ParameterLinkConfig` with one `Vibrate` transform produces an output that wobbles around the input value; the same config with `Vibrate` + `Constrict` chained narrows around the wobbled value (per the sub D centering shift); changing `range_min`/`range_max` on a Buttplug-driven intensity now visibly changes the device output.
-- Beta-branch validation on a real device with a known Vibrate+Constrict preset before merging.
+- `src-tauri/src/buttplug/pipeline.rs`
+- `src-tauri/src/buttplug/state.rs`
 
-### Subs F–G + Step 8 — sketches
+### Files trimmed
 
-- **Sub F — Delete.** `git rm src-tauri/src/buttplug/pipeline.rs src-tauri/src/buttplug/state.rs`. Trim `buttplug/types.rs` down to whatever `buttplug/handler.rs` still needs (`ButtplugFeatureConfig`). Move `ConstrictionMethod` into `transforms/buttplug.rs` and drop the re-export. Drop `Channel.buttplug_link` + `Channel.buttplug_state` (the TODO-flagged fields from sub C). Run the deletion-manifest grep checklist (plan doc, near the bottom).
-- **Sub G — Frontend resolved-state stream.** New Tauri event `resolved-update` carrying `ResolvedUpdatePayload { channel_a, channel_b: ChannelResolvedSnapshot { frequency, frequency_balance, intensity_balance, intensity: ResolvedSampleSnapshot { raw_input, normalized_pre_range, device_value, target_time_ms, source_axis } } }`. Emitted at 10Hz tick from `device.rs` send path (resolver already runs there). New stores `src/lib/stores/resolvedState.ts` + `src/lib/stores/inputBus.ts` replacing `src/lib/stores/inputPosition.ts`. Linked-parameter UI cards render the post-curve position line on their curve plot. Frontend transform editor lands here too — match the kebab-case discriminator (`{"type": "vibrate", ...}`) sub D shipped.
+- `src-tauri/src/buttplug/types.rs` — keep only what `buttplug/handler.rs` reads (verify; likely `ButtplugFeatureConfig`, possibly `ButtplugFeatureType`).
+- `src-tauri/src/buttplug/mod.rs` — drop the re-exports for the dropped types. Keep `pub mod handler` and whatever still survives.
+- `src-tauri/src/processing.rs` — drop `Channel.buttplug_link`, `Channel.buttplug_state`, `set_buttplug_link_config`, `get_buttplug_feature_values`, `has_buttplug_input`, `BUTTPLUG_MAX_FEATURES`, the `use crate::buttplug::{ButtplugChannelState, ButtplugLinkConfig}` import.
+- `src-tauri/src/main.rs` — drop the `bp_config` block in `apply_channel_config_to_state` and the `_touch_buttplug_links` test marker if it references the removed type.
+- `src-tauri/src/settings.rs` — `ButtplugLinksSettings::to_link_config` goes (no caller). The struct itself stays for the field sub F preserves on `ParameterSourceSettings` until the schema-deletion step. Cross-reference plan doc deletion-manifest table.
+- `src-tauri/src/transforms/mod.rs` — replace `pub use crate::buttplug::ConstrictionMethod` with the canonical definition (move from `buttplug/types.rs`).
+
+### Acceptance for sub F
+
+- `cargo check` clean — most of the dead-code warnings sub E left behind go away.
+- `cargo test` — 109+ pass, 2 pre-existing failures unchanged. The 5 tests inside `buttplug/pipeline.rs` are deleted with the file (drop from the count).
+- `git grep` deletion-manifest checklist (plan doc lines 484-510): `process_buttplug_pipeline`, `ButtplugChannelState`, `ButtplugFeatureValues`, `ButtplugLinkConfig`, `buttplug_features`, `buttplug_linear_commands`, `buttplug_rotate_directions`, `buttplug_link`, `buttplug_state` — zero hits outside `docs/plans/*` and `git log`.
+- The settings schema field `ChannelSettings.intensity_source.buttplug_links` survives sub F (settings-load converts it); the deletion manifest moves it to a later cleanup once the frontend-side editor for transforms lands in sub G. Document this in the sub F commit body.
+
+### Sub F — likely commit shape
+
+One commit. The deletes are tightly coupled (deleting the field and deleting `process_buttplug_pipeline` together prevents an intermediate state where `set_buttplug_link_config` writes a field nothing reads). Expect ~600-800 lines deleted, ~50 added (move of `ConstrictionMethod`, possibly a few `#[allow(dead_code)]` cleanups).
+
+### Sub G + Step 8 — sketches (unchanged from previous session)
+
+- **Sub G — Frontend resolved-state stream.** New Tauri event `resolved-update` carrying `ResolvedUpdatePayload { channel_a, channel_b: ChannelResolvedSnapshot { frequency, frequency_balance, intensity_balance, intensity: ResolvedSampleSnapshot { raw_input, normalized_pre_range, device_value, target_time_ms, source_axis } } }`. Emitted at 10Hz tick from `device.rs` send path. New stores `src/lib/stores/resolvedState.ts` + `src/lib/stores/inputBus.ts` replacing `src/lib/stores/inputPosition.ts`. Linked-parameter UI cards render the post-curve position line on their curve plot. **Sub E left a gap here**: the engine-path channels (T-Code intensity) don't run the resolver, so a naive `resolved-update` emission would be blank for them. Sub G must either synthesize a `ResolvedSample` from `Channel.v2.get_value_at(now)` / `Channel.v3.current_position` for engine channels, or close the gate fully (run the resolver after the engine produces its 4-slot output and capture only the post-range value into `ResolvedSample`). Frontend transform editor lands here too — match the kebab-case discriminator (`{"type": "vibrate", ...}`) sub D shipped, and add the new `{"type": "rotate", ...}` variant sub E added.
 
 ### Step 8 — sketch
 

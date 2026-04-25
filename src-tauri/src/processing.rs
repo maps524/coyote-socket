@@ -1222,11 +1222,22 @@ pub struct Channel {
     pub downsampler: Downsampler,
     /// TODO(sub F): replaced by transforms in
     /// `ParameterLinkConfig.transforms` (config) +
-    /// `ParameterLinkRuntime.transform_state` (runtime). Don't add new
-    /// channels of mutable buttplug state here — they'll need rewriting
-    /// when `process_buttplug_pipeline` is deleted.
+    /// `ParameterLinkRuntime.transform_state` (runtime). Sub E removed
+    /// the only consumer (`process_buttplug_pipeline`); the field is
+    /// kept as a write-only path until sub F deletes both. The
+    /// `#[deprecated]` marker stops any future maintainer from quietly
+    /// re-introducing a reader thinking the field is load-bearing —
+    /// `#[allow(deprecated)]` is applied at the remaining intentional
+    /// write sites (`Channel::new`, `set_buttplug_link_config`).
+    #[deprecated(
+        note = "Sub F: replaced by ParameterLinkConfig.transforms; do not add readers"
+    )]
     pub buttplug_link: ButtplugLinkConfig,
-    /// TODO(sub F): see `buttplug_link` above. Same fate.
+    /// TODO(sub F): see `buttplug_link` above. Same fate, same
+    /// deprecation contract.
+    #[deprecated(
+        note = "Sub F: replaced by ParameterLinkRuntime.transform_state; do not add readers"
+    )]
     pub buttplug_state: ButtplugChannelState,
     /// Master-intensity peak history. Only populated when V2Sustained is
     /// the active engine; idle otherwise. Lives on Channel so each channel
@@ -1250,6 +1261,10 @@ impl Channel {
             ChannelId::A => ChannelConfig::channel_a_default(),
             ChannelId::B => ChannelConfig::channel_b_default(),
         };
+        // Construction must initialize every field, including the
+        // deprecated buttplug_link / buttplug_state pair that sub F
+        // deletes. `#[allow(deprecated)]` is intentional here.
+        #[allow(deprecated)]
         Self {
             id,
             config,
@@ -1410,6 +1425,18 @@ impl ProcessingState {
         &mut self.channels[id as usize]
     }
 
+    /// Split-borrow helper: returns `(&InputBus, &mut [Channel; 2])` from
+    /// one `&mut self`. The resolver layer needs to hold a shared
+    /// reference to the bus while threading mutable state through one or
+    /// both channels' `link_runtime`. Without this helper the call sites
+    /// repeat the deref + disjoint-field borrow boilerplate; with it the
+    /// resolver entry points (`get_resolved_channel_params`,
+    /// `get_per_slot_frequencies`, `get_next_waveform_data`) all spell
+    /// the same idea the same way.
+    pub fn split_bus_and_channels(&mut self) -> (&InputBus, &mut [Channel; 2]) {
+        (&self.input_bus, &mut self.channels)
+    }
+
     #[cfg(test)]
     pub fn get_axis_value(&self, axis: &str) -> Option<f64> {
         self.input_bus.value(axis)
@@ -1487,14 +1514,21 @@ impl ProcessingState {
     ///
     /// Per-channel intensity routing:
     /// - **Static**: `static_value` byte goes straight through (no engines).
-    /// - **Linked, Buttplug-namespaced source OR has transforms**: runs
-    ///   through the unified `resolve_link` path (midpoint → curve →
-    ///   transforms → range), bypassing the V2/V3 engines because Buttplug
-    ///   feature streams arrive at irregular cadence and don't need the
+    /// - **Linked, `bp:`-namespaced source axis**: runs through the
+    ///   unified `resolve_link` path (midpoint → curve → transforms →
+    ///   range), bypassing the V2/V3 engines because Buttplug feature
+    ///   streams arrive at irregular cadence and don't need the
     ///   ramp/lookahead engines were built for. Replaces the pre-sub-E
     ///   `process_buttplug_pipeline` short-circuit.
-    /// - **Linked, T-Code-style axis with no transforms**: keeps going
-    ///   through the V2/V3 engine path, fed by `replay_pending_intensity_samples`.
+    /// - **Linked, T-Code / gamepad axis**: keeps the V2/V3 engine path,
+    ///   fed by `replay_pending_intensity_samples`. Any `transforms`
+    ///   attached to a non-`bp:` intensity link are silently ignored
+    ///   here — sub G unifies the engine path with the resolver and
+    ///   either runs transforms inline with engine output or synthesizes
+    ///   a `ResolvedSample` from V2/V3 state for the
+    ///   `resolved-update` event. Until then, attaching a transform to a
+    ///   T-Code intensity link is a no-op so it can't accidentally
+    ///   disable V2 ramping / V3 lookahead.
     pub fn get_next_waveform_data(&mut self) -> (WaveformData, WaveformData) {
         let now_ms = current_time_ms();
         // Drain pending TCode samples (with optional delay) into engine state
@@ -1509,11 +1543,7 @@ impl ProcessingState {
 
         let intensity_to_values = |i: u8| -> [u8; 4] { [i, i, i, i] };
 
-        // Disjoint-field borrow: the bus is a sibling of `channels` so
-        // Rust accepts `&InputBus` + `&mut Channel` simultaneously when
-        // taken from a deref-ed `&mut ProcessingState`.
-        let bus = &self.input_bus;
-        let channels = &mut self.channels;
+        let (bus, channels) = self.split_bus_and_channels();
         let raw: [[u8; 4]; 2] = std::array::from_fn(|i| {
             let ch = &mut channels[i];
 
@@ -1522,19 +1552,21 @@ impl ProcessingState {
                 return intensity_to_values(static_val.round().clamp(0.0, 200.0) as u8);
             }
 
-            // Sub E gate: Buttplug-driven intensity (axis under the `bp:`
-            // namespace) and any link with attached transforms route
-            // through the unified resolver. T-Code-style links without
-            // transforms keep the engine path so V2 ramps / V3 lookahead
-            // still drive the per-slot waveform shape from sample bursts.
+            // Sub E gate: only `bp:`-namespaced intensity links route
+            // through the resolver. T-Code / gamepad links keep the
+            // engine path even if they happen to carry a `transforms`
+            // entry, otherwise a user attaching Smooth or Hold to T-Code
+            // intensity would silently disable the V2/V3 sample
+            // ingestion. Sub G is where the engine and resolver paths
+            // unify; until then, this gate enforces "Buttplug → resolver,
+            // T-Code → engine" without semantic surprises.
             let routes_through_resolver = ch
                 .config
                 .intensity
                 .source_axis
                 .as_deref()
                 .map(|a| a.starts_with("bp:"))
-                .unwrap_or(false)
-                || !ch.config.intensity.transforms.is_empty();
+                .unwrap_or(false);
 
             if routes_through_resolver {
                 let resolved = resolve_link(
@@ -1715,10 +1747,23 @@ impl ProcessingState {
 
     // ===== Buttplug Link Config Methods =====
 
-    /// Update the Buttplug link configuration for a channel's intensity parameter
+    /// Update the Buttplug link configuration for a channel's intensity
+    /// parameter. Sub E removed the consumer; this method now only
+    /// keeps `Channel.buttplug_link` in sync with persisted settings so
+    /// the field has a coherent value until sub F deletes it. The
+    /// `#[allow(deprecated)]` is intentional — write site only, no
+    /// reader.
+    #[deprecated(
+        note = "Sub F: write-only path to a deprecated field; deleted alongside Channel.buttplug_link"
+    )]
     pub fn set_buttplug_link_config(&mut self, channel: char, config: ButtplugLinkConfig) {
         match ChannelId::from_char(channel) {
-            Some(id) => self.channel_mut(id).buttplug_link = config,
+            Some(id) => {
+                #[allow(deprecated)]
+                {
+                    self.channel_mut(id).buttplug_link = config;
+                }
+            }
             None => println!(
                 "[ProcessingState] Unknown channel for Buttplug link config: {}",
                 channel

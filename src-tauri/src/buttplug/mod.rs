@@ -15,7 +15,8 @@ pub mod state;
 #[allow(dead_code)]
 pub mod types;
 
-// Re-export commonly used items
-pub use pipeline::process_buttplug_pipeline;
+// Re-export commonly used items. The `process_buttplug_pipeline`
+// re-export is gone in sub E — no live caller, full deletion happens
+// in sub F alongside the pipeline.rs file itself.
 pub use state::{ButtplugChannelState, ButtplugFeatureValues};
 pub use types::{ButtplugFeatureConfig, ButtplugLinkConfig, ConstrictionMethod, FeatureTypeConfig};
