@@ -659,9 +659,10 @@ pub fn convert_parameter_source(
             source_axis: None,
             range_min: source.range_min,
             range_max: source.range_max,
-            curve,
+            curve: curve.clone(),
             curve_strength: Some(source.curve_strength),
             midpoint: if source.midpoint { Some(true) } else { None },
+            delay_ms: if source.delay_enabled { Some(source.delay_ms) } else { None },
             buttplug_links: source.buttplug_links.clone(),
         },
         SettingsSourceType::Linked => ParameterSource {
@@ -673,6 +674,7 @@ pub fn convert_parameter_source(
             curve,
             curve_strength: Some(source.curve_strength),
             midpoint: if source.midpoint { Some(true) } else { None },
+            delay_ms: if source.delay_enabled { Some(source.delay_ms) } else { None },
             buttplug_links: source.buttplug_links.clone(),
         },
     }

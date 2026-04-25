@@ -98,6 +98,7 @@ export interface ParameterSource {
   curve: CurveType;         // Transform curve
   curveStrength?: number;   // 0.1 - 3.0 for exp/log curves (default: 2.0)
   midpoint?: boolean;       // If true, input is distance from center (0.5 -> 0, 0 or 1 -> 1)
+  delayMs?: number;         // Lag axis input by this many ms (0-200, step 25). 0/undefined = no delay.
 
   // For Buttplug mode (pipeline stages)
   buttplugLinks?: ButtplugLinks;

@@ -233,6 +233,14 @@ pub struct ParameterSourceSettings {
     pub curve_strength: f64,
     #[serde(default)]
     pub midpoint: bool,
+    /// Whether input delay is active. Stored separately from `delay_ms` so a
+    /// zero value with the toggle on stays distinguishable from "disabled" once
+    /// the data round-trips through this flat schema.
+    #[serde(default)]
+    pub delay_enabled: bool,
+    /// Input delay in ms (0-200). Only honored when `delay_enabled` is true.
+    #[serde(default)]
+    pub delay_ms: u32,
     /// Buttplug feature links for this parameter (used when input source is Buttplug)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buttplug_links: Option<ButtplugLinksSettings>,
@@ -249,6 +257,8 @@ impl ParameterSourceSettings {
             curve: "linear".to_string(),
             curve_strength: 2.0,
             midpoint: false,
+            delay_enabled: false,
+            delay_ms: 0,
             buttplug_links: None,
         }
     }
@@ -263,6 +273,8 @@ impl ParameterSourceSettings {
             curve: "linear".to_string(),
             curve_strength: 2.0,
             midpoint: false,
+            delay_enabled: false,
+            delay_ms: 0,
             buttplug_links: None,
         }
     }

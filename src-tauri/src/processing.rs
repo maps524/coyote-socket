@@ -563,6 +563,11 @@ impl V3ChannelState {
         self.command_buffer.clear();
         self.current_position = 0;
     }
+
+    #[cfg(test)]
+    pub fn buffer_size(&self) -> usize {
+        self.command_buffer.len()
+    }
 }
 
 // ============================================================================
@@ -1208,6 +1213,13 @@ impl ChannelId {
         }
     }
 
+    #[cfg(test)]
+    pub fn default_axis(&self) -> &'static str {
+        match self {
+            ChannelId::A => "L0",
+            ChannelId::B => "R2",
+        }
+    }
 }
 
 /// Rolling per-channel master-intensity peak tracker for V2Sustained.
@@ -1271,6 +1283,10 @@ pub struct Channel {
     /// the active engine; idle otherwise. Lives on Channel so each channel
     /// holds its own peak independently.
     pub peak_hold: IntensityPeakHold,
+    /// Watermark for delayed-intensity tick replay. Tracks the upper bound
+    /// of axis-history timestamps already fed into engines, so each tick
+    /// only replays new samples in `(watermark, now - delay_ms]`.
+    pub last_intensity_replay_ts: u64,
 }
 
 impl Channel {
@@ -1289,21 +1305,8 @@ impl Channel {
             buttplug_link: ButtplugLinkConfig::default(),
             buttplug_state: ButtplugChannelState::default(),
             peak_hold: IntensityPeakHold::default(),
+            last_intensity_replay_ts: 0,
         }
-    }
-
-    /// Whether this channel's intensity is linked to the given T-Code axis.
-    pub fn intensity_linked_to(&self, axis: &str) -> bool {
-        use crate::modulation::ParameterSourceType;
-        if self.config.intensity.source_type != ParameterSourceType::Linked {
-            return false;
-        }
-        self.config
-            .intensity
-            .source_axis
-            .as_deref()
-            .map(|a| a == axis)
-            .unwrap_or(false)
     }
 
     /// Apply a T-Code command to all engine states for this channel.
@@ -1457,27 +1460,81 @@ impl ProcessingState {
     pub fn channel_mut(&mut self, id: ChannelId) -> &mut Channel {
         &mut self.channels[id as usize]
     }
+
+    #[cfg(test)]
+    pub fn get_axis_value(&self, axis: &str) -> Option<f64> {
+        self.axis_values.get(axis).map(|s| s.value)
+    }
 }
 
 impl ProcessingState {
-    /// Process a T-Code command. Updates the axis cache, then applies the
-    /// value to any channel whose intensity source is linked to that axis.
-    /// Channels are independent — if A and B both link to the same axis,
-    /// they both receive the value.
+    /// Process a T-Code command. Stores the sample in the axis history so
+    /// `resolve_parameter*` and the device-tick replay can read it. Engine
+    /// ingestion happens later in `replay_pending_intensity_samples` at tick
+    /// time so a per-parameter `delay_ms` can offset *when* the engines see
+    /// each sample without duplicating sample state.
     pub fn process_command(&mut self, cmd: &TCodeCommand) {
         let now = cmd.received_at;
 
-        // Append-with-history so per-slot resolvers can walk the axis timeline.
         self.axis_values
             .entry(cmd.axis.clone())
             .or_default()
-            .update(cmd.value, now);
+            .update(cmd.value, now, cmd.interval_ms);
+    }
+
+    /// Drain pending TCode samples from axis history into engine state for
+    /// each linked-intensity channel, honoring `delay_ms`. Samples in
+    /// `(last_intensity_replay_ts, now - delay_ms]` are fed through
+    /// `apply_tcode` in chronological order. The watermark is bumped to
+    /// `now - delay_ms` so future ticks pick up where this one left off.
+    ///
+    /// Bounded by `INTENSITY_REPLAY_FLOOR_MS` so a stale watermark (e.g.
+    /// after a long static→linked switch) doesn't replay ancient history.
+    pub fn replay_pending_intensity_samples(&mut self, now_ms: u64) {
+        use crate::modulation::ParameterSourceType;
+        const INTENSITY_REPLAY_FLOOR_MS: u64 = 200;
 
         for id in ChannelId::ALL {
-            if self.channel(id).intensity_linked_to(&cmd.axis) {
-                self.channel_mut(id)
-                    .apply_tcode(cmd.value, cmd.interval_ms, now);
+            let (axis_name, delay) = {
+                let cfg = &self.channel(id).config.intensity;
+                if cfg.source_type != ParameterSourceType::Linked {
+                    continue;
+                }
+                let axis = match cfg.source_axis.as_deref() {
+                    Some(a) => a.to_string(),
+                    None => continue,
+                };
+                (axis, cfg.delay_ms.unwrap_or(0) as u64)
+            };
+
+            let upper = now_ms.saturating_sub(delay);
+            // Cap how far back a stale watermark can pull us.
+            let floor = upper.saturating_sub(INTENSITY_REPLAY_FLOOR_MS);
+            let after = self.channel(id).last_intensity_replay_ts.max(floor);
+
+            if upper <= after {
+                // Nothing new to replay (delay just increased, or no time
+                // has passed). Don't bump watermark backwards.
+                continue;
             }
+
+            // Snapshot to release the immutable borrow before mutating.
+            let pending: Vec<(f64, Option<u32>, u64)> = self
+                .axis_values
+                .get(&axis_name)
+                .map(|state| {
+                    state
+                        .samples_in_range(after, upper)
+                        .map(|s| (s.value, s.interval_ms, s.timestamp))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let ch = self.channel_mut(id);
+            for (value, interval, ts) in pending {
+                ch.apply_tcode(value, interval, ts);
+            }
+            ch.last_intensity_replay_ts = upper;
         }
     }
 
@@ -1487,6 +1544,9 @@ impl ProcessingState {
         use crate::modulation::ParameterSourceType;
 
         let now_ms = current_time_ms();
+        // Drain pending TCode samples (with optional delay) into engine state
+        // before computing the output for this tick.
+        self.replay_pending_intensity_samples(now_ms);
         let window_start = now_ms.saturating_sub(100);
         let now_instant = Instant::now();
         let dt_ms = 100u32; // 10Hz tick rate = 100ms per tick
@@ -1846,20 +1906,6 @@ mod tests {
     }
 
     #[test]
-    fn test_channel_intensity_linked_to() {
-        let ch = Channel::new(ChannelId::A);
-        // A defaults linked to L0
-        assert!(ch.intensity_linked_to("L0"));
-        assert!(!ch.intensity_linked_to("R2"));
-        assert!(!ch.intensity_linked_to("V1"));
-
-        // Static source never matches any axis
-        let mut static_ch = Channel::new(ChannelId::A);
-        static_ch.config.intensity = ParameterSource::static_source(100.0);
-        assert!(!static_ch.intensity_linked_to("L0"));
-    }
-
-    #[test]
     fn test_channel_apply_tcode_feeds_all_engines() {
         let mut ch = Channel::new(ChannelId::A);
         ch.apply_tcode(0.5, None, 1000);
@@ -1906,6 +1952,8 @@ mod tests {
             received_at: 1000,
         };
         state.process_command(&cmd);
+        // Engine ingestion happens at tick time, not on command arrival.
+        state.replay_pending_intensity_samples(1000);
 
         // A was linked to L0 → v2 target set to curved 0.8 × 200 = 160.
         assert_eq!(state.channel(ChannelId::A).v2.target_value, 160);
@@ -1927,6 +1975,7 @@ mod tests {
             received_at: 1000,
         };
         state.process_command(&cmd);
+        state.replay_pending_intensity_samples(1000);
 
         assert_eq!(state.channel(ChannelId::A).v2.target_value, 100);
         assert_eq!(state.channel(ChannelId::B).v2.target_value, 100);
@@ -1942,12 +1991,35 @@ mod tests {
             received_at: 1000,
         };
         state.process_command(&cmd);
+        state.replay_pending_intensity_samples(1000);
 
         // Neither channel linked to V2 — no engine side-effects.
         assert_eq!(state.channel(ChannelId::A).v2.target_value, 0);
         assert_eq!(state.channel(ChannelId::B).v2.target_value, 0);
         // But axis value IS cached (for later resolve_parameter lookups).
         assert_eq!(state.get_axis_value("V2"), Some(1.0));
+    }
+
+    #[test]
+    fn test_replay_honors_delay_ms() {
+        // With a 50ms delay, a sample at t=1000 shouldn't reach engines until
+        // a tick at t >= 1050. A tick at t=1020 should leave engines untouched.
+        let mut state = ProcessingState::default();
+        state.channel_mut(ChannelId::A).config.intensity.delay_ms = Some(50);
+
+        let cmd = TCodeCommand {
+            axis: "L0".to_string(),
+            value: 0.8,
+            interval_ms: None,
+            received_at: 1000,
+        };
+        state.process_command(&cmd);
+
+        state.replay_pending_intensity_samples(1020);
+        assert_eq!(state.channel(ChannelId::A).v2.target_value, 0);
+
+        state.replay_pending_intensity_samples(1080);
+        assert_eq!(state.channel(ChannelId::A).v2.target_value, 160);
     }
 
     // ========================================================================
