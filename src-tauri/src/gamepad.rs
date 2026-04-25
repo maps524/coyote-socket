@@ -765,7 +765,7 @@ async fn feed_gamepad_axes_to_processing() {
         state_guard.process_command(&cmd);
     }
     let (channel_a, channel_b) = state_guard.get_current_intensities();
-    for (k, v) in state_guard.axis_values.iter() {
+    for (k, v) in state_guard.input_bus.iter() {
         axes_snapshot.insert(k.clone(), v.value);
     }
     drop(state_guard);

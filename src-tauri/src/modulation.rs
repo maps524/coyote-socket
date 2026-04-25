@@ -3,7 +3,6 @@
 
 use crate::settings::ButtplugLinksSettings;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Source type for a parameter value
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -279,7 +278,7 @@ pub fn lerp(min: f64, max: f64, t: f64) -> f64 {
 /// within a 100ms output window (e.g. for V3 B0's 4-slot frequency array).
 pub fn resolve_parameter_at_time(
     source: &ParameterSource,
-    axis_values: &HashMap<String, AxisState>,
+    bus: &crate::input_bus::InputBus,
     no_input_behavior: &NoInputBehavior,
     current_time_ms: u64,
     no_input_decay_ms: u32,
@@ -288,8 +287,8 @@ pub fn resolve_parameter_at_time(
     match source.source_type {
         ParameterSourceType::Static => source.static_value.unwrap_or(0.0),
         ParameterSourceType::Linked => {
-            let axis = source.source_axis.as_ref();
-            let axis_state = axis.and_then(|a| axis_values.get(a));
+            let axis = source.source_axis.as_deref();
+            let axis_state = axis.and_then(|a| bus.get(a));
             let delay = source.delay_ms.unwrap_or(0) as u64;
             let lookup_time = target_time_ms.saturating_sub(delay);
 
@@ -337,14 +336,14 @@ pub fn resolve_parameter_at_time(
 /// means a future change to the resolver pipeline only touches one place.
 pub fn resolve_parameter(
     source: &ParameterSource,
-    axis_values: &HashMap<String, AxisState>,
+    bus: &crate::input_bus::InputBus,
     no_input_behavior: &NoInputBehavior,
     current_time_ms: u64,
     no_input_decay_ms: u32,
 ) -> f64 {
     resolve_parameter_at_time(
         source,
-        axis_values,
+        bus,
         no_input_behavior,
         current_time_ms,
         no_input_decay_ms,
@@ -426,21 +425,23 @@ mod tests {
         assert_eq!(state.timestamp, 1000);
     }
 
+    use crate::input_bus::InputBus;
+
     #[test]
     fn test_resolve_static_parameter() {
         let source = ParameterSource::static_source(42.0);
-        let axis_values = HashMap::new();
-        let result = resolve_parameter(&source, &axis_values, &NoInputBehavior::Hold, 0, 1000);
+        let bus = InputBus::new();
+        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 0, 1000);
         assert_eq!(result, 42.0);
     }
 
     #[test]
     fn test_resolve_linked_parameter() {
         let source = ParameterSource::linked_source("L0", 0.0, 100.0, CurveType::Linear);
-        let mut axis_values = HashMap::new();
-        axis_values.insert("L0".to_string(), AxisState::new(0.5, 100));
+        let mut bus = InputBus::new();
+        bus.update("L0", 0.5, 100, None);
 
-        let result = resolve_parameter(&source, &axis_values, &NoInputBehavior::Hold, 200, 1000);
+        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
         assert_eq!(result, 50.0);
     }
 
@@ -453,20 +454,11 @@ mod tests {
         let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
         source.delay_ms = Some(100);
 
-        let mut state = AxisState::default();
-        state.update(0.2, 100, None);
-        state.update(0.8, 200, None);
+        let mut bus = InputBus::new();
+        bus.update("L0", 0.2, 100, None);
+        bus.update("L0", 0.8, 200, None);
 
-        let mut axis_values = HashMap::new();
-        axis_values.insert("L0".to_string(), state);
-
-        let delayed = resolve_parameter(
-            &source,
-            &axis_values,
-            &NoInputBehavior::Hold,
-            200,
-            1000,
-        );
+        let delayed = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
         assert!(
             (delayed - 0.2).abs() < 1e-9,
             "delayed lookup expected 0.2, got {}",
@@ -474,13 +466,7 @@ mod tests {
         );
 
         source.delay_ms = Some(0);
-        let live = resolve_parameter(
-            &source,
-            &axis_values,
-            &NoInputBehavior::Hold,
-            200,
-            1000,
-        );
+        let live = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
         assert!(
             (live - 0.8).abs() < 1e-9,
             "live lookup expected 0.8, got {}",
@@ -496,25 +482,15 @@ mod tests {
         let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
         source.delay_ms = Some((AXIS_HISTORY_MS + 200) as u32);
 
-        let mut state = AxisState::default();
-        // Both samples land within the AXIS_HISTORY_MS=500 window relative to t=1100,
-        // so neither is trimmed.
-        state.update(0.3, 1000, None);
-        state.update(0.7, 1100, None);
+        let mut bus = InputBus::new();
+        // Both samples land within the AXIS_HISTORY_MS window relative to
+        // t=1100, so neither is trimmed.
+        bus.update("L0", 0.3, 1000, None);
+        bus.update("L0", 0.7, 1100, None);
 
-        let mut axis_values = HashMap::new();
-        axis_values.insert("L0".to_string(), state);
-
-        let result = resolve_parameter(
-            &source,
-            &axis_values,
-            &NoInputBehavior::Hold,
-            1100,
-            1000,
-        );
-        // target = 1100 - (500 + 200) = 400. No sample has ts ≤ 400, so the
-        // fallback returns the oldest still in history (the t=1000 / value=0.3
-        // sample).
+        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 1100, 1000);
+        // target = 1100 - delay. No sample has ts ≤ target, so fallback
+        // returns the oldest still in history (t=1000 / value=0.3).
         assert!(
             (result - 0.3).abs() < 1e-9,
             "delay beyond history should clamp to oldest sample, got {}",
@@ -531,20 +507,11 @@ mod tests {
         let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
         source.delay_ms = Some(500);
 
-        let mut state = AxisState::default();
-        state.update(0.4, 100, None);
-
-        let mut axis_values = HashMap::new();
-        axis_values.insert("L0".to_string(), state);
+        let mut bus = InputBus::new();
+        bus.update("L0", 0.4, 100, None);
 
         // age_ms = 1500 - 100 = 1400 > 1000 → staleness path runs.
-        let result = resolve_parameter(
-            &source,
-            &axis_values,
-            &NoInputBehavior::Hold,
-            1500,
-            1000,
-        );
+        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 1500, 1000);
         // Hold returns state.value = 0.4 (last received).
         assert!(
             (result - 0.4).abs() < 1e-9,
@@ -562,19 +529,10 @@ mod tests {
         let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
         source.delay_ms = Some(500);
 
-        let mut state = AxisState::default();
-        state.update(0.6, 100, None);
+        let mut bus = InputBus::new();
+        bus.update("L0", 0.6, 100, None);
 
-        let mut axis_values = HashMap::new();
-        axis_values.insert("L0".to_string(), state);
-
-        let result = resolve_parameter(
-            &source,
-            &axis_values,
-            &NoInputBehavior::Hold,
-            50,
-            1000,
-        );
+        let result = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, 50, 1000);
         assert!(
             (result - 0.6).abs() < 1e-9,
             "delay underflow should clamp to oldest sample, got {}",
@@ -590,29 +548,14 @@ mod tests {
         let mut source = ParameterSource::linked_source("R2", 10.0, 90.0, CurveType::Linear);
         source.delay_ms = Some(40);
 
-        let mut state = AxisState::default();
-        state.update(0.1, 50, None);
-        state.update(0.9, 150, None);
-
-        let mut axis_values = HashMap::new();
-        axis_values.insert("R2".to_string(), state);
+        let mut bus = InputBus::new();
+        bus.update("R2", 0.1, 50, None);
+        bus.update("R2", 0.9, 150, None);
 
         let now = 200u64;
-        let via_wrapper = resolve_parameter(
-            &source,
-            &axis_values,
-            &NoInputBehavior::Hold,
-            now,
-            1000,
-        );
-        let via_inner = resolve_parameter_at_time(
-            &source,
-            &axis_values,
-            &NoInputBehavior::Hold,
-            now,
-            1000,
-            now,
-        );
+        let via_wrapper = resolve_parameter(&source, &bus, &NoInputBehavior::Hold, now, 1000);
+        let via_inner =
+            resolve_parameter_at_time(&source, &bus, &NoInputBehavior::Hold, now, 1000, now);
         assert_eq!(via_wrapper, via_inner);
     }
 }

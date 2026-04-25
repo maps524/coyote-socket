@@ -10,7 +10,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Import types from modulation module (single source of truth)
-use crate::modulation::{AxisState, ChannelConfig, NoInputBehavior};
+use crate::input_bus::InputBus;
+use crate::modulation::{ChannelConfig, NoInputBehavior};
 
 // Import Buttplug types for link configuration and pipeline
 use crate::buttplug::{process_buttplug_pipeline, ButtplugChannelState, ButtplugLinkConfig};
@@ -1345,8 +1346,11 @@ pub struct ProcessingState {
     pub options: OutputOptions,
 
     // ===== Parameter Modulation System =====
-    // Track ALL T-Code axes (L0-L2, R0-R2, V0-V3, A0-A1)
-    pub axis_values: HashMap<String, AxisState>,
+    /// All input axes go through here: T-Code (`L0`, `R2`, `V1`, …), gamepad
+    /// (`GP_LX`, …), and (after the bundled phase folds them in) Buttplug
+    /// features (`bp:Vibrate_0`, `bp:Position_0`, …). Per-axis history with
+    /// `value_at` lookup lives on `AxisState` inside the bus.
+    pub input_bus: InputBus,
 
     // Track Buttplug feature values (feature_key → value 0.0-1.0)
     // Keys are like "Vibrate_0", "Position_0", "Oscillate_0", etc.
@@ -1368,7 +1372,7 @@ impl Default for ProcessingState {
         Self {
             channels: [Channel::new(ChannelId::A), Channel::new(ChannelId::B)],
             options: OutputOptions::default(),
-            axis_values: HashMap::new(),
+            input_bus: InputBus::new(),
             buttplug_features: HashMap::new(),
             buttplug_linear_commands: HashMap::new(),
             buttplug_rotate_directions: HashMap::new(),
@@ -1391,7 +1395,7 @@ impl ProcessingState {
 
     #[cfg(test)]
     pub fn get_axis_value(&self, axis: &str) -> Option<f64> {
-        self.axis_values.get(axis).map(|s| s.value)
+        self.input_bus.value(axis)
     }
 }
 
@@ -1402,12 +1406,8 @@ impl ProcessingState {
     /// time so a per-parameter `delay_ms` can offset *when* the engines see
     /// each sample without duplicating sample state.
     pub fn process_command(&mut self, cmd: &TCodeCommand) {
-        let now = cmd.received_at;
-
-        self.axis_values
-            .entry(cmd.axis.clone())
-            .or_default()
-            .update(cmd.value, now, cmd.interval_ms);
+        self.input_bus
+            .update(&cmd.axis, cmd.value, cmd.received_at, cmd.interval_ms);
     }
 
     /// Drain pending TCode samples from axis history into engine state for
@@ -1448,7 +1448,7 @@ impl ProcessingState {
 
             // Snapshot to release the immutable borrow before mutating.
             let pending: Vec<(f64, Option<u32>, u64)> = self
-                .axis_values
+                .input_bus
                 .get(&axis_name)
                 .map(|state| {
                     state

@@ -50,7 +50,7 @@ pub async fn handle_tcode_message(message: &str) -> Option<String> {
 
         let (channel_a, channel_b) = state_guard.get_current_intensities();
         let axes: std::collections::HashMap<String, f64> = state_guard
-            .axis_values
+            .input_bus
             .iter()
             .map(|(k, v)| (k.clone(), v.value))
             .collect();

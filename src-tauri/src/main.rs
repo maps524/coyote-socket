@@ -13,6 +13,7 @@ mod diagnostic;
 mod gamepad;
 mod logging;
 mod lovense;
+pub(crate) mod input_bus;
 mod modulation;
 pub(crate) mod net;
 mod processing;

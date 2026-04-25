@@ -36,21 +36,21 @@ pub async fn get_resolved_channel_params() -> (ResolvedChannelParams, ResolvedCh
         let ch = state_guard.channel(id);
         let freq = resolve_parameter(
             &ch.config.frequency,
-            &state_guard.axis_values,
+            &state_guard.input_bus,
             &state_guard.no_input_behavior,
             now,
             state_guard.no_input_decay_ms,
         );
         let freq_bal = resolve_parameter(
             &ch.config.frequency_balance,
-            &state_guard.axis_values,
+            &state_guard.input_bus,
             &state_guard.no_input_behavior,
             now,
             state_guard.no_input_decay_ms,
         );
         let int_bal = resolve_parameter(
             &ch.config.intensity_balance,
-            &state_guard.axis_values,
+            &state_guard.input_bus,
             &state_guard.no_input_behavior,
             now,
             state_guard.no_input_decay_ms,
@@ -90,7 +90,7 @@ pub async fn get_per_slot_frequencies(window_start: u64) -> ([f64; 4], [f64; 4])
             let target = window_start + (i as u64) * 25;
             resolve_parameter_at_time(
                 src,
-                &state_guard.axis_values,
+                &state_guard.input_bus,
                 &state_guard.no_input_behavior,
                 now,
                 state_guard.no_input_decay_ms,
@@ -116,7 +116,7 @@ pub async fn get_axis_values_from_processing() -> std::collections::HashMap<Stri
     let decay_ms = state_guard.no_input_decay_ms as u64;
 
     state_guard
-        .axis_values
+        .input_bus
         .iter()
         .map(|(k, v)| {
             let age_ms = now.saturating_sub(v.timestamp);
