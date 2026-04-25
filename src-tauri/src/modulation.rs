@@ -489,6 +489,100 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_parameter_delay_beyond_history_clamps_to_oldest() {
+        // delay_ms set so target_time falls before the oldest history sample.
+        // value_at scans newest→oldest, finds nothing ≤ target, then falls
+        // through to history.front() (oldest available).
+        let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        source.delay_ms = Some((AXIS_HISTORY_MS + 200) as u32);
+
+        let mut state = AxisState::default();
+        // Both samples land within the AXIS_HISTORY_MS=500 window relative to t=1100,
+        // so neither is trimmed.
+        state.update(0.3, 1000, None);
+        state.update(0.7, 1100, None);
+
+        let mut axis_values = HashMap::new();
+        axis_values.insert("L0".to_string(), state);
+
+        let result = resolve_parameter(
+            &source,
+            &axis_values,
+            &NoInputBehavior::Hold,
+            1100,
+            1000,
+        );
+        // target = 1100 - (500 + 200) = 400. No sample has ts ≤ 400, so the
+        // fallback returns the oldest still in history (the t=1000 / value=0.3
+        // sample).
+        assert!(
+            (result - 0.3).abs() < 1e-9,
+            "delay beyond history should clamp to oldest sample, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_resolve_parameter_staleness_anchored_on_now_not_target() {
+        // delay_ms is non-zero, but the axis has been silent long enough to
+        // trigger staleness. The age check uses current_time_ms (not the
+        // delayed target), so the no-input handler fires regardless of how
+        // delay would have shifted the lookup window.
+        let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        source.delay_ms = Some(500);
+
+        let mut state = AxisState::default();
+        state.update(0.4, 100, None);
+
+        let mut axis_values = HashMap::new();
+        axis_values.insert("L0".to_string(), state);
+
+        // age_ms = 1500 - 100 = 1400 > 1000 → staleness path runs.
+        let result = resolve_parameter(
+            &source,
+            &axis_values,
+            &NoInputBehavior::Hold,
+            1500,
+            1000,
+        );
+        // Hold returns state.value = 0.4 (last received).
+        assert!(
+            (result - 0.4).abs() < 1e-9,
+            "stale-axis Hold should return last value despite delay, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_resolve_parameter_delay_underflow_saturates_at_zero() {
+        // current_time_ms < delay_ms (boot-time edge). saturating_sub returns
+        // 0 instead of wrapping. With a single sample at t=100, target=0
+        // matches no sample (sample.ts > target), so the value_at fallback
+        // hits history.front() = oldest = the sole sample. No panic.
+        let mut source = ParameterSource::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        source.delay_ms = Some(500);
+
+        let mut state = AxisState::default();
+        state.update(0.6, 100, None);
+
+        let mut axis_values = HashMap::new();
+        axis_values.insert("L0".to_string(), state);
+
+        let result = resolve_parameter(
+            &source,
+            &axis_values,
+            &NoInputBehavior::Hold,
+            50,
+            1000,
+        );
+        assert!(
+            (result - 0.6).abs() < 1e-9,
+            "delay underflow should clamp to oldest sample, got {}",
+            result
+        );
+    }
+
+    #[test]
     fn test_resolve_parameter_at_time_matches_resolve_parameter_when_target_is_now() {
         // The wrapper relationship: resolve_parameter(now) must equal
         // resolve_parameter_at_time(now, target=now). This guards the
