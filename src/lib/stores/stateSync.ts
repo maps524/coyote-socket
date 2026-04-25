@@ -46,8 +46,7 @@ export interface ChannelStateSnapshot {
 
 export interface OutputOptionsSnapshot {
   processing_engine: string;
-  channel_interplay: string;
-  chase_delay_ms: number;
+  peak_fill: string;
 }
 
 export interface FullAppState {
@@ -62,6 +61,11 @@ interface ConnectionChangedPayload {
   connection_type: 'websocket' | 'bluetooth';
   connected: boolean;
   device_address: string | null;
+  timestamp: number;
+}
+
+interface BatteryChangedPayload {
+  level: number;
   timestamp: number;
 }
 
@@ -83,6 +87,7 @@ export const connectionState = writable<ConnectionStatus>({
 // ============================================================================
 
 let connectionChangedUnlisten: UnlistenFn | null = null;
+let batteryChangedUnlisten: UnlistenFn | null = null;
 let isStateSyncActive = false;
 
 /**
@@ -126,6 +131,14 @@ export async function startStateSync(): Promise<void> {
       }
     );
 
+    // Listen for battery level pushes from backend (initial + 30s refresh)
+    batteryChangedUnlisten = await listen<BatteryChangedPayload>(
+      'battery-changed',
+      (event) => {
+        updateBatteryLevel(event.payload.level);
+      }
+    );
+
     console.log('[StateSync] Event listeners started');
   } catch (e) {
     console.error('[StateSync] Failed to start event listeners:', e);
@@ -143,6 +156,11 @@ export function stopStateSync(): void {
   if (connectionChangedUnlisten) {
     connectionChangedUnlisten();
     connectionChangedUnlisten = null;
+  }
+
+  if (batteryChangedUnlisten) {
+    batteryChangedUnlisten();
+    batteryChangedUnlisten = null;
   }
 
   console.log('[StateSync] Event listeners stopped');
@@ -180,8 +198,8 @@ export async function getFullState(): Promise<FullAppState> {
 }
 
 /**
- * Update battery level in connection state
- * Called when battery poll succeeds
+ * Update battery level in connection state.
+ * Called from the `battery-changed` listener above.
  */
 export function updateBatteryLevel(level: number | null): void {
   connectionState.update(state => ({

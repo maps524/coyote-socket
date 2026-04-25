@@ -40,6 +40,32 @@ pub fn generate_b0_command(
     command
 }
 
+/// Generate a 0xBF command (V3 host) for soft limits + balance params.
+///
+/// Spec: 7 bytes — `0xBF + limit_a + limit_b + freq_bal_a + freq_bal_b + int_bal_a + int_bal_b`.
+/// - Soft limits (0-200) cap the device's physical knob. Values outside that
+///   range are ignored by the device.
+/// - Freq/intensity balance (0-255) tune perceived wave feel; persisted to
+///   device flash, so they MUST be resent on every reconnect.
+pub fn generate_bf_command(
+    limit_a: u8,
+    limit_b: u8,
+    freq_bal_a: u8,
+    freq_bal_b: u8,
+    int_bal_a: u8,
+    int_bal_b: u8,
+) -> Vec<u8> {
+    vec![
+        0xBF,
+        limit_a.min(200),
+        limit_b.min(200),
+        freq_bal_a,
+        freq_bal_b,
+        int_bal_a,
+        int_bal_b,
+    ]
+}
+
 /// Convert frequency (Hz) to period value for the device
 /// Uses the same algorithm as the original Python implementation
 pub fn convert_period(period: u16) -> u8 {

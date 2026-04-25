@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 import type { NoInputBehavior } from '$lib/types/modulation';
-import type { ProcessingEngine } from './connection';
+import type { ProcessingEngine, PeakFillStrategy } from './connection';
 
 /**
  * General application settings
@@ -13,6 +13,7 @@ export interface GeneralSettings {
   saveRateMs: number;           // File persistence rate (100-2000ms, default: 500ms)
   showTCodeMonitor: boolean;    // Toggle T-Code monitor visibility
   processingEngine: ProcessingEngine;  // Moved from outputOptions for centralization
+  peakFill: PeakFillStrategy;   // V2 Detailed variant: legacy cascade vs forward-fill
 }
 
 /**
@@ -24,7 +25,8 @@ export const defaultGeneralSettings: GeneralSettings = {
   updateRateMs: 50,
   saveRateMs: 500,
   showTCodeMonitor: false,
-  processingEngine: 'v2-smooth'
+  processingEngine: 'v2-smooth',
+  peakFill: 'forward'
 };
 
 /**

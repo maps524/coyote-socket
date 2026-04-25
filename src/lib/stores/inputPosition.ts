@@ -2,8 +2,10 @@
  * Input Position Store
  *
  * Tracks the current T-Code input position for each channel and all axes.
- * Receives updates via Tauri events (synchronized with 10Hz device loop).
- * Uses requestAnimationFrame for smooth UI interpolation.
+ * Receives updates via `axis-update` Tauri events, which fire per inbound
+ * T-Code/Buttplug message — cadence depends on the sender and can range from
+ * ~10Hz up to 60+ Hz. Uses requestAnimationFrame to lerp display values
+ * toward the latest target so bar motion stays smooth at any input rate.
  */
 
 import { writable, derived } from 'svelte/store';
@@ -62,8 +64,10 @@ let currentB = 0;
 let targetAxes: AxisValues = {};
 let currentAxes: AxisValues = {};
 
-// Smoothing factor (0-1, higher = faster response)
-// At 10Hz input rate, 0.4 gives smooth but responsive feel
+// Smoothing factor (0-1, higher = faster response). Applied each RAF tick
+// (~60Hz), so 0.4 roughly halves distance-to-target every 2 frames — fast
+// enough to stay responsive when inputs arrive at 20-60Hz, slow enough to
+// hide step-jitter when the sender drops to ~10Hz.
 const SMOOTHING = 0.4;
 
 /**
@@ -128,7 +132,7 @@ export async function startInputTracking() {
 
   isTracking = true;
 
-  // Listen for axis-update events from backend (emitted at 10Hz)
+  // Listen for axis-update events (fired per inbound input message, variable rate)
   try {
     unlistenFn = await listen<AxisUpdatePayload>('axis-update', (event) => {
       handleAxisUpdate(event.payload);

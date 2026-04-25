@@ -51,6 +51,14 @@
     timestamp: number;
   }
 
+  // Latest values written by event handlers, sampled by RAF into display state.
+  // Splitting the two decouples Svelte reactivity from inbound event rate so
+  // the bars always reflect the newest sample at the next paint.
+  let latestTcodeAxes: Record<string, number> = {};
+  let latestButtplugFeatures: Record<string, number> = {};
+  let tcodeDirty = false;
+  let buttplugDirty = false;
+
   // Display state for T-Code axes - populated dynamically from received commands
   let tcodeAxes: TCodeAxisValue[] = [];
 
@@ -71,36 +79,22 @@
   let unlistenAxisUpdate: UnlistenFn | null = null;
   let unlistenButtplugFeatures: UnlistenFn | null = null;
   let statusPollInterval: ReturnType<typeof setInterval> | null = null;
+  let rafHandle: number | null = null;
 
   export let compact = true;
 
   // Subscribe to input source to detect changes
   $: inputSource = $currentInputSource;
 
-  onMount(async () => {
-    // Listen for T-Code axis updates (pushed from backend at 10Hz)
-    unlistenAxisUpdate = await listen<AxisUpdatePayload>('axis-update', (event) => {
-      const { axes } = event.payload;
-
-      // Convert to array and sort by axis name
-      const entries = Object.entries(axes) as [string, number][];
-      tcodeAxes = entries
+  function rafTick() {
+    if (tcodeDirty) {
+      tcodeAxes = Object.entries(latestTcodeAxes)
         .map(([axis, value]) => ({ axis, value }))
         .sort((a, b) => a.axis.localeCompare(b.axis));
-
-      // Mark as connected when we receive axis data
-      if (entries.length > 0) {
-        isInputConnected = true;
-      }
-    });
-
-    // Listen for Buttplug feature updates (pushed when commands received)
-    unlistenButtplugFeatures = await listen<ButtplugFeaturesPayload>('buttplug-features', (event) => {
-      const { features } = event.payload;
-
-      // Convert to array with parsed feature info
-      const entries = Object.entries(features) as [string, number][];
-      buttplugFeatures = entries
+      tcodeDirty = false;
+    }
+    if (buttplugDirty) {
+      buttplugFeatures = Object.entries(latestButtplugFeatures)
         .map(([key, value]) => {
           const parts = key.split('_');
           const featureType = parts[0] || key;
@@ -108,20 +102,37 @@
           return { key, featureType, index, value };
         })
         .sort((a, b) => a.key.localeCompare(b.key));
-
-      // Update the global store so other components can access these values
       updateButtplugFeatures(buttplugFeatures.map(f => ({
         featureType: f.featureType,
         featureIndex: f.index,
         value: f.value,
         label: `${f.featureType} ${f.index + 1}`
       })));
+      buttplugDirty = false;
+    }
+    rafHandle = requestAnimationFrame(rafTick);
+  }
 
-      // Mark as connected when we receive buttplug data
-      if (entries.length > 0) {
+  onMount(async () => {
+    unlistenAxisUpdate = await listen<AxisUpdatePayload>('axis-update', (event) => {
+      const { axes } = event.payload;
+      latestTcodeAxes = axes;
+      tcodeDirty = true;
+      if (Object.keys(axes).length > 0) {
         isInputConnected = true;
       }
     });
+
+    unlistenButtplugFeatures = await listen<ButtplugFeaturesPayload>('buttplug-features', (event) => {
+      const { features } = event.payload;
+      latestButtplugFeatures = features;
+      buttplugDirty = true;
+      if (Object.keys(features).length > 0) {
+        isInputConnected = true;
+      }
+    });
+
+    rafHandle = requestAnimationFrame(rafTick);
 
     // Poll less frequently for connection status, logs, and device output (1Hz)
     statusPollInterval = setInterval(pollStatus, 1000);
@@ -134,6 +145,7 @@
     if (unlistenAxisUpdate) unlistenAxisUpdate();
     if (unlistenButtplugFeatures) unlistenButtplugFeatures();
     if (statusPollInterval) clearInterval(statusPollInterval);
+    if (rafHandle !== null) cancelAnimationFrame(rafHandle);
   });
 
   async function pollStatus() {
@@ -200,10 +212,10 @@
         <!-- T-Code Mode: Show axis values in 2 columns -->
         {#if tcodeAxes.length > 0}
           <div class="grid grid-cols-2 gap-1 font-mono text-[10px]">
-            {#each tcodeAxes as axis}
+            {#each tcodeAxes as axis (axis.axis)}
               <div class="relative h-4 bg-muted rounded-sm overflow-hidden">
                 <div
-                  class="absolute inset-y-0 left-0 bg-primary/50 transition-all duration-75"
+                  class="absolute inset-y-0 left-0 bg-primary/50"
                   style="width: {getProgressPercent(axis.value)}%"
                 />
                 <div class="absolute inset-0 flex items-center justify-between px-1.5">
@@ -222,10 +234,10 @@
         <!-- Buttplug Mode: Show feature values with icons -->
         {#if buttplugFeatures.length > 0}
           <div class="grid grid-cols-2 gap-1 font-mono text-[10px]">
-            {#each buttplugFeatures as feature}
+            {#each buttplugFeatures as feature (feature.key)}
               <div class="relative h-4 bg-muted rounded-sm overflow-hidden">
                 <div
-                  class="absolute inset-y-0 left-0 bg-primary/50 transition-all duration-75"
+                  class="absolute inset-y-0 left-0 bg-primary/50"
                   style="width: {getProgressPercent(feature.value)}%"
                 />
                 <div class="absolute inset-0 flex items-center justify-between px-1.5">

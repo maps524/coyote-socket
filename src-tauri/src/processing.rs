@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Import types from modulation module (single source of truth)
-use crate::modulation::{apply_curve, AxisState, ChannelConfig, NoInputBehavior};
+use crate::modulation::{AxisState, ChannelConfig, NoInputBehavior};
 
 // Import Buttplug types for link configuration and pipeline
 use crate::buttplug::{process_buttplug_pipeline, ButtplugChannelState, ButtplugLinkConfig};
@@ -41,6 +41,12 @@ pub enum ProcessingEngineType {
     V2Detailed,
     /// State-based with dynamic (oscillation-preserving) downsampling
     V2Dynamic,
+    /// Like V2Dynamic for waveform shape, but adds a rolling 200ms peak-hold
+    /// on the master channel intensity. Sustains felt intensity through fast
+    /// input zero-crossings instead of letting the master volume dip when a
+    /// packet's max ages out. Best for rapid pole-flicking input where
+    /// V2Dynamic's per-packet master gate makes oscillation feel weak.
+    V2Sustained,
     /// Lookahead-based with 1s buffer for smooth ramps
     V3Predictive,
 }
@@ -53,138 +59,43 @@ impl ProcessingEngineType {
             "v2-balanced" => Self::V2Balanced,
             "v2-detailed" => Self::V2Detailed,
             "v2-dynamic" => Self::V2Dynamic,
+            "v2-sustained" => Self::V2Sustained,
             "v3-predictive" => Self::V3Predictive,
             _ => Self::V1,
         }
     }
 }
 
-// ============================================================================
-// Channel Interplay
-// ============================================================================
-
-/// Channel interplay mode - determines how channels A and B interact
+/// Which algorithm fills empty buckets in peak-preserving downsampling.
+/// Orthogonal to `ProcessingEngineType`; only affects the `V2Detailed` engine.
+/// Exposed alongside the Engine dropdown so users can A/B the behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
-pub enum ChannelInterplay {
-    /// Independent channels - no interaction
+pub enum PeakFillStrategy {
+    /// v1 (original): empty buckets inherit the previous bucket, then
+    /// `last_value`. Preserves prior presets' feel.
+    Legacy,
+    /// v2 (new default): empty buckets inherit the next non-empty bucket
+    /// (forward-fill). Better peak preservation under sparse input.
     #[default]
-    None,
-    /// B mirrors A (same values)
-    Mirror,
-    /// B mirrors A inverted (200 - A)
-    MirrorInverted,
-    /// B follows A with delay (movement sensation)
-    Chase,
-    /// B follows A inverted with delay (ripple effect)
-    ChaseInverted,
-    /// A and B alternate within each 100ms window (ping-pong)
-    Alternating,
+    Forward,
 }
 
-impl ChannelInterplay {
+impl PeakFillStrategy {
     pub fn from_str(s: &str) -> Self {
         match s {
-            "none" => Self::None,
-            "mirror" => Self::Mirror,
-            "mirror-inverted" => Self::MirrorInverted,
-            "chase" => Self::Chase,
-            "chase-inverted" => Self::ChaseInverted,
-            "alternating" => Self::Alternating,
-            _ => Self::None,
+            "legacy" | "v1" => Self::Legacy,
+            "forward" | "v2" => Self::Forward,
+            _ => Self::default(),
         }
     }
 
-    /// Check if this interplay mode derives B from A
-    pub fn derives_b_from_a(&self) -> bool {
-        !matches!(self, Self::None)
-    }
-}
-
-/// Apply channel interplay pattern to raw values
-/// a_history: History of A values (most recent at end), each slot is 25ms
-/// delay_ms: Delay in milliseconds for chase modes
-/// Returns (values_a, values_b) after applying the interplay pattern
-pub fn apply_interplay(
-    values_a: [u8; 4],
-    values_b: [u8; 4],
-    interplay: ChannelInterplay,
-    a_history: &VecDeque<u8>,
-    delay_ms: u32,
-) -> ([u8; 4], [u8; 4]) {
-    match interplay {
-        ChannelInterplay::None => {
-            // Independent channels - no modification
-            (values_a, values_b)
-        }
-        ChannelInterplay::Mirror => {
-            // B mirrors A exactly
-            (values_a, values_a)
-        }
-        ChannelInterplay::MirrorInverted => {
-            // B is inverse of A
-            let inverted = [
-                200u8.saturating_sub(values_a[0]),
-                200u8.saturating_sub(values_a[1]),
-                200u8.saturating_sub(values_a[2]),
-                200u8.saturating_sub(values_a[3]),
-            ];
-            (values_a, inverted)
-        }
-        ChannelInterplay::Alternating => {
-            // Ping-pong: A gets slots 0,2 and B gets slots 1,3
-            let new_a = [values_a[0], 0, values_a[2], 0];
-            let new_b = [0, values_a[1], 0, values_a[3]];
-            (new_a, new_b)
-        }
-        ChannelInterplay::Chase => {
-            // B follows A with configurable delay
-            let new_b = get_delayed_values(a_history, delay_ms, false);
-            (values_a, new_b)
-        }
-        ChannelInterplay::ChaseInverted => {
-            // B follows A inverted with configurable delay
-            let new_b = get_delayed_values(a_history, delay_ms, true);
-            (values_a, new_b)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Forward => "forward",
         }
     }
-}
-
-/// Get 4 values from history with the specified delay
-/// delay_ms: How far back to look (50-500ms)
-/// invert: Whether to invert the values (200 - value)
-fn get_delayed_values(a_history: &VecDeque<u8>, delay_ms: u32, invert: bool) -> [u8; 4] {
-    // Convert delay to number of 25ms slots
-    let delay_slots = (delay_ms / 25) as usize;
-
-    // History has most recent values at the end
-    // We want values from delay_slots ago
-    let history_len = a_history.len();
-
-    let mut result = [0u8; 4];
-    for i in 0..4 {
-        // For slot i, we want the value from (delay_slots - i) positions back from current
-        // But history doesn't include current values yet, so we offset
-        let slots_back = delay_slots.saturating_sub(i);
-
-        let value = if slots_back <= history_len {
-            // Index from end: history_len - slots_back
-            a_history
-                .get(history_len - slots_back)
-                .copied()
-                .unwrap_or(0)
-        } else {
-            0 // Not enough history yet
-        };
-
-        result[i] = if invert {
-            200u8.saturating_sub(value)
-        } else {
-            value
-        };
-    }
-
-    result
 }
 
 // ============================================================================
@@ -791,8 +702,13 @@ impl Downsampler {
         result
     }
 
-    /// Downsample to 4 values using detailed (peak-preserving) algorithm
-    pub fn downsample_detailed(&self, window_start: u64, window_end: u64) -> [u8; 4] {
+    /// Peak-preserving downsample (v1 = legacy cascade back-fill).
+    ///
+    /// Original behavior: empty buckets inherit the previous bucket's value
+    /// (or `self.last_value` for the first bucket). This weakens peak-preservation
+    /// when sample density is sparse — leading buckets can drag window MAX down.
+    /// Kept as a selectable variant so existing presets retain their feel.
+    pub fn downsample_detailed_v1(&self, window_start: u64, window_end: u64) -> [u8; 4] {
         let window_samples: Vec<_> = self
             .samples
             .iter()
@@ -821,19 +737,82 @@ impl Downsampler {
                 .collect();
 
             if bucket_samples.is_empty() {
-                // Use previous bucket's value or last known
                 result[i] = if i > 0 {
                     result[i - 1]
                 } else {
                     self.last_value
                 };
             } else {
-                // Take maximum value in bucket (preserves peaks)
                 result[i] = bucket_samples.iter().map(|s| s.value).max().unwrap_or(0);
             }
         }
 
         result
+    }
+
+    /// Peak-preserving downsample (v2 = forward-fill).
+    ///
+    /// Empty buckets inherit the NEXT non-empty bucket's MAX (preferred —
+    /// reflects where the signal is heading). Trailing empty buckets fall back
+    /// to the previous filled bucket, then `self.last_value` as last resort.
+    /// Preserves peaks better than v1 under sparse input.
+    pub fn downsample_detailed_v2(&self, window_start: u64, window_end: u64) -> [u8; 4] {
+        let window_samples: Vec<_> = self
+            .samples
+            .iter()
+            .filter(|s| s.timestamp >= window_start && s.timestamp < window_end)
+            .copied()
+            .collect();
+
+        if window_samples.is_empty() {
+            return [self.last_value; 4];
+        }
+
+        if window_samples.len() == 1 {
+            return [window_samples[0].value; 4];
+        }
+
+        let bucket_duration = (window_end - window_start) / 4;
+
+        let mut buckets: [Option<u8>; 4] = [None; 4];
+        for i in 0..4 {
+            let bucket_start = window_start + i as u64 * bucket_duration;
+            let bucket_end = bucket_start + bucket_duration;
+            buckets[i] = window_samples
+                .iter()
+                .filter(|s| s.timestamp >= bucket_start && s.timestamp < bucket_end)
+                .map(|s| s.value)
+                .max();
+        }
+
+        let mut result = [0u8; 4];
+        for i in 0..4 {
+            result[i] = match buckets[i] {
+                Some(v) => v,
+                None => {
+                    let forward = buckets[i + 1..].iter().find_map(|b| *b);
+                    forward
+                        .or_else(|| if i > 0 { Some(result[i - 1]) } else { None })
+                        .unwrap_or(self.last_value)
+                }
+            };
+        }
+
+        result
+    }
+
+    /// Peak-preserving downsample dispatch. Picks between v1 (legacy) and v2
+    /// (forward-fill) based on the configured `PeakFillStrategy`.
+    pub fn downsample_detailed(
+        &self,
+        window_start: u64,
+        window_end: u64,
+        strategy: PeakFillStrategy,
+    ) -> [u8; 4] {
+        match strategy {
+            PeakFillStrategy::Legacy => self.downsample_detailed_v1(window_start, window_end),
+            PeakFillStrategy::Forward => self.downsample_detailed_v2(window_start, window_end),
+        }
     }
 
     /// Linear interpolation at a specific timestamp
@@ -910,8 +889,10 @@ impl Downsampler {
         const OSCILLATION_THRESHOLD: u8 = 40; // 20% of 200
 
         if range < OSCILLATION_THRESHOLD {
-            // Not enough variation - fall back to detailed (peak-preserving)
-            return self.downsample_detailed(window_start, window_end);
+            // Not enough variation - fall back to detailed (peak-preserving).
+            // Dynamic's fallback uses forward-fill unconditionally; its own feel
+            // is orthogonal to the V2Detailed v1/v2 variant selector.
+            return self.downsample_detailed(window_start, window_end, PeakFillStrategy::Forward);
         }
 
         // Significant oscillation detected - analyze per-bucket behavior
@@ -1136,17 +1117,18 @@ impl V1ChannelState {
 /// Output options that affect how channels are linked/processed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputOptions {
-    pub channel_interplay: ChannelInterplay,
     pub processing_engine: ProcessingEngineType,
-    pub chase_delay_ms: u32, // 50-500ms delay for chase modes
+    /// Variant for V2Detailed peak-preserving empty-bucket behavior.
+    /// Other engines ignore this.
+    #[serde(default)]
+    pub peak_fill: PeakFillStrategy,
 }
 
 impl Default for OutputOptions {
     fn default() -> Self {
         Self {
-            channel_interplay: ChannelInterplay::None,
             processing_engine: ProcessingEngineType::V1,
-            chase_delay_ms: 100, // Default 100ms (1 full window)
+            peak_fill: PeakFillStrategy::default(),
         }
     }
 }
@@ -1160,6 +1142,11 @@ impl Default for OutputOptions {
 pub struct WaveformData {
     pub intensity: u8,               // Max intensity (0-200)
     pub waveform_intensity: [u8; 4], // Relative intensity (0-100) for each slot
+    /// Per-slot engine output BEFORE normalization to relative 0-100. Same
+    /// device-units (0-200) scale as `intensity`, before peak-hold + relative
+    /// scaling. Kept around purely for diagnostic capture so analyzers can
+    /// compute true input→output lag without unwinding the normalization.
+    pub raw_values: [u8; 4],
 }
 
 impl WaveformData {
@@ -1181,6 +1168,249 @@ impl WaveformData {
         Self {
             intensity: max_intensity,
             waveform_intensity,
+            raw_values: values,
+        }
+    }
+}
+
+// ============================================================================
+// Channel (per-channel bundle of engine states + config + buttplug state)
+// ============================================================================
+
+/// Identifies one of the two output channels. `repr(usize)` lets the enum
+/// index directly into `[Channel; 2]` without a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(usize)]
+pub enum ChannelId {
+    A = 0,
+    B = 1,
+}
+
+impl ChannelId {
+    pub const ALL: [ChannelId; 2] = [ChannelId::A, ChannelId::B];
+
+    pub fn from_char(c: char) -> Option<Self> {
+        match c {
+            'A' | 'a' => Some(ChannelId::A),
+            'B' | 'b' => Some(ChannelId::B),
+            _ => None,
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "A" | "a" => Some(ChannelId::A),
+            "B" | "b" => Some(ChannelId::B),
+            _ => None,
+        }
+    }
+
+    pub fn as_char(&self) -> char {
+        match self {
+            ChannelId::A => 'A',
+            ChannelId::B => 'B',
+        }
+    }
+
+    /// Default T-Code source axis for a freshly-initialized channel.
+    pub fn default_axis(&self) -> &'static str {
+        match self {
+            ChannelId::A => "L0",
+            ChannelId::B => "R2",
+        }
+    }
+}
+
+/// Rolling per-channel master-intensity peak tracker for V2Sustained.
+///
+/// Stores `(timestamp_ms, intensity)` observations and exposes the max
+/// over a configurable lookback window. Used to keep the master channel
+/// intensity from dipping during fast input swings — the waveform shape
+/// keeps oscillating per-slot, but the volume sustains at the recent peak.
+#[derive(Debug, Default, Clone)]
+pub struct IntensityPeakHold {
+    samples: VecDeque<(u64, u8)>,
+}
+
+impl IntensityPeakHold {
+    pub fn observe(&mut self, now_ms: u64, value: u8) {
+        self.samples.push_back((now_ms, value));
+        // Generous prune cutoff (1s) — caller picks the actual hold window
+        // when reading. Keeps the buffer bounded under sustained input.
+        let cutoff = now_ms.saturating_sub(1000);
+        while self
+            .samples
+            .front()
+            .map(|(t, _)| *t < cutoff)
+            .unwrap_or(false)
+        {
+            self.samples.pop_front();
+        }
+    }
+
+    pub fn peak_in_last_ms(&self, now_ms: u64, hold_ms: u64) -> u8 {
+        let cutoff = now_ms.saturating_sub(hold_ms);
+        self.samples
+            .iter()
+            .filter(|(t, _)| *t >= cutoff)
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
+
+/// Per-channel bundle: all engine states + config + buttplug state for one output.
+///
+/// Centralizes every `*_a`/`*_b` pair from the original `ProcessingState` so that
+/// per-channel logic lives in one place. `ProcessingState` holds `[Channel; 2]`
+/// and only owns truly shared state (axis values, options, interplay history).
+pub struct Channel {
+    pub id: ChannelId,
+    pub config: ChannelConfig,
+    pub v1: V1ChannelState,
+    pub v2: V2ChannelState,
+    pub v3: V3ChannelState,
+    pub downsampler: Downsampler,
+    pub buttplug_link: ButtplugLinkConfig,
+    pub buttplug_state: ButtplugChannelState,
+    /// Master-intensity peak history. Only populated when V2Sustained is
+    /// the active engine; idle otherwise. Lives on Channel so each channel
+    /// holds its own peak independently.
+    pub peak_hold: IntensityPeakHold,
+}
+
+impl Channel {
+    pub fn new(id: ChannelId) -> Self {
+        let config = match id {
+            ChannelId::A => ChannelConfig::channel_a_default(),
+            ChannelId::B => ChannelConfig::channel_b_default(),
+        };
+        Self {
+            id,
+            config,
+            v1: V1ChannelState::default(),
+            v2: V2ChannelState::default(),
+            v3: V3ChannelState::default(),
+            downsampler: Downsampler::default(),
+            buttplug_link: ButtplugLinkConfig::default(),
+            buttplug_state: ButtplugChannelState::default(),
+            peak_hold: IntensityPeakHold::default(),
+        }
+    }
+
+    /// Whether this channel's intensity is a linked (not static) source.
+    pub fn intensity_is_linked(&self) -> bool {
+        use crate::modulation::ParameterSourceType;
+        self.config.intensity.source_type == ParameterSourceType::Linked
+    }
+
+    /// Whether this channel's intensity is linked to the given T-Code axis.
+    pub fn intensity_linked_to(&self, axis: &str) -> bool {
+        use crate::modulation::ParameterSourceType;
+        if self.config.intensity.source_type != ParameterSourceType::Linked {
+            return false;
+        }
+        self.config
+            .intensity
+            .source_axis
+            .as_deref()
+            .map(|a| a == axis)
+            .unwrap_or(false)
+    }
+
+    /// Apply a T-Code command to all engine states for this channel.
+    /// Runs midpoint → curve transform, converts to device 0-200 u8, then
+    /// feeds V1 queue, V2 ramp, downsampler, and V3 lookahead buffer.
+    /// Range mapping is intentionally skipped here — it happens later in
+    /// `device.rs::scale_intensity` using the intensity source's range.
+    pub fn apply_tcode(&mut self, value: f64, interval_ms: Option<u32>, timestamp: u64) {
+        use crate::modulation::{apply_curve, apply_midpoint};
+
+        let midpoint_value = if self.config.intensity.midpoint.unwrap_or(false) {
+            apply_midpoint(value)
+        } else {
+            value
+        };
+
+        let curve = &self.config.intensity.curve;
+        let strength = self.config.intensity.curve_strength.unwrap_or(2.0);
+        let curved = apply_curve(midpoint_value, curve, strength);
+
+        let intensity_u8 = (curved * 200.0).round().clamp(0.0, 200.0) as u8;
+
+        self.v1.apply_command(curved, interval_ms);
+        self.v2
+            .set_target(intensity_u8, interval_ms.unwrap_or(0), timestamp);
+        self.downsampler.add_sample(intensity_u8, timestamp);
+        self.v3.buffer_command(intensity_u8, timestamp);
+    }
+
+    /// Compute this channel's raw waveform values for the current tick.
+    /// Caller chooses engine + peak_fill strategy; returns the 4 per-slot
+    /// device intensities (0-200) before range scaling / interplay.
+    pub fn next_raw_values(
+        &mut self,
+        engine: ProcessingEngineType,
+        window_start: u64,
+        now_ms: u64,
+        peak_fill: PeakFillStrategy,
+    ) -> [u8; 4] {
+        match engine {
+            ProcessingEngineType::V1 => self.v1.get_next_four(),
+            ProcessingEngineType::V2Smooth => {
+                if self.downsampler.has_samples_in_window(window_start, now_ms) {
+                    self.downsampler.downsample_smooth(window_start, now_ms)
+                } else {
+                    self.v2.get_next_four_values(window_start)
+                }
+            }
+            ProcessingEngineType::V2Balanced => {
+                if self.downsampler.has_samples_in_window(window_start, now_ms) {
+                    self.downsampler.downsample_balanced(window_start, now_ms)
+                } else {
+                    self.v2.get_next_four_values(window_start)
+                }
+            }
+            ProcessingEngineType::V2Detailed => {
+                if self.downsampler.has_samples_in_window(window_start, now_ms) {
+                    self.downsampler
+                        .downsample_detailed(window_start, now_ms, peak_fill)
+                } else {
+                    self.v2.get_next_four_values(window_start)
+                }
+            }
+            ProcessingEngineType::V2Dynamic | ProcessingEngineType::V2Sustained => {
+                // V2Sustained shares V2Dynamic's per-slot oscillation logic.
+                // The "sustained" part is applied later in get_next_waveform_data
+                // by overriding the master intensity with a rolling peak-hold.
+                if self.downsampler.has_samples_in_window(window_start, now_ms) {
+                    self.downsampler.downsample_dynamic(window_start, now_ms)
+                } else {
+                    self.v2.get_next_four_values(window_start)
+                }
+            }
+            ProcessingEngineType::V3Predictive => self.v3.get_next_four_values(now_ms),
+        }
+    }
+
+    /// Reset all engine states to zero; leaves config + buttplug_link untouched.
+    pub fn reset_engines(&mut self) {
+        self.v1.reset();
+        self.v2.reset();
+        self.v3.reset();
+        self.downsampler.clear();
+        self.peak_hold.clear();
+    }
+
+    /// Current intensity in 0-1 range (for UI display).
+    pub fn current_intensity_normalized(&self, engine: ProcessingEngineType, now: u64) -> f64 {
+        match engine {
+            ProcessingEngineType::V1 => self.v1.current_intensity as f64 / 200.0,
+            _ => self.v2.get_value_at(now) as f64 / 200.0,
         }
     }
 }
@@ -1189,31 +1419,15 @@ impl WaveformData {
 // Processing State (Main struct that holds everything)
 // ============================================================================
 
-/// Main processing state that manages V1, V2, and V3 channel states
+/// Main processing state. Per-channel data lives on `channels[0]` / `channels[1]`
+/// indexed via `ChannelId`. Truly shared state (axes, options, interplay history)
+/// stays on `ProcessingState` itself.
 pub struct ProcessingState {
-    // V1 channel states (queue-based)
-    pub v1_channel_a: V1ChannelState,
-    pub v1_channel_b: V1ChannelState,
-
-    // V2 channel states (interpolation-based)
-    pub v2_channel_a: V2ChannelState,
-    pub v2_channel_b: V2ChannelState,
-
-    // V3 channel states (predictive/lookahead-based)
-    pub v3_channel_a: V3ChannelState,
-    pub v3_channel_b: V3ChannelState,
-
-    // Downsamplers for V2
-    pub downsampler_a: Downsampler,
-    pub downsampler_b: Downsampler,
+    /// Per-channel engine states + config + buttplug link/state.
+    pub channels: [Channel; 2],
 
     // Output options
     pub options: OutputOptions,
-
-    // History of A values for delay-based interplay modes (chase, chase-inverted)
-    // Stores up to 20 slots (500ms at 25ms per slot) as a circular buffer
-    // Most recent values are at the end
-    a_history: VecDeque<u8>,
 
     // ===== Parameter Modulation System =====
     // Track ALL T-Code axes (L0-L2, R0-R2, V0-V3, A0-A1)
@@ -1223,214 +1437,82 @@ pub struct ProcessingState {
     // Keys are like "Vibrate_0", "Position_0", "Oscillate_0", etc.
     pub buttplug_features: HashMap<String, f64>,
 
-    // Track LinearCmd (PositionWithDuration) commands: index → (position, duration_ms)
-    // These are stored separately because they include duration information
     /// LinearCmd commands with (position, duration_ms, arrival_time)
     pub buttplug_linear_commands: HashMap<usize, (f64, u32, std::time::Instant)>,
 
     // Track Rotate directions: index → clockwise
     pub buttplug_rotate_directions: HashMap<usize, bool>,
 
-    // Channel parameter configurations
-    pub channel_a_config: ChannelConfig,
-    pub channel_b_config: ChannelConfig,
-
     // General settings for parameter modulation
     pub no_input_behavior: NoInputBehavior,
     pub no_input_decay_ms: u32,
-
-    // ===== Buttplug Pipeline State =====
-    // Buttplug link configurations per channel (intensity only for now)
-    pub buttplug_link_config_a: ButtplugLinkConfig,
-    pub buttplug_link_config_b: ButtplugLinkConfig,
-
-    // Buttplug channel processing state (phases, interpolation, etc.)
-    pub buttplug_channel_state_a: ButtplugChannelState,
-    pub buttplug_channel_state_b: ButtplugChannelState,
 }
 
 impl Default for ProcessingState {
     fn default() -> Self {
         Self {
-            v1_channel_a: V1ChannelState::default(),
-            v1_channel_b: V1ChannelState::default(),
-            v2_channel_a: V2ChannelState::default(),
-            v2_channel_b: V2ChannelState::default(),
-            v3_channel_a: V3ChannelState::default(),
-            v3_channel_b: V3ChannelState::default(),
-            downsampler_a: Downsampler::default(),
-            downsampler_b: Downsampler::default(),
+            channels: [Channel::new(ChannelId::A), Channel::new(ChannelId::B)],
             options: OutputOptions::default(),
-            a_history: VecDeque::with_capacity(24), // 24 slots = 600ms of history
             axis_values: HashMap::new(),
             buttplug_features: HashMap::new(),
             buttplug_linear_commands: HashMap::new(),
             buttplug_rotate_directions: HashMap::new(),
-            channel_a_config: ChannelConfig::channel_a_default(),
-            channel_b_config: ChannelConfig::channel_b_default(),
             no_input_behavior: NoInputBehavior::Hold,
-            no_input_decay_ms: 1000, // 1 second default decay time
-            buttplug_link_config_a: ButtplugLinkConfig::default(),
-            buttplug_link_config_b: ButtplugLinkConfig::default(),
-            buttplug_channel_state_a: ButtplugChannelState::default(),
-            buttplug_channel_state_b: ButtplugChannelState::default(),
+            no_input_decay_ms: 1000,
         }
     }
 }
 
 impl ProcessingState {
-    /// Process a T-Code command
+    /// Immutable access to one channel.
+    pub fn channel(&self, id: ChannelId) -> &Channel {
+        &self.channels[id as usize]
+    }
+
+    /// Mutable access to one channel.
+    pub fn channel_mut(&mut self, id: ChannelId) -> &mut Channel {
+        &mut self.channels[id as usize]
+    }
+
+    // Back-compat helpers used by external callers that predate the refactor.
+    pub fn channel_a(&self) -> &Channel {
+        self.channel(ChannelId::A)
+    }
+    pub fn channel_b(&self) -> &Channel {
+        self.channel(ChannelId::B)
+    }
+    pub fn channel_a_mut(&mut self) -> &mut Channel {
+        self.channel_mut(ChannelId::A)
+    }
+    pub fn channel_b_mut(&mut self) -> &mut Channel {
+        self.channel_mut(ChannelId::B)
+    }
+}
+
+impl ProcessingState {
+    /// Process a T-Code command. Updates the axis cache, then applies the
+    /// value to any channel whose intensity source is linked to that axis.
+    /// Channels are independent — if A and B both link to the same axis,
+    /// they both receive the value.
     pub fn process_command(&mut self, cmd: &TCodeCommand) {
         let now = cmd.received_at;
 
-        // Update axis tracking - store ALL axes for parameter modulation
-        self.axis_values.insert(
-            cmd.axis.clone(),
-            AxisState {
-                value: cmd.value,
-                timestamp: now,
-                has_data: true,
-            },
-        );
+        // Append-with-history so per-slot resolvers can walk the axis timeline.
+        self.axis_values
+            .entry(cmd.axis.clone())
+            .or_default()
+            .update(cmd.value, now);
 
-        // Check if this axis should affect Channel A intensity
-        if self.should_apply_to_channel_a(&cmd.axis) {
-            self.apply_to_channel_a(cmd.value, cmd.interval_ms, now);
-
-            // For mirror modes, also update B's state so it has data
-            // (the actual interplay pattern is applied at output time)
-            match self.options.channel_interplay {
-                ChannelInterplay::Mirror => {
-                    self.apply_to_channel_b(cmd.value, cmd.interval_ms, now);
-                }
-                ChannelInterplay::MirrorInverted => {
-                    self.apply_to_channel_b(1.0 - cmd.value, cmd.interval_ms, now);
-                }
-                _ => {
-                    // Other interplay modes derive B from A at output time
-                }
+        for id in ChannelId::ALL {
+            if self.channel(id).intensity_linked_to(&cmd.axis) {
+                self.channel_mut(id)
+                    .apply_tcode(cmd.value, cmd.interval_ms, now);
             }
         }
-
-        // Check if this axis should affect Channel B intensity
-        if self.should_apply_to_channel_b(&cmd.axis) {
-            self.apply_to_channel_b(cmd.value, cmd.interval_ms, now);
-        }
     }
 
-    /// Check if a T-Code axis should control Channel A intensity
-    fn should_apply_to_channel_a(&self, axis: &str) -> bool {
-        use crate::modulation::ParameterSourceType;
-
-        // Only apply if intensity is linked to this axis
-        if self.channel_a_config.intensity.source_type == ParameterSourceType::Linked {
-            if let Some(source_axis) = &self.channel_a_config.intensity.source_axis {
-                source_axis == axis
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
-    /// Check if a T-Code axis should control Channel B intensity
-    fn should_apply_to_channel_b(&self, axis: &str) -> bool {
-        use crate::modulation::ParameterSourceType;
-
-        // Don't apply if channel interplay derives B from A
-        if self.options.channel_interplay.derives_b_from_a() {
-            return false;
-        }
-
-        // Only apply if intensity is linked to this axis
-        if self.channel_b_config.intensity.source_type == ParameterSourceType::Linked {
-            if let Some(source_axis) = &self.channel_b_config.intensity.source_axis {
-                return source_axis == axis;
-            }
-        }
-        false
-    }
-
-    /// Apply command to channel A (both V1 and V2 states)
-    /// Applies midpoint and curve transformations from channel config
-    /// NOTE: Range mapping is NOT applied here - it's done in device.rs scale_intensity()
-    /// to avoid double-application of range limits
-    fn apply_to_channel_a(&mut self, value: f64, interval_ms: Option<u32>, timestamp: u64) {
-        use crate::modulation::apply_midpoint;
-
-        // Apply midpoint transformation if enabled (before curve)
-        let midpoint_value = if self.channel_a_config.intensity.midpoint.unwrap_or(false) {
-            apply_midpoint(value)
-        } else {
-            value
-        };
-
-        // Apply curve transformation from channel config
-        let curve = &self.channel_a_config.intensity.curve;
-        let strength = self
-            .channel_a_config
-            .intensity
-            .curve_strength
-            .unwrap_or(2.0);
-        let curved_value = apply_curve(midpoint_value, curve, strength);
-
-        // Convert to device units (0-200) WITHOUT range mapping
-        // Range mapping is applied in device.rs scale_intensity() to avoid double-application
-        let intensity_u8 = (curved_value * 200.0).round().clamp(0.0, 200.0) as u8;
-
-        // V1: Queue-based (uses the curved value for its own processing)
-        self.v1_channel_a.apply_command(curved_value, interval_ms);
-
-        // V2: Interpolation-based
-        self.v2_channel_a
-            .set_target(intensity_u8, interval_ms.unwrap_or(0), timestamp);
-        self.downsampler_a.add_sample(intensity_u8, timestamp);
-
-        // V3: Predictive/Lookahead-based - buffer command for future processing
-        self.v3_channel_a.buffer_command(intensity_u8, timestamp);
-    }
-
-    /// Apply command to channel B (both V1 and V2 states)
-    /// Applies midpoint and curve transformations from channel config
-    /// NOTE: Range mapping is NOT applied here - it's done in device.rs scale_intensity()
-    /// to avoid double-application of range limits
-    fn apply_to_channel_b(&mut self, value: f64, interval_ms: Option<u32>, timestamp: u64) {
-        use crate::modulation::apply_midpoint;
-
-        // Apply midpoint transformation if enabled (before curve)
-        let midpoint_value = if self.channel_b_config.intensity.midpoint.unwrap_or(false) {
-            apply_midpoint(value)
-        } else {
-            value
-        };
-
-        // Apply curve transformation from channel config
-        let curve = &self.channel_b_config.intensity.curve;
-        let strength = self
-            .channel_b_config
-            .intensity
-            .curve_strength
-            .unwrap_or(2.0);
-        let curved_value = apply_curve(midpoint_value, curve, strength);
-
-        // Convert to device units (0-200) WITHOUT range mapping
-        // Range mapping is applied in device.rs scale_intensity() to avoid double-application
-        let intensity_u8 = (curved_value * 200.0).round().clamp(0.0, 200.0) as u8;
-
-        // V1: Queue-based (uses the curved value for its own processing)
-        self.v1_channel_b.apply_command(curved_value, interval_ms);
-
-        // V2: Interpolation-based
-        self.v2_channel_b
-            .set_target(intensity_u8, interval_ms.unwrap_or(0), timestamp);
-        self.downsampler_b.add_sample(intensity_u8, timestamp);
-
-        // V3: Predictive/Lookahead-based - buffer command for future processing
-        self.v3_channel_b.buffer_command(intensity_u8, timestamp);
-    }
-
-    /// Get the next waveform data for both channels (called at 10Hz)
+    /// Get the next waveform data for both channels (called at 10Hz).
+    /// Output priority per channel: Buttplug pipeline > static source > engine.
     pub fn get_next_waveform_data(&mut self) -> (WaveformData, WaveformData) {
         use crate::modulation::ParameterSourceType;
 
@@ -1439,272 +1521,109 @@ impl ProcessingState {
         let now_instant = Instant::now();
         let dt_ms = 100u32; // 10Hz tick rate = 100ms per tick
 
-        // Check if Buttplug input is active and should be processed
         let has_buttplug = self.has_buttplug_input();
-        let a_has_bp_links = self.buttplug_link_config_a.has_any_links();
-        let b_has_bp_links = self.buttplug_link_config_b.has_any_links();
+        let a_has_bp_links = self.channel(ChannelId::A).buttplug_link.has_any_links();
+        let b_has_bp_links = self.channel(ChannelId::B).buttplug_link.has_any_links();
 
-        // DEBUG: Log Buttplug pipeline status
         if has_buttplug || a_has_bp_links || b_has_bp_links {
             println!("[Buttplug Pipeline] has_buttplug={}, a_has_links={}, b_has_links={}, features={:?}, linear_cmds={:?}, pos_dur_feature_a={:?}",
                 has_buttplug, a_has_bp_links, b_has_bp_links,
                 self.buttplug_features.keys().collect::<Vec<_>>(),
                 self.buttplug_linear_commands.keys().collect::<Vec<_>>(),
-                self.buttplug_link_config_a.pos_dur_feature);
+                self.channel(ChannelId::A).buttplug_link.pos_dur_feature);
         }
 
-        // Process Buttplug pipeline if active
-        let bp_intensity_a = if has_buttplug && a_has_bp_links {
+        // Run Buttplug pipeline per channel if links are configured.
+        // Features are snapshotted ONCE so the second call sees the same input.
+        let bp_intensities: [Option<u8>; 2] = if has_buttplug {
             let features = self.get_buttplug_feature_values();
-            let output = process_buttplug_pipeline(
-                &mut self.buttplug_channel_state_a,
-                &features,
-                &self.buttplug_link_config_a,
-                now_instant,
-                dt_ms,
-            );
-            let intensity = (output * 200.0).round().clamp(0.0, 200.0) as u8;
-            println!(
-                "[Buttplug Pipeline] Channel A: pipeline_output={:.3}, intensity={}",
-                output, intensity
-            );
-            Some(intensity)
-        } else {
-            None
-        };
-
-        let bp_intensity_b = if has_buttplug && b_has_bp_links {
-            let features = self.get_buttplug_feature_values();
-            let output = process_buttplug_pipeline(
-                &mut self.buttplug_channel_state_b,
-                &features,
-                &self.buttplug_link_config_b,
-                now_instant,
-                dt_ms,
-            );
-            Some((output * 200.0).round().clamp(0.0, 200.0) as u8)
-        } else {
-            None
-        };
-
-        // Clear linear commands after processing (they're one-shot)
-        if has_buttplug {
+            let mut out = [None, None];
+            for id in ChannelId::ALL {
+                let ch = self.channel_mut(id);
+                if !ch.buttplug_link.has_any_links() {
+                    continue;
+                }
+                let output = process_buttplug_pipeline(
+                    &mut ch.buttplug_state,
+                    &features,
+                    &ch.buttplug_link,
+                    now_instant,
+                    dt_ms,
+                );
+                let intensity = (output * 200.0).round().clamp(0.0, 200.0) as u8;
+                if id == ChannelId::A {
+                    println!(
+                        "[Buttplug Pipeline] Channel A: pipeline_output={:.3}, intensity={}",
+                        output, intensity
+                    );
+                }
+                out[id as usize] = Some(intensity);
+            }
             self.buttplug_linear_commands.clear();
-        }
+            out
+        } else {
+            [None, None]
+        };
 
-        // Check if intensity sources are static - if so, use static values directly
-        let a_is_static =
-            self.channel_a_config.intensity.source_type == ParameterSourceType::Static;
-        let b_is_static =
-            self.channel_b_config.intensity.source_type == ParameterSourceType::Static;
+        let engine = self.options.processing_engine;
+        let peak_fill = self.options.peak_fill;
 
-        // Helper to create 4-value array from single intensity
         let intensity_to_values = |i: u8| -> [u8; 4] { [i, i, i, i] };
 
-        // Determine channel A values - Buttplug takes priority when active
-        let values_a = if let Some(bp_val) = bp_intensity_a {
-            intensity_to_values(bp_val)
-        } else if a_is_static {
-            let static_val = self.channel_a_config.intensity.static_value.unwrap_or(0.0);
-            intensity_to_values(static_val.round().clamp(0.0, 200.0) as u8)
-        } else {
-            match self.options.processing_engine {
-                ProcessingEngineType::V1 => self.v1_channel_a.get_next_four(),
-                ProcessingEngineType::V2Smooth => {
-                    if self
-                        .downsampler_a
-                        .has_samples_in_window(window_start, now_ms)
-                    {
-                        self.downsampler_a.downsample_smooth(window_start, now_ms)
-                    } else {
-                        self.v2_channel_a.get_next_four_values(window_start)
-                    }
-                }
-                ProcessingEngineType::V2Balanced => {
-                    if self
-                        .downsampler_a
-                        .has_samples_in_window(window_start, now_ms)
-                    {
-                        self.downsampler_a.downsample_balanced(window_start, now_ms)
-                    } else {
-                        self.v2_channel_a.get_next_four_values(window_start)
-                    }
-                }
-                ProcessingEngineType::V2Detailed => {
-                    if self
-                        .downsampler_a
-                        .has_samples_in_window(window_start, now_ms)
-                    {
-                        self.downsampler_a.downsample_detailed(window_start, now_ms)
-                    } else {
-                        self.v2_channel_a.get_next_four_values(window_start)
-                    }
-                }
-                ProcessingEngineType::V2Dynamic => {
-                    if self
-                        .downsampler_a
-                        .has_samples_in_window(window_start, now_ms)
-                    {
-                        self.downsampler_a.downsample_dynamic(window_start, now_ms)
-                    } else {
-                        self.v2_channel_a.get_next_four_values(window_start)
-                    }
-                }
-                ProcessingEngineType::V3Predictive => {
-                    self.v3_channel_a.get_next_four_values(now_ms)
-                }
+        // Compute per-channel raw values. Static sources bypass the engine.
+        let raw: [[u8; 4]; 2] = std::array::from_fn(|i| {
+            if let Some(bp_val) = bp_intensities[i] {
+                return intensity_to_values(bp_val);
             }
-        };
-
-        // Determine channel B values - Buttplug takes priority when active
-        let values_b = if let Some(bp_val) = bp_intensity_b {
-            intensity_to_values(bp_val)
-        } else if b_is_static {
-            let static_val = self.channel_b_config.intensity.static_value.unwrap_or(0.0);
-            intensity_to_values(static_val.round().clamp(0.0, 200.0) as u8)
-        } else {
-            match self.options.processing_engine {
-                ProcessingEngineType::V1 => self.v1_channel_b.get_next_four(),
-                ProcessingEngineType::V2Smooth => {
-                    if self
-                        .downsampler_b
-                        .has_samples_in_window(window_start, now_ms)
-                    {
-                        self.downsampler_b.downsample_smooth(window_start, now_ms)
-                    } else {
-                        self.v2_channel_b.get_next_four_values(window_start)
-                    }
-                }
-                ProcessingEngineType::V2Balanced => {
-                    if self
-                        .downsampler_b
-                        .has_samples_in_window(window_start, now_ms)
-                    {
-                        self.downsampler_b.downsample_balanced(window_start, now_ms)
-                    } else {
-                        self.v2_channel_b.get_next_four_values(window_start)
-                    }
-                }
-                ProcessingEngineType::V2Detailed => {
-                    if self
-                        .downsampler_b
-                        .has_samples_in_window(window_start, now_ms)
-                    {
-                        self.downsampler_b.downsample_detailed(window_start, now_ms)
-                    } else {
-                        self.v2_channel_b.get_next_four_values(window_start)
-                    }
-                }
-                ProcessingEngineType::V2Dynamic => {
-                    if self
-                        .downsampler_b
-                        .has_samples_in_window(window_start, now_ms)
-                    {
-                        self.downsampler_b.downsample_dynamic(window_start, now_ms)
-                    } else {
-                        self.v2_channel_b.get_next_four_values(window_start)
-                    }
-                }
-                ProcessingEngineType::V3Predictive => {
-                    self.v3_channel_b.get_next_four_values(now_ms)
-                }
+            let ch = &mut self.channels[i];
+            if ch.config.intensity.source_type == ParameterSourceType::Static {
+                let static_val = ch.config.intensity.static_value.unwrap_or(0.0);
+                return intensity_to_values(static_val.round().clamp(0.0, 200.0) as u8);
             }
-        };
+            ch.next_raw_values(engine, window_start, now_ms, peak_fill)
+        });
 
-        // Apply channel interplay pattern (using history for delay-based modes)
-        let (final_a, final_b) = apply_interplay(
-            values_a,
-            values_b,
-            self.options.channel_interplay,
-            &self.a_history,
-            self.options.chase_delay_ms,
-        );
+        let mut wf_a = WaveformData::from_values(raw[0]);
+        let mut wf_b = WaveformData::from_values(raw[1]);
 
-        // Add current A values to history (for chase modes)
-        // Keep history limited to 24 slots (600ms)
-        for &val in &values_a {
-            self.a_history.push_back(val);
-        }
-        while self.a_history.len() > 24 {
-            self.a_history.pop_front();
+        // V2Sustained: feed each channel's per-packet max into a 200ms
+        // rolling peak tracker, then override the master intensity with the
+        // recent peak. Sub-slot waveform shape (waveform_intensity) is
+        // untouched, so pulses still oscillate per-slot — only the channel
+        // master volume is held up between fast input swings.
+        if engine == ProcessingEngineType::V2Sustained {
+            const PEAK_HOLD_MS: u64 = 200;
+            self.channels[0].peak_hold.observe(now_ms, wf_a.intensity);
+            self.channels[1].peak_hold.observe(now_ms, wf_b.intensity);
+            wf_a.intensity = self.channels[0]
+                .peak_hold
+                .peak_in_last_ms(now_ms, PEAK_HOLD_MS);
+            wf_b.intensity = self.channels[1]
+                .peak_hold
+                .peak_in_last_ms(now_ms, PEAK_HOLD_MS);
         }
 
-        (
-            WaveformData::from_values(final_a),
-            WaveformData::from_values(final_b),
-        )
-    }
-
-    /// Get V2 raw values with support for static intensity sources
-    fn get_v2_raw_values_with_static<F>(
-        &self,
-        window_start: u64,
-        window_end: u64,
-        a_is_static: bool,
-        b_is_static: bool,
-        downsample_fn: F,
-    ) -> ([u8; 4], [u8; 4])
-    where
-        F: Fn(&Downsampler, u64, u64) -> [u8; 4],
-    {
-        // Channel A - use static value if configured (already in 0-200 range)
-        let values_a = if a_is_static {
-            let static_val = self.channel_a_config.intensity.static_value.unwrap_or(0.0);
-            let intensity = static_val.round().clamp(0.0, 200.0) as u8;
-            [intensity, intensity, intensity, intensity]
-        } else if self
-            .downsampler_a
-            .has_samples_in_window(window_start, window_end)
-        {
-            downsample_fn(&self.downsampler_a, window_start, window_end)
-        } else {
-            self.v2_channel_a.get_next_four_values(window_start)
-        };
-
-        // Channel B - use static value if configured (already in 0-200 range)
-        let values_b = if b_is_static {
-            let static_val = self.channel_b_config.intensity.static_value.unwrap_or(0.0);
-            let intensity = static_val.round().clamp(0.0, 200.0) as u8;
-            [intensity, intensity, intensity, intensity]
-        } else if self
-            .downsampler_b
-            .has_samples_in_window(window_start, window_end)
-        {
-            downsample_fn(&self.downsampler_b, window_start, window_end)
-        } else {
-            self.v2_channel_b.get_next_four_values(window_start)
-        };
-
-        (values_a, values_b)
+        (wf_a, wf_b)
     }
 
     /// Get current intensity values (for UI display)
     pub fn get_current_intensities(&self) -> (f64, f64) {
-        match self.options.processing_engine {
-            ProcessingEngineType::V1 => {
-                let a = self.v1_channel_a.current_intensity as f64 / 200.0;
-                let b = self.v1_channel_b.current_intensity as f64 / 200.0;
-                (a, b)
-            }
-            _ => {
-                let now = current_time_ms();
-                let a = self.v2_channel_a.get_value_at(now) as f64 / 200.0;
-                let b = self.v2_channel_b.get_value_at(now) as f64 / 200.0;
-                (a, b)
-            }
-        }
+        let engine = self.options.processing_engine;
+        let now = current_time_ms();
+        let a = self
+            .channel(ChannelId::A)
+            .current_intensity_normalized(engine, now);
+        let b = self
+            .channel(ChannelId::B)
+            .current_intensity_normalized(engine, now);
+        (a, b)
     }
 
     /// Stop all channels
     pub fn stop(&mut self) {
-        self.v1_channel_a.reset();
-        self.v1_channel_b.reset();
-        self.v2_channel_a.reset();
-        self.v2_channel_b.reset();
-        self.v3_channel_a.reset();
-        self.v3_channel_b.reset();
-        self.downsampler_a.clear();
-        self.downsampler_b.clear();
+        for id in ChannelId::ALL {
+            self.channel_mut(id).reset_engines();
+        }
     }
 
     /// Update output options
@@ -1731,6 +1650,15 @@ impl ProcessingState {
         self.buttplug_features.clear();
         self.buttplug_linear_commands.clear();
         self.buttplug_rotate_directions.clear();
+    }
+
+    /// Look up a cached T-Code axis value. Returns the last `value` seen
+    /// (0.0-1.0) or `None` if the axis has never been reported.
+    pub fn get_axis_value(&self, axis: &str) -> Option<f64> {
+        self.axis_values
+            .get(axis)
+            .filter(|s| s.has_data)
+            .map(|s| s.value)
     }
 
     /// Get all Buttplug feature values
@@ -1779,29 +1707,19 @@ impl ProcessingState {
 
     /// Update the Buttplug link configuration for a channel's intensity parameter
     pub fn set_buttplug_link_config(&mut self, channel: char, config: ButtplugLinkConfig) {
-        match channel {
-            'A' | 'a' => {
-                self.buttplug_link_config_a = config;
-            }
-            'B' | 'b' => {
-                self.buttplug_link_config_b = config;
-            }
-            _ => {
-                println!(
-                    "[ProcessingState] Unknown channel for Buttplug link config: {}",
-                    channel
-                );
-            }
+        match ChannelId::from_char(channel) {
+            Some(id) => self.channel_mut(id).buttplug_link = config,
+            None => println!(
+                "[ProcessingState] Unknown channel for Buttplug link config: {}",
+                channel
+            ),
         }
     }
 
     /// Get the Buttplug link configuration for a channel
     pub fn get_buttplug_link_config(&self, channel: char) -> &ButtplugLinkConfig {
-        match channel {
-            'A' | 'a' => &self.buttplug_link_config_a,
-            'B' | 'b' => &self.buttplug_link_config_b,
-            _ => &self.buttplug_link_config_a, // Default to A
-        }
+        let id = ChannelId::from_char(channel).unwrap_or(ChannelId::A);
+        &self.channel(id).buttplug_link
     }
 }
 
@@ -1833,6 +1751,7 @@ pub fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modulation::{CurveType, ParameterSource};
 
     #[test]
     fn test_parse_tcode_simple() {
@@ -1924,5 +1843,232 @@ mod tests {
         let axis_value = state.get_axis_value("V1");
         assert!(axis_value.is_some());
         assert!((axis_value.unwrap() - 0.75).abs() < 0.01);
+    }
+
+    // ========================================================================
+    // ChannelId + PeakFillStrategy
+    // ========================================================================
+
+    #[test]
+    fn test_channel_id_index_and_roundtrip() {
+        assert_eq!(ChannelId::A as usize, 0);
+        assert_eq!(ChannelId::B as usize, 1);
+        assert_eq!(ChannelId::ALL, [ChannelId::A, ChannelId::B]);
+
+        assert_eq!(ChannelId::from_char('A'), Some(ChannelId::A));
+        assert_eq!(ChannelId::from_char('a'), Some(ChannelId::A));
+        assert_eq!(ChannelId::from_char('B'), Some(ChannelId::B));
+        assert_eq!(ChannelId::from_char('b'), Some(ChannelId::B));
+        assert_eq!(ChannelId::from_char('X'), None);
+
+        assert_eq!(ChannelId::from_str("A"), Some(ChannelId::A));
+        assert_eq!(ChannelId::from_str("b"), Some(ChannelId::B));
+        assert_eq!(ChannelId::from_str("nope"), None);
+
+        assert_eq!(ChannelId::A.as_char(), 'A');
+        assert_eq!(ChannelId::B.as_char(), 'B');
+
+        assert_eq!(ChannelId::A.default_axis(), "L0");
+        assert_eq!(ChannelId::B.default_axis(), "R2");
+    }
+
+    #[test]
+    fn test_peak_fill_strategy_roundtrip() {
+        assert_eq!(PeakFillStrategy::default(), PeakFillStrategy::Forward);
+        assert_eq!(PeakFillStrategy::from_str("legacy"), PeakFillStrategy::Legacy);
+        assert_eq!(PeakFillStrategy::from_str("v1"), PeakFillStrategy::Legacy);
+        assert_eq!(PeakFillStrategy::from_str("forward"), PeakFillStrategy::Forward);
+        assert_eq!(PeakFillStrategy::from_str("v2"), PeakFillStrategy::Forward);
+        assert_eq!(PeakFillStrategy::from_str("garbage"), PeakFillStrategy::default());
+
+        assert_eq!(PeakFillStrategy::Legacy.as_str(), "legacy");
+        assert_eq!(PeakFillStrategy::Forward.as_str(), "forward");
+    }
+
+    // ========================================================================
+    // Channel behavior
+    // ========================================================================
+
+    #[test]
+    fn test_channel_defaults_per_id() {
+        let a = Channel::new(ChannelId::A);
+        let b = Channel::new(ChannelId::B);
+
+        // A defaults to L0, B to R2 (preserved asymmetry)
+        assert_eq!(a.config.intensity.source_axis.as_deref(), Some("L0"));
+        assert_eq!(b.config.intensity.source_axis.as_deref(), Some("R2"));
+    }
+
+    #[test]
+    fn test_channel_intensity_linked_to() {
+        let ch = Channel::new(ChannelId::A);
+        // A defaults linked to L0
+        assert!(ch.intensity_linked_to("L0"));
+        assert!(!ch.intensity_linked_to("R2"));
+        assert!(!ch.intensity_linked_to("V1"));
+
+        // Static source never matches any axis
+        let mut static_ch = Channel::new(ChannelId::A);
+        static_ch.config.intensity = ParameterSource::static_source(100.0);
+        assert!(!static_ch.intensity_linked_to("L0"));
+    }
+
+    #[test]
+    fn test_channel_apply_tcode_feeds_all_engines() {
+        let mut ch = Channel::new(ChannelId::A);
+        ch.apply_tcode(0.5, None, 1000);
+
+        // V1 queue should have been populated via apply_command (immediate set)
+        assert!(!ch.v1.ramp_queue.is_empty() || ch.v1.current_intensity > 0);
+
+        // V2 target should reflect curved value × 200
+        assert_eq!(ch.v2.target_value, 100);
+
+        // Downsampler should contain the sample
+        assert!(ch.downsampler.has_samples_in_window(1000, 1001));
+
+        // V3 command buffer should have one entry
+        assert_eq!(ch.v3.buffer_size(), 1);
+    }
+
+    #[test]
+    fn test_channel_reset_engines_clears_state() {
+        let mut ch = Channel::new(ChannelId::A);
+        ch.apply_tcode(1.0, None, 1000);
+        assert_eq!(ch.v2.target_value, 200);
+
+        ch.reset_engines();
+        assert_eq!(ch.v2.target_value, 0);
+        assert_eq!(ch.v1.current_intensity, 0);
+        assert_eq!(ch.v3.buffer_size(), 0);
+        // Config untouched by reset
+        assert_eq!(ch.config.intensity.source_axis.as_deref(), Some("L0"));
+    }
+
+    // ========================================================================
+    // process_command dispatch (core state-sync invariant)
+    // ========================================================================
+
+    #[test]
+    fn test_process_command_routes_to_linked_channel_only() {
+        let mut state = ProcessingState::default();
+        // Defaults: A ← L0, B ← R2.
+        let cmd = TCodeCommand {
+            axis: "L0".to_string(),
+            value: 0.8,
+            interval_ms: None,
+            received_at: 1000,
+        };
+        state.process_command(&cmd);
+
+        // A was linked to L0 → v2 target set to curved 0.8 × 200 = 160.
+        assert_eq!(state.channel(ChannelId::A).v2.target_value, 160);
+        // B was linked to R2, not L0 → untouched.
+        assert_eq!(state.channel(ChannelId::B).v2.target_value, 0);
+    }
+
+    #[test]
+    fn test_process_command_same_axis_hits_both_when_linked() {
+        let mut state = ProcessingState::default();
+        // Re-link B's intensity to L0 so both channels share the axis.
+        state.channel_mut(ChannelId::B).config.intensity =
+            ParameterSource::linked_source("L0", 0.0, 200.0, CurveType::Linear);
+
+        let cmd = TCodeCommand {
+            axis: "L0".to_string(),
+            value: 0.5,
+            interval_ms: None,
+            received_at: 1000,
+        };
+        state.process_command(&cmd);
+
+        assert_eq!(state.channel(ChannelId::A).v2.target_value, 100);
+        assert_eq!(state.channel(ChannelId::B).v2.target_value, 100);
+    }
+
+    #[test]
+    fn test_process_command_ignored_when_no_channel_linked() {
+        let mut state = ProcessingState::default();
+        let cmd = TCodeCommand {
+            axis: "V2".to_string(),
+            value: 1.0,
+            interval_ms: None,
+            received_at: 1000,
+        };
+        state.process_command(&cmd);
+
+        // Neither channel linked to V2 — no engine side-effects.
+        assert_eq!(state.channel(ChannelId::A).v2.target_value, 0);
+        assert_eq!(state.channel(ChannelId::B).v2.target_value, 0);
+        // But axis value IS cached (for later resolve_parameter lookups).
+        assert_eq!(state.get_axis_value("V2"), Some(1.0));
+    }
+
+    // ========================================================================
+    // downsample_detailed: v1 (cascade) vs v2 (forward-fill) divergence
+    // ========================================================================
+
+    #[test]
+    fn test_downsample_detailed_v1_vs_v2_empty_bucket_handling() {
+        // Two samples in a 100ms window: a low value in bucket 0 and a peak
+        // in bucket 3. Buckets 1 and 2 are empty. This is the fixture that
+        // exposes the v1/v2 divergence — a single-sample window gets
+        // short-circuited earlier in the function, so 2+ samples are required.
+        let ws: u64 = 0;
+        let we: u64 = 100;
+
+        let mut ds = Downsampler::default();
+        ds.last_value = 0;
+        ds.samples.push_back(Sample { timestamp: ws + 5,  value: 20 });
+        ds.samples.push_back(Sample { timestamp: ws + 80, value: 200 });
+
+        // v1 (cascade back-fill): empty buckets 1 & 2 inherit bucket 0 = 20.
+        // Peak at bucket 3 survives, but the window MAX-driven device
+        // intensity is pulled down because only slot 3 shows the peak.
+        let v1 = ds.downsample_detailed_v1(ws, we);
+        assert_eq!(v1, [20, 20, 20, 200]);
+
+        // v2 (forward-fill): empty buckets 1 & 2 inherit bucket 3 = 200.
+        // Peak gets spread across more slots → stronger perceived intensity.
+        let v2 = ds.downsample_detailed_v2(ws, we);
+        assert_eq!(v2, [20, 200, 200, 200]);
+
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn test_downsample_detailed_dispatch_matches_variant() {
+        let ws: u64 = 0;
+        let we: u64 = 100;
+        let mut ds = Downsampler::default();
+        ds.samples.push_back(Sample { timestamp: ws + 5,  value: 20 });
+        ds.samples.push_back(Sample { timestamp: ws + 80, value: 200 });
+
+        let legacy = ds.downsample_detailed(ws, we, PeakFillStrategy::Legacy);
+        let forward = ds.downsample_detailed(ws, we, PeakFillStrategy::Forward);
+        assert_eq!(legacy, ds.downsample_detailed_v1(ws, we));
+        assert_eq!(forward, ds.downsample_detailed_v2(ws, we));
+        assert_ne!(legacy, forward, "v1 and v2 must differ on this fixture");
+    }
+
+    #[test]
+    fn test_downsample_detailed_preserves_peak_in_middle_bucket() {
+        // Peak in bucket 2, stable low values elsewhere. Both variants should
+        // preserve it since the peak bucket itself is non-empty.
+        let ws: u64 = 0;
+        let we: u64 = 100;
+        let mut ds = Downsampler::default();
+        ds.samples.push_back(Sample { timestamp: ws + 5, value: 50 });
+        ds.samples.push_back(Sample { timestamp: ws + 30, value: 50 });
+        ds.samples.push_back(Sample { timestamp: ws + 60, value: 180 });
+        ds.samples.push_back(Sample { timestamp: ws + 90, value: 50 });
+        ds.last_value = 50;
+
+        let v1 = ds.downsample_detailed_v1(ws, we);
+        let v2 = ds.downsample_detailed_v2(ws, we);
+
+        // Bucket 2 MAX = 180 in both variants.
+        assert_eq!(v1[2], 180);
+        assert_eq!(v2[2], 180);
     }
 }

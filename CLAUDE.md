@@ -57,7 +57,7 @@ src-tauri/                  # Backend (Rust)
 npm install          # Install dependencies
 npm run tauri:dev    # Run development build (Vite + Tauri)
 npm run tauri:build  # Production build (auto-bumps patch version)
-npm run dev          # Frontend only (http://localhost:1420)
+npm run dev          # Frontend only (http://localhost:1421)
 ```
 
 ## Key Concepts

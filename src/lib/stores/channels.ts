@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { writable, type Writable } from 'svelte/store';
 import type { ParameterSource } from '$lib/types/modulation.js';
 
 export interface ChannelParams {
@@ -23,85 +23,56 @@ export interface RangeParams {
   maximum: number;
 }
 
-export const channelA = writable<ChannelParams>({
-  frequency: 100,         // 100Hz (10ms period) - balanced, distinct pulses
-  frequencyBalance: 128,  // Neutral - balanced high/low frequency feeling
-  intensityBalance: 128,  // Neutral - balanced pulse width
-  period: 10,
-  rangeMin: 10,
-  rangeMax: 20,
+export type ChannelLetter = 'A' | 'B';
 
-  // Default to static sources for balance/frequency
-  frequencySource: {
-    type: 'static',
-    staticValue: 100,
-    rangeMin: 1,
-    rangeMax: 200,
-    curve: 'linear'
-  },
-  frequencyBalanceSource: {
-    type: 'static',
-    staticValue: 128,
-    rangeMin: 0,
-    rangeMax: 255,
-    curve: 'linear'
-  },
-  intensityBalanceSource: {
-    type: 'static',
-    staticValue: 128,
-    rangeMin: 0,
-    rangeMax: 255,
-    curve: 'linear'
-  },
-  // Intensity defaults to linked to L0 (Stroke) for Channel A
-  intensitySource: {
-    type: 'linked',
-    sourceAxis: 'L0',
+// Default axis per channel: A → L0 (Stroke), B → R2 (Pitch)
+export function defaultIntensityAxisFor(letter: ChannelLetter): 'L0' | 'R2' {
+  return letter === 'A' ? 'L0' : 'R2';
+}
+
+export function createChannelStore(letter: ChannelLetter): Writable<ChannelParams> {
+  const intensityAxis = defaultIntensityAxisFor(letter);
+  return writable<ChannelParams>({
+    frequency: 100,         // 100Hz — balanced, distinct pulses
+    frequencyBalance: 128,  // Neutral
+    intensityBalance: 128,  // Neutral
+    period: 10,
     rangeMin: 10,
     rangeMax: 20,
-    curve: 'linear'
-  }
-});
 
-export const channelB = writable<ChannelParams>({
-  frequency: 100,         // 100Hz (10ms period) - balanced, distinct pulses
-  frequencyBalance: 128,  // Neutral - balanced high/low frequency feeling
-  intensityBalance: 128,  // Neutral - balanced pulse width
-  period: 10,
-  rangeMin: 10,
-  rangeMax: 20,
+    frequencySource: {
+      type: 'static',
+      staticValue: 100,
+      rangeMin: 1,
+      rangeMax: 200,
+      curve: 'linear'
+    },
+    frequencyBalanceSource: {
+      type: 'static',
+      staticValue: 128,
+      rangeMin: 0,
+      rangeMax: 255,
+      curve: 'linear'
+    },
+    intensityBalanceSource: {
+      type: 'static',
+      staticValue: 128,
+      rangeMin: 0,
+      rangeMax: 255,
+      curve: 'linear'
+    },
+    intensitySource: {
+      type: 'linked',
+      sourceAxis: intensityAxis,
+      rangeMin: 10,
+      rangeMax: 20,
+      curve: 'linear'
+    }
+  });
+}
 
-  // Default to static sources for balance/frequency
-  frequencySource: {
-    type: 'static',
-    staticValue: 100,
-    rangeMin: 1,
-    rangeMax: 200,
-    curve: 'linear'
-  },
-  frequencyBalanceSource: {
-    type: 'static',
-    staticValue: 128,
-    rangeMin: 0,
-    rangeMax: 255,
-    curve: 'linear'
-  },
-  intensityBalanceSource: {
-    type: 'static',
-    staticValue: 128,
-    rangeMin: 0,
-    rangeMax: 255,
-    curve: 'linear'
-  },
-  // Intensity defaults to linked to R2 (Pitch) for Channel B
-  intensitySource: {
-    type: 'linked',
-    sourceAxis: 'R2',
-    rangeMin: 10,
-    rangeMax: 20,
-    curve: 'linear'
-  }
-});
+export const channelA = createChannelStore('A');
+export const channelB = createChannelStore('B');
 
 export const rangeA = writable<RangeParams>({
   min: 10,

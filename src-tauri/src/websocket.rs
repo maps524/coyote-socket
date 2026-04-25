@@ -7,33 +7,26 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use crate::emit_axis_update;
 use crate::processing::{
-    get_processing_state, parse_tcode, ChannelInterplay, OutputOptions, ProcessingEngineType,
-    WaveformData,
+    get_processing_state, parse_tcode, ChannelId, OutputOptions, PeakFillStrategy,
+    ProcessingEngineType, WaveformData,
 };
 
 /// Update the output options from frontend
-pub async fn set_output_options(
-    interplay: Option<String>,
-    engine: Option<String>,
-    chase_delay_ms: Option<u32>,
-) {
+pub async fn set_output_options(engine: Option<String>, peak_fill: Option<String>) {
     let state = get_processing_state().await;
     let mut state_guard = state.write().await;
-
-    let interplay_mode = interplay
-        .map(|i| ChannelInterplay::from_str(&i))
-        .unwrap_or(state_guard.options.channel_interplay);
 
     let engine_type = engine
         .map(|e| ProcessingEngineType::from_str(&e))
         .unwrap_or(state_guard.options.processing_engine);
 
-    let delay = chase_delay_ms.unwrap_or(state_guard.options.chase_delay_ms);
+    let fill = peak_fill
+        .map(|s| PeakFillStrategy::from_str(&s))
+        .unwrap_or(state_guard.options.peak_fill);
 
     state_guard.set_options(OutputOptions {
-        channel_interplay: interplay_mode,
         processing_engine: engine_type,
-        chase_delay_ms: delay,
+        peak_fill: fill,
     });
 }
 
@@ -363,6 +356,7 @@ async fn handle_tcode_message(message: &str) -> Option<String> {
 
         for cmd in &commands {
             state_guard.process_command(cmd);
+            crate::diagnostic::record_input(&cmd.axis, cmd.value, cmd.interval_ms);
         }
 
         // Get current intensities and axis values for logging and frontend push
@@ -412,85 +406,87 @@ pub struct ResolvedChannelParams {
 /// This resolves frequency, freqBalance, and intBalance from their configured sources
 pub async fn get_resolved_channel_params() -> (ResolvedChannelParams, ResolvedChannelParams) {
     use crate::modulation::{resolve_parameter, ParameterSourceType};
+    use crate::processing::{current_time_ms, ChannelId};
+
+    let state = get_processing_state().await;
+    let state_guard = state.read().await;
+    let now = current_time_ms();
+
+    // Resolve a single channel's parameters — identical logic for A and B, so
+    // we close over `state_guard` once and call it per channel.
+    let resolve_one = |id: ChannelId| -> ResolvedChannelParams {
+        let ch = state_guard.channel(id);
+        let freq = resolve_parameter(
+            &ch.config.frequency,
+            &state_guard.axis_values,
+            &state_guard.no_input_behavior,
+            now,
+            state_guard.no_input_decay_ms,
+        );
+        let freq_bal = resolve_parameter(
+            &ch.config.frequency_balance,
+            &state_guard.axis_values,
+            &state_guard.no_input_behavior,
+            now,
+            state_guard.no_input_decay_ms,
+        );
+        let int_bal = resolve_parameter(
+            &ch.config.intensity_balance,
+            &state_guard.axis_values,
+            &state_guard.no_input_behavior,
+            now,
+            state_guard.no_input_decay_ms,
+        );
+        let intensity_is_static = ch.config.intensity.source_type == ParameterSourceType::Static;
+        ResolvedChannelParams {
+            frequency: freq.clamp(1.0, 200.0),
+            freq_balance: freq_bal.clamp(0.0, 255.0) as u8,
+            int_balance: int_bal.clamp(0.0, 255.0) as u8,
+            range_min: ch.config.intensity.range_min as u8,
+            range_max: ch.config.intensity.range_max as u8,
+            intensity_is_static,
+        }
+    };
+
+    let params_a = resolve_one(ChannelId::A);
+    let params_b = resolve_one(ChannelId::B);
+
+    (params_a, params_b)
+}
+
+/// Resolve per-slot frequencies (Hz) for both channels at 25ms intervals
+/// inside the current 100ms window. Each slot walks the axis history at
+/// `window_start + slot*25` so fast axis motion produces true sub-100ms
+/// frequency sweeps instead of four copies of the same value.
+///
+/// Returns `(chan_a_hz, chan_b_hz)` with 4 entries each, already clamped to
+/// the protocol range 1-200 Hz. Callers feed these through
+/// `frequency_to_period` → `convert_period` for the device command.
+pub async fn get_per_slot_frequencies(window_start: u64) -> ([f64; 4], [f64; 4]) {
+    use crate::modulation::resolve_parameter_at_time;
     use crate::processing::current_time_ms;
 
     let state = get_processing_state().await;
     let state_guard = state.read().await;
     let now = current_time_ms();
 
-    // Resolve Channel A parameters
-    let freq_a = resolve_parameter(
-        &state_guard.channel_a_config.frequency,
-        &state_guard.axis_values,
-        &state_guard.no_input_behavior,
-        now,
-        state_guard.no_input_decay_ms,
-    );
-    let freq_bal_a = resolve_parameter(
-        &state_guard.channel_a_config.frequency_balance,
-        &state_guard.axis_values,
-        &state_guard.no_input_behavior,
-        now,
-        state_guard.no_input_decay_ms,
-    );
-    let int_bal_a = resolve_parameter(
-        &state_guard.channel_a_config.intensity_balance,
-        &state_guard.axis_values,
-        &state_guard.no_input_behavior,
-        now,
-        state_guard.no_input_decay_ms,
-    );
-    let a_intensity_static =
-        state_guard.channel_a_config.intensity.source_type == ParameterSourceType::Static;
-    let range_min_a = state_guard.channel_a_config.intensity.range_min;
-    let range_max_a = state_guard.channel_a_config.intensity.range_max;
-
-    // Resolve Channel B parameters
-    let freq_b = resolve_parameter(
-        &state_guard.channel_b_config.frequency,
-        &state_guard.axis_values,
-        &state_guard.no_input_behavior,
-        now,
-        state_guard.no_input_decay_ms,
-    );
-    let freq_bal_b = resolve_parameter(
-        &state_guard.channel_b_config.frequency_balance,
-        &state_guard.axis_values,
-        &state_guard.no_input_behavior,
-        now,
-        state_guard.no_input_decay_ms,
-    );
-    let int_bal_b = resolve_parameter(
-        &state_guard.channel_b_config.intensity_balance,
-        &state_guard.axis_values,
-        &state_guard.no_input_behavior,
-        now,
-        state_guard.no_input_decay_ms,
-    );
-    let b_intensity_static =
-        state_guard.channel_b_config.intensity.source_type == ParameterSourceType::Static;
-    let range_min_b = state_guard.channel_b_config.intensity.range_min;
-    let range_max_b = state_guard.channel_b_config.intensity.range_max;
-
-    let params_a = ResolvedChannelParams {
-        frequency: freq_a.clamp(1.0, 200.0),
-        freq_balance: (freq_bal_a.clamp(0.0, 255.0) as u8),
-        int_balance: (int_bal_a.clamp(0.0, 255.0) as u8),
-        range_min: range_min_a as u8,
-        range_max: range_max_a as u8,
-        intensity_is_static: a_intensity_static,
+    let resolve_slots = |id: ChannelId| -> [f64; 4] {
+        let src = &state_guard.channel(id).config.frequency;
+        std::array::from_fn(|i| {
+            let target = window_start + (i as u64) * 25;
+            resolve_parameter_at_time(
+                src,
+                &state_guard.axis_values,
+                &state_guard.no_input_behavior,
+                now,
+                state_guard.no_input_decay_ms,
+                target,
+            )
+            .clamp(1.0, 200.0)
+        })
     };
 
-    let params_b = ResolvedChannelParams {
-        frequency: freq_b.clamp(1.0, 200.0),
-        freq_balance: (freq_bal_b.clamp(0.0, 255.0) as u8),
-        int_balance: (int_bal_b.clamp(0.0, 255.0) as u8),
-        range_min: range_min_b as u8,
-        range_max: range_max_b as u8,
-        intensity_is_static: b_intensity_static,
-    };
-
-    (params_a, params_b)
+    (resolve_slots(ChannelId::A), resolve_slots(ChannelId::B))
 }
 
 /// Get all axis values with no-input behavior applied
@@ -554,7 +550,7 @@ pub async fn set_detected_protocol(protocol: InputProtocol) {
 }
 
 /// Convert a ParameterSourceSettings (from settings) to ParameterSource (for runtime)
-fn convert_parameter_source(
+pub fn convert_parameter_source(
     source: &crate::settings::ParameterSourceSettings,
 ) -> crate::modulation::ParameterSource {
     use crate::modulation::{CurveType, ParameterSource, ParameterSourceType};
@@ -595,7 +591,7 @@ fn convert_parameter_source(
 }
 
 /// Convert ChannelSettings (from settings) to ChannelConfig (for runtime)
-fn convert_channel_settings(
+pub fn convert_channel_settings(
     settings: &crate::settings::ChannelSettings,
 ) -> crate::modulation::ChannelConfig {
     use crate::modulation::ChannelConfig;
@@ -636,8 +632,12 @@ pub async fn apply_saved_settings_to_processing() {
     let mut state_guard = state.write().await;
     state_guard.no_input_behavior = behavior;
     state_guard.no_input_decay_ms = saved.no_input_decay_ms;
-    state_guard.channel_a_config = channel_a_config;
-    state_guard.channel_b_config = channel_b_config;
+    state_guard.channel_mut(ChannelId::A).config = channel_a_config;
+    state_guard.channel_mut(ChannelId::B).config = channel_b_config;
+
+    // Restore output options so Engine + peak_fill variant survive restart.
+    state_guard.options.processing_engine = all_settings.output.processing_engine;
+    state_guard.options.peak_fill = all_settings.output.peak_fill;
 }
 
 #[cfg(test)]

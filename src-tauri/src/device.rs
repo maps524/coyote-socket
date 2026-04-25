@@ -6,7 +6,7 @@ use crate::emit_waveform_sample;
 use crate::processing::{get_processing_state, ProcessingEngineType};
 use crate::protocol::{
     balance_to_v2_z, convert_period, freq_to_v2_xy, frequency_to_period, generate_b0_command,
-    generate_v2_intensity, generate_v2_waveform,
+    generate_bf_command, generate_v2_intensity, generate_v2_waveform,
 };
 use crate::waveform::WaveformSample;
 use crate::websocket::{get_next_waveform_data, get_resolved_channel_params};
@@ -55,33 +55,37 @@ pub async fn get_last_device_output() -> DeviceOutput {
     storage.read().await.clone()
 }
 
-/// Device parameters set from the frontend
+/// Device parameters snapshot used for HMR recovery + waveform visualization.
+/// Only the runtime values that the frontend needs to restore live here —
+/// range_min/range_max now come from processing state (intensity source).
 #[derive(Debug, Clone)]
 pub struct ChannelParams {
     pub frequency: f64,   // Hz (1-200)
     pub freq_balance: u8, // 0-255
     pub int_balance: u8,  // 0-255
-    pub range_min: u8,    // 0-200
-    pub range_max: u8,    // 0-200
 }
 
 impl Default for ChannelParams {
     fn default() -> Self {
         Self {
-            frequency: 100.0,  // 100Hz (10ms period) - balanced, distinct pulses
-            freq_balance: 128, // Neutral - balanced high/low frequency feeling
-            int_balance: 128,  // Neutral - balanced pulse width
-            range_min: 10,
-            range_max: 20,
+            frequency: 100.0,
+            freq_balance: 128,
+            int_balance: 128,
         }
     }
 }
+
+/// Snapshot of the last BF command payload we sent, so we can skip rewriting
+/// when nothing changed (BLE is expensive + the device persists BF anyway).
+/// `None` after (re)connect forces the next tick to emit BF.
+pub type BfSnapshot = (u8, u8, u8, u8, u8, u8);
 
 /// Global device state
 pub struct DeviceState {
     pub running: AtomicBool,
     pub channel_a_params: RwLock<ChannelParams>,
     pub channel_b_params: RwLock<ChannelParams>,
+    pub last_bf_sent: RwLock<Option<BfSnapshot>>,
 }
 
 impl DeviceState {
@@ -90,8 +94,17 @@ impl DeviceState {
             running: AtomicBool::new(false),
             channel_a_params: RwLock::new(ChannelParams::default()),
             channel_b_params: RwLock::new(ChannelParams::default()),
+            last_bf_sent: RwLock::new(None),
         }
     }
+}
+
+/// Clear BF tracking so the next device tick resends unconditionally.
+/// Call on BLE (re)connect since BF state persists in device flash and may
+/// diverge from what this process last sent.
+pub async fn reset_bf_snapshot() {
+    let state = get_device_state().await;
+    *state.last_bf_sent.write().await = None;
 }
 
 pub static DEVICE_STATE: tokio::sync::OnceCell<Arc<DeviceState>> =
@@ -231,13 +244,19 @@ async fn send_device_update() -> Result<(), String> {
 
     let manager_guard = manager.lock().await;
     let is_connected = manager_guard.is_connected();
+    let diag_active = crate::diagnostic::is_enabled();
     // Get the current engine settings
     let engine_type = {
         let state = get_processing_state().await.read().await;
         state.options.processing_engine
     };
 
-    if !is_connected {
+    // When not connected AND no diagnostic capture is running, take the
+    // cheap path: mark output disconnected and bail without advancing the
+    // engine. While diagnostic is active we run the engine anyway so the
+    // capture mirrors real tick behavior (V1 queue draining, V2 ramp
+    // advancement, etc.) — we just skip the BLE write at the end.
+    if !is_connected && !diag_active {
         // Still update output storage to show disconnected state
         let storage = get_last_output_storage().await;
         let mut output = storage.write().await;
@@ -263,11 +282,20 @@ async fn send_device_update() -> Result<(), String> {
     // This resolves frequency, freqBalance, intBalance with midpoint/curve transformations
     let (params_a, params_b) = get_resolved_channel_params().await;
 
-    // Convert frequency to period
-    let period_a = frequency_to_period(params_a.frequency);
-    let period_b = frequency_to_period(params_b.frequency);
-    let period_a_converted = convert_period(period_a);
-    let period_b_converted = convert_period(period_b);
+    // Per-slot frequency arrays for V3 B0. Window starts 100ms before now so
+    // the 4 slots land at now-100, now-75, now-50, now-25 (matching the axis
+    // history timeline). For V2 we keep the scalar `params_a.frequency`.
+    let window_start_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - 100;
+    let (freq_slots_a_hz, freq_slots_b_hz) =
+        crate::websocket::get_per_slot_frequencies(window_start_ms).await;
+
+    // V2 path uses the scalar `params_a/b.frequency` directly via
+    // `freq_to_v2_xy`; V3 uses the per-slot arrays computed above. No need
+    // for a single-value period conversion anymore.
 
     // Capture all values we need
     let freq_a = params_a.frequency;
@@ -302,7 +330,7 @@ async fn send_device_update() -> Result<(), String> {
     {
         let mut output = storage.write().await;
         output.timestamp = timestamp;
-        output.is_connected = true;
+        output.is_connected = is_connected;
         output.channel_a = ChannelOutput {
             raw_intensity: waveform_a.intensity,
             scaled_intensity: scaled_a,
@@ -337,41 +365,96 @@ async fn send_device_update() -> Result<(), String> {
     };
 
     // Emit to frontend in real-time (push-based)
-    emit_waveform_sample(sample.clone());
+    emit_waveform_sample(sample);
 
-    // Also record for history buffer (used by get_waveform_data command)
-    crate::waveform::record_sample_direct(sample).await;
+    // Diagnostic tick recording (no-op when capture is off). Records the
+    // computed engine output regardless of connection state, so a capture
+    // works without a device hooked up.
+    crate::diagnostic::record_tick(
+        is_connected,
+        scaled_a,
+        scaled_b,
+        waveform_a.waveform_intensity,
+        waveform_b.waveform_intensity,
+        waveform_a.raw_values,
+        waveform_b.raw_values,
+        freq_a,
+        freq_b,
+    );
+
+    // BLE write path requires an actual connection. When running the engine
+    // purely for diagnostic capture, exit before touching Bluetooth.
+    if !is_connected {
+        return Ok(());
+    }
 
     // Get device version (defaulting to V3 just in case)
     let device_version = manager_guard.device_version.unwrap_or(DeviceVersion::V3);
 
     match device_version {
         DeviceVersion::V3 => {
+            // Send BF (balance + soft limits) before B0 whenever the snapshot
+            // changed (includes first tick after connect where snapshot = None).
+            // No rate throttle: DG-LAB docs give no write-frequency limit for
+            // BF. The natural upper bound on write rate is the 10Hz device
+            // tick combined with the frontend's 50ms debounce on slider
+            // changes — effectively ≤10 BF writes/sec during a drag, zero
+            // when idle. Soft limits pinned at 200 since `scale_intensity`
+            // already clamps per-sample in software.
+            let desired_bf: BfSnapshot = (
+                200,
+                200,
+                params_a.freq_balance,
+                params_b.freq_balance,
+                params_a.int_balance,
+                params_b.int_balance,
+            );
+            let device_state_ref = get_device_state().await;
+            let needs_bf = {
+                let last = device_state_ref.last_bf_sent.read().await;
+                last.as_ref() != Some(&desired_bf)
+            };
+            if needs_bf {
+                let bf_cmd = generate_bf_command(
+                    desired_bf.0,
+                    desired_bf.1,
+                    desired_bf.2,
+                    desired_bf.3,
+                    desired_bf.4,
+                    desired_bf.5,
+                );
+                match manager_guard.write_command(&bf_cmd).await {
+                    Ok(_) => {
+                        *device_state_ref.last_bf_sent.write().await = Some(desired_bf);
+                    }
+                    Err(e) => {
+                        println!("[DEBUG] V3 BF Write FAILED: {}", e);
+                        // Don't abort — fall through to B0 so output keeps flowing.
+                    }
+                }
+            }
+
+            // Per-slot period arrays from sub-100ms freq resolution.
+            let slot_periods_a: [u8; 4] =
+                std::array::from_fn(|i| convert_period(frequency_to_period(freq_slots_a_hz[i])));
+            let slot_periods_b: [u8; 4] =
+                std::array::from_fn(|i| convert_period(frequency_to_period(freq_slots_b_hz[i])));
+
             let command = generate_b0_command(
                 3,
                 3,
                 scaled_a,
                 scaled_b,
-                [
-                    period_a_converted,
-                    period_a_converted,
-                    period_a_converted,
-                    period_a_converted,
-                ],
+                slot_periods_a,
                 waveform_a.waveform_intensity,
-                [
-                    period_b_converted,
-                    period_b_converted,
-                    period_b_converted,
-                    period_b_converted,
-                ],
+                slot_periods_b,
                 waveform_b.waveform_intensity,
             );
 
             match manager_guard.write_command(&command).await {
                 Ok(_) => Ok(()),
                 Err(e) => {
-                    println!("[DEBUG] V3 Write FAILED: {}", e);
+                    crate::log_error!("[V3] B0 Write FAILED: {}", e);
                     Err(format!("Write error: {}", e))
                 }
             }
@@ -400,8 +483,12 @@ async fn send_device_update() -> Result<(), String> {
                     // [V2 Detailed Details/Aggressive Mode] - Powerful Explosive Force
                     ProcessingEngineType::V2Detailed => max,
 
-                    // [V2 Dynamic - Dynamic Mode] - Intelligently Preserves the Shaking Sensation
-                    ProcessingEngineType::V2Dynamic => {
+                    // [V2 Dynamic / V2 Sustained] - Intelligently Preserves the Shaking Sensation
+                    // V2Sustained reuses Dynamic's shaping for the V2-hardware
+                    // perceived-intensity coefficient. The sustained part lives
+                    // in the V3-host master `intensity` byte, which V2 hardware
+                    // doesn't read; on V2 hardware the engines feel identical.
+                    ProcessingEngineType::V2Dynamic | ProcessingEngineType::V2Sustained => {
                         let range = max - min;
                         if range > 0.3 {
                             max

@@ -136,12 +136,21 @@ impl ChannelConfig {
     }
 }
 
-/// State tracking for a single T-Code axis
+/// Retention window for per-axis sample history. Slightly wider than the
+/// 100ms output window so per-slot lookups at `ws+0..+75` can always find a
+/// sample at or before the target time, even when input is sparse.
+pub const AXIS_HISTORY_MS: u64 = 500;
+
+/// State tracking for a single T-Code axis. `value`/`timestamp` hold the most
+/// recent sample (cheap hot-path access); `history` preserves timestamped
+/// samples for per-slot lookups (e.g. sub-100ms frequency modulation).
 #[derive(Debug, Clone)]
 pub struct AxisState {
-    pub value: f64,     // 0.0-1.0 normalized
+    pub value: f64,     // 0.0-1.0 normalized (most recent)
     pub timestamp: u64, // When last updated (milliseconds)
     pub has_data: bool, // Has received any data this session
+    /// Ordered-by-time ring of recent samples. Trimmed to AXIS_HISTORY_MS.
+    pub history: std::collections::VecDeque<(u64, f64)>,
 }
 
 impl Default for AxisState {
@@ -150,6 +159,7 @@ impl Default for AxisState {
             value: 0.0,
             timestamp: 0,
             has_data: false,
+            history: std::collections::VecDeque::with_capacity(64),
         }
     }
 }
@@ -158,19 +168,51 @@ impl AxisState {
     /// Create a new axis state with a value
     #[cfg(test)]
     pub fn new(value: f64, timestamp: u64) -> Self {
+        let v = value.clamp(0.0, 1.0);
+        let mut history = std::collections::VecDeque::with_capacity(64);
+        history.push_back((timestamp, v));
         Self {
-            value: value.clamp(0.0, 1.0),
+            value: v,
             timestamp,
             has_data: true,
+            history,
         }
     }
 
-    /// Update the axis value
-    #[cfg(test)]
+    /// Update the axis value and append to history, trimming old samples.
     pub fn update(&mut self, value: f64, timestamp: u64) {
-        self.value = value.clamp(0.0, 1.0);
+        let v = value.clamp(0.0, 1.0);
+        self.value = v;
         self.timestamp = timestamp;
         self.has_data = true;
+        self.history.push_back((timestamp, v));
+        let cutoff = timestamp.saturating_sub(AXIS_HISTORY_MS);
+        while let Some(&(ts, _)) = self.history.front() {
+            if ts < cutoff {
+                self.history.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Look up the axis value at a historical timestamp using nearest-prior
+    /// sample (zero-order hold). Returns the current `value` if the target
+    /// is newer than all samples, or `None` if history is empty.
+    pub fn value_at(&self, target_time: u64) -> Option<f64> {
+        if self.history.is_empty() {
+            return if self.has_data { Some(self.value) } else { None };
+        }
+        // Scan from newest back; first sample with ts <= target wins.
+        let mut best: Option<f64> = None;
+        for &(ts, v) in self.history.iter().rev() {
+            if ts <= target_time {
+                best = Some(v);
+                break;
+            }
+        }
+        // target predates all samples → clamp to oldest available.
+        best.or_else(|| self.history.front().map(|&(_, v)| v))
     }
 }
 
@@ -202,6 +244,61 @@ fn smoothstep(t: f64) -> f64 {
 /// Linear interpolation
 pub fn lerp(min: f64, max: f64, t: f64) -> f64 {
     min + (max - min) * t.clamp(0.0, 1.0)
+}
+
+/// Resolve a parameter source to its value at a specific point in time.
+///
+/// Like `resolve_parameter` but indexes the axis history at `target_time_ms`
+/// instead of using the latest sample. Lets callers compute per-slot values
+/// within a 100ms output window (e.g. for V3 B0's 4-slot frequency array).
+pub fn resolve_parameter_at_time(
+    source: &ParameterSource,
+    axis_values: &HashMap<String, AxisState>,
+    no_input_behavior: &NoInputBehavior,
+    current_time_ms: u64,
+    no_input_decay_ms: u32,
+    target_time_ms: u64,
+) -> f64 {
+    match source.source_type {
+        ParameterSourceType::Static => source.static_value.unwrap_or(0.0),
+        ParameterSourceType::Linked => {
+            let axis = source.source_axis.as_ref();
+            let axis_state = axis.and_then(|a| axis_values.get(a));
+
+            let input = match axis_state {
+                Some(state) if state.has_data => {
+                    // Staleness check is against CURRENT time (not target), so a
+                    // stale axis produces the same no-input response for every
+                    // slot within one tick.
+                    let age_ms = current_time_ms.saturating_sub(state.timestamp);
+                    if age_ms > 1000 {
+                        handle_no_input(
+                            no_input_behavior,
+                            source,
+                            state,
+                            age_ms,
+                            no_input_decay_ms,
+                        )
+                    } else {
+                        state
+                            .value_at(target_time_ms)
+                            .unwrap_or(state.value)
+                    }
+                }
+                _ => handle_no_input_no_state(no_input_behavior, source),
+            };
+
+            let midpoint_value = if source.midpoint.unwrap_or(false) {
+                apply_midpoint(input)
+            } else {
+                input
+            };
+
+            let strength = source.curve_strength.unwrap_or(2.0);
+            let curved = apply_curve(midpoint_value, &source.curve, strength);
+            lerp(source.range_min, source.range_max, curved)
+        }
+    }
 }
 
 /// Resolve a parameter source to its current value

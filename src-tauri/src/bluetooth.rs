@@ -69,7 +69,6 @@ impl BluetoothManager {
             connected_device_address: None,
             write_characteristic: None,
             battery_characteristic: None,
-            // Initialize new field
             device_version: None,
             v2_char_intensity: None,
             v2_char_waveform_a: None,
@@ -370,4 +369,49 @@ pub async fn get_bluetooth_manager(
             Ok(tokio::sync::Mutex::new(manager))
         })
         .await
+}
+
+/// Spawn a background task that reads the battery level every 30 seconds
+/// and emits `battery-changed` to the frontend. The task self-exits the
+/// first time it wakes up and finds the device disconnected, so callers
+/// can invoke this once per connect without tracking lifetimes.
+///
+/// Guarded by a static flag so reconnects within the same session don't
+/// stack multiple monitors — the existing task keeps running across a
+/// disconnect/reconnect cycle as long as a new connection is established
+/// before it next wakes up.
+pub fn start_battery_monitor() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+
+            let manager = match get_bluetooth_manager().await {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            let guard = manager.lock().await;
+            if !guard.is_connected() {
+                break;
+            }
+
+            match guard.read_battery().await {
+                Ok(level) => {
+                    drop(guard);
+                    crate::emit_battery_changed(level);
+                }
+                Err(e) => {
+                    drop(guard);
+                    eprintln!("[BATTERY] Poll read failed: {}", e);
+                }
+            }
+        }
+        RUNNING.store(false, Ordering::SeqCst);
+    });
 }
