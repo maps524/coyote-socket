@@ -664,10 +664,10 @@
     <!-- Track background -->
     <div class="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-3 bg-muted rounded-full"></div>
 
-    <!-- Value highlight (inset by half-thumb to align with thumb travel) -->
+    <!-- Value highlight: anchored to absolute left, fills full track width. -->
     <div
       class="absolute top-1/2 -translate-y-1/2 h-3 rounded-full {channel === 'A' ? 'bg-primary' : 'bg-secondary'}"
-      style="left: 12px; width: calc({(staticValue / max) * 100} * (100% - 24px) / 100);"
+      style="left: 0; width: {(staticValue / max) * 100}%;"
     ></div>
 
     <!-- Static value input -->

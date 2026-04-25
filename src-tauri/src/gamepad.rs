@@ -349,9 +349,13 @@ async fn emit_continuous_axis_actions() {
                         min_mag = m;
                     }
                 }
-                if !any_zero && min_mag > 0.0 {
-                    emit_action_with_magnitude(action, min_mag);
+                if any_zero || min_mag <= 0.0 {
+                    continue;
                 }
+                if combo_superseded(parts, &bindings, &active) {
+                    continue;
+                }
+                emit_action_with_magnitude(action, min_mag);
             }
             _ => {}
         }
@@ -527,6 +531,62 @@ fn combo_has_axis_part(parts: &[ChordPart]) -> bool {
     parts.iter().any(|p| matches!(p, ChordPart::Axis { .. }))
 }
 
+/// Two parts are equivalent if they target the same input. Axis threshold
+/// is compared with a tolerance so a part typed with 0.5 matches another
+/// with 0.5000001 (different floats from JSON round-trip).
+fn parts_equivalent(a: &ChordPart, b: &ChordPart) -> bool {
+    match (a, b) {
+        (ChordPart::Button { index: ai }, ChordPart::Button { index: bi }) => ai == bi,
+        (
+            ChordPart::Axis {
+                index: ai,
+                dir: ad,
+                threshold: at,
+            },
+            ChordPart::Axis {
+                index: bi,
+                dir: bd,
+                threshold: bt,
+            },
+        ) => ai == bi && ad == bd && (at - bt).abs() < 0.001,
+        _ => false,
+    }
+}
+
+/// Returns true if `parts` is a strict subset of some OTHER currently-fully-active
+/// combo in `bindings`. Used to suppress less-specific combos in favor of more
+/// specific ones (e.g. LB + stick suppressed when LB + A + stick is active).
+fn combo_superseded(
+    parts: &[ChordPart],
+    bindings: &GamepadBindings,
+    active: &GamepadActive,
+) -> bool {
+    for (_, other) in bindings.iter_bound() {
+        let other_parts = match other {
+            GamepadBinding::Combo { parts } => parts.as_slice(),
+            _ => continue,
+        };
+        if other_parts.len() <= parts.len() {
+            continue;
+        }
+        // Every part in `parts` must be present in `other_parts`.
+        let is_subset = parts
+            .iter()
+            .all(|p| other_parts.iter().any(|op| parts_equivalent(p, op)));
+        if !is_subset {
+            continue;
+        }
+        // The superset combo must currently be fully active.
+        let all_active = other_parts
+            .iter()
+            .all(|p| part_active(p, &active.buttons, &active.axis_values));
+        if all_active {
+            return true;
+        }
+    }
+    false
+}
+
 /// Evaluate edge-trigger Combo bindings (button-only chords) against current
 /// state. Combos containing any axis part are continuous and handled in
 /// `emit_continuous_axis_actions` instead. Returns actions to fire.
@@ -547,10 +607,13 @@ fn evaluate_combos(active: &mut GamepadActive, bindings: &GamepadBindings) -> Ve
                 .iter()
                 .all(|p| part_active(p, &active.buttons, &active.axis_values));
             let was_armed = active.armed_combos.contains(action);
-            if all_active && !was_armed {
+            // Suppress this combo when a strictly-more-specific combo is also
+            // fully active (e.g. LB+A+stick beats LB+stick).
+            let superseded = all_active && combo_superseded(parts, bindings, active);
+            if all_active && !superseded && !was_armed {
                 fired.push(action.to_string());
                 to_arm.push(action.to_string());
-            } else if !all_active && was_armed {
+            } else if (!all_active || superseded) && was_armed {
                 to_disarm.push(action.to_string());
             }
         }
