@@ -52,16 +52,10 @@
       const newMax = Math.min(src.rangeMax, clamped);
       if (newMin !== src.rangeMin || newMax !== src.rangeMax) {
         const updated = { ...src, rangeMin: newMin, rangeMax: newMax };
+        // App.svelte's reactive watcher on the channel store will pick up
+        // this change and call apply_channel_config with persist=false (and
+        // a debounced persist=true). No direct invoke needed here.
         store.update(s => ({ ...s, intensitySource: updated, rangeMin: newMin, rangeMax: newMax }));
-        try {
-          await invoke('update_parameter_source', {
-            channel,
-            parameter: 'intensity',
-            source: updated
-          });
-        } catch (e) {
-          console.error(`[GeneralTab] clamp intensity range failed:`, e);
-        }
       }
     }
   }

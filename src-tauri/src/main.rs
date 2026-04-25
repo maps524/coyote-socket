@@ -231,7 +231,6 @@ use device::{
     stop_device_loop, update_channel_a_params, update_channel_b_params, ChannelParams,
     DeviceOutput,
 };
-use modulation::ParameterSource;
 use settings::{
     AppSettings, BluetoothSettings, ChannelPreset, ChannelSettings as SettingsChannelSettings,
     ConnectionSettings, GamepadBindings, GeneralSettings, KeyboardShortcuts, OutputSettings,
@@ -604,24 +603,64 @@ async fn get_full_state() -> Result<FullAppState, String> {
 // Settings Commands
 // ============================================================================
 
-/// Sync a full AppSettings to ProcessingState: channel configs + buttplug link configs.
-/// Single source of truth for settings→runtime conversion used by load and save paths.
-async fn sync_settings_to_state(settings: &AppSettings) {
+/// Apply one channel's persisted settings to ProcessingState: writes the
+/// ChannelConfig + (when present) the Buttplug link config under one write
+/// lock.
+///
+/// Single source of truth for settings→runtime sync. Used by the
+/// `apply_channel_config` Tauri command and by `sync_settings_to_state` when
+/// loading/saving a full AppSettings. No disk I/O; callers persist if needed.
+async fn apply_channel_config_to_state(
+    channel_id: processing::ChannelId,
+    channel_settings: &SettingsChannelSettings,
+) {
+    let new_config = crate::settings_convert::convert_channel_settings(channel_settings);
+    let bp_config = channel_settings
+        .intensity_source
+        .buttplug_links
+        .as_ref()
+        .map(|bp| bp.to_link_config());
+
     let state = processing::get_processing_state().await;
     let mut state_guard = state.write().await;
-
-    use crate::processing::ChannelId;
-    state_guard.channel_mut(ChannelId::A).config =
-        crate::settings_convert::convert_channel_settings(&settings.channel_a);
-    state_guard.channel_mut(ChannelId::B).config =
-        crate::settings_convert::convert_channel_settings(&settings.channel_b);
-
-    if let Some(ref bp_links) = settings.channel_a.intensity_source.buttplug_links {
-        state_guard.set_buttplug_link_config('A', bp_links.to_link_config());
+    state_guard.channel_mut(channel_id).config = new_config;
+    if let Some(cfg) = bp_config {
+        state_guard.set_buttplug_link_config(channel_id.as_char(), cfg);
     }
-    if let Some(ref bp_links) = settings.channel_b.intensity_source.buttplug_links {
-        state_guard.set_buttplug_link_config('B', bp_links.to_link_config());
+}
+
+/// Snapshot static fallback values for HMR recovery. When a source is linked,
+/// seed the mirror with a sensible middle-of-range so reload shows something
+/// reasonable until the next input tick repopulates it.
+fn derive_hmr_channel_params(s: &SettingsChannelSettings) -> ChannelParams {
+    let frequency = if s.frequency_source.source_type == settings::ParameterSourceType::Static {
+        s.frequency_source.static_value
+    } else {
+        (s.frequency_source.range_min + s.frequency_source.range_max) / 2.0
+    };
+    let freq_balance =
+        if s.frequency_balance_source.source_type == settings::ParameterSourceType::Static {
+            s.frequency_balance_source.static_value as u8
+        } else {
+            128
+        };
+    let int_balance =
+        if s.intensity_balance_source.source_type == settings::ParameterSourceType::Static {
+            s.intensity_balance_source.static_value as u8
+        } else {
+            128
+        };
+    ChannelParams {
+        frequency,
+        freq_balance,
+        int_balance,
     }
+}
+
+/// Sync a full AppSettings to ProcessingState by applying each channel.
+async fn sync_settings_to_state(settings: &AppSettings) {
+    apply_channel_config_to_state(processing::ChannelId::A, &settings.channel_a).await;
+    apply_channel_config_to_state(processing::ChannelId::B, &settings.channel_b).await;
 }
 
 #[tauri::command]
@@ -638,113 +677,47 @@ async fn save_app_settings(settings: AppSettings) -> Result<String, String> {
     Ok("Settings saved".to_string())
 }
 
+/// Single entry point for one-channel settings updates from the frontend.
+///
+/// Replaces the four pre-refactor commands (`save_channel_settings`,
+/// `update_channel_config`, `update_parameter_source`, `update_buttplug_links`)
+/// with one that takes the full channel payload + a `persist` flag.
+///
+/// `persist=false` is the fast path the frontend uses while a slider is being
+/// dragged — runtime state updates immediately, no disk I/O. `persist=true`
+/// runs behind a longer debounce, writes to disk first (so on failure the
+/// processing state stays consistent with disk), and refreshes the
+/// HMR-recovery `ChannelParams` mirror in `device.rs`.
 #[tauri::command]
-async fn save_channel_settings(
+async fn apply_channel_config(
     channel: String,
     channel_settings: SettingsChannelSettings,
+    persist: bool,
 ) -> Result<String, String> {
-    // Snapshot static fallback values for HMR recovery. When a source is
-    // linked, seed the mirror with a sensible middle-of-range so reload shows
-    // something reasonable until the next T-Code tick repopulates it.
-    let frequency = if channel_settings.frequency_source.source_type
-        == settings::ParameterSourceType::Static
-    {
-        channel_settings.frequency_source.static_value
-    } else {
-        (channel_settings.frequency_source.range_min + channel_settings.frequency_source.range_max)
-            / 2.0
-    };
-
-    let freq_balance = if channel_settings.frequency_balance_source.source_type
-        == settings::ParameterSourceType::Static
-    {
-        channel_settings.frequency_balance_source.static_value as u8
-    } else {
-        128
-    };
-
-    let int_balance = if channel_settings.intensity_balance_source.source_type
-        == settings::ParameterSourceType::Static
-    {
-        channel_settings.intensity_balance_source.static_value as u8
-    } else {
-        128
-    };
-
-    let params = ChannelParams {
-        frequency,
-        freq_balance,
-        int_balance,
-    };
-
-    // Convert settings → runtime ChannelConfig before moving channel_settings.
-    // Disk write first; on failure processing state stays consistent with disk.
-    let new_config = crate::settings_convert::convert_channel_settings(&channel_settings);
-    let bp_config = channel_settings
-        .intensity_source
-        .buttplug_links
-        .as_ref()
-        .map(|bp| bp.to_link_config());
-
-    match channel.as_str() {
-        "A" | "a" => {
-            settings::update_channel_a(channel_settings).await?;
-
-            let state = processing::get_processing_state().await;
-            let mut state_guard = state.write().await;
-            state_guard.channel_mut(processing::ChannelId::A).config = new_config;
-            if let Some(cfg) = bp_config {
-                state_guard.set_buttplug_link_config('A', cfg);
-            }
-            drop(state_guard);
-
-            update_channel_a_params(params).await;
-        }
-        "B" | "b" => {
-            settings::update_channel_b(channel_settings).await?;
-
-            let state = processing::get_processing_state().await;
-            let mut state_guard = state.write().await;
-            state_guard.channel_mut(processing::ChannelId::B).config = new_config;
-            if let Some(cfg) = bp_config {
-                state_guard.set_buttplug_link_config('B', cfg);
-            }
-            drop(state_guard);
-
-            update_channel_b_params(params).await;
-        }
-        _ => return Err(format!("Unknown channel: {}", channel)),
-    }
-    Ok("Channel settings saved".to_string())
-}
-
-/// Lightweight processing-state-only update for a channel. No disk I/O.
-/// Used by the fast (50ms) frontend debounce so device output reflects UI
-/// changes immediately; `save_channel_settings` runs behind it for persistence.
-#[tauri::command]
-async fn update_channel_config(
-    channel: String,
-    channel_settings: SettingsChannelSettings,
-) -> Result<String, String> {
-    let new_config = crate::settings_convert::convert_channel_settings(&channel_settings);
-    let bp_config = channel_settings
-        .intensity_source
-        .buttplug_links
-        .as_ref()
-        .map(|bp| bp.to_link_config());
-
     let channel_id = processing::ChannelId::from_str(&channel)
         .ok_or_else(|| format!("Unknown channel: {}", channel))?;
 
-    let state = processing::get_processing_state().await;
-    let mut state_guard = state.write().await;
-    state_guard.channel_mut(channel_id).config = new_config;
-    if let Some(cfg) = bp_config {
-        state_guard.set_buttplug_link_config(channel_id.as_char(), cfg);
+    if persist {
+        // Disk write first. If it fails the in-memory state stays consistent
+        // with what's on disk.
+        match channel_id {
+            processing::ChannelId::A => settings::update_channel_a(channel_settings.clone()).await?,
+            processing::ChannelId::B => settings::update_channel_b(channel_settings.clone()).await?,
+        }
+        let params = derive_hmr_channel_params(&channel_settings);
+        match channel_id {
+            processing::ChannelId::A => update_channel_a_params(params).await,
+            processing::ChannelId::B => update_channel_b_params(params).await,
+        }
     }
-    drop(state_guard);
 
-    Ok(format!("Updated channel {} config", channel))
+    apply_channel_config_to_state(channel_id, &channel_settings).await;
+
+    Ok(if persist {
+        format!("Channel {} settings saved", channel)
+    } else {
+        format!("Channel {} config updated", channel)
+    })
 }
 
 #[tauri::command]
@@ -1042,170 +1015,6 @@ async fn toggle_output_paused() -> Result<bool, String> {
 }
 
 // ============================================================================
-// Parameter Modulation Commands
-// ============================================================================
-
-#[tauri::command]
-async fn update_parameter_source(
-    channel: String,
-    parameter: String,
-    source: ParameterSource,
-) -> Result<String, String> {
-    use crate::buttplug::{ButtplugLinkConfig, ConstrictionMethod, FeatureTypeConfig};
-    use crate::processing::get_processing_state;
-
-    println!("[update_parameter_source] channel={}, parameter={}, source_type={:?}, source_axis={:?}, has_buttplug_links={:?}",
-        channel, parameter, source.source_type, source.source_axis, source.buttplug_links.is_some());
-
-    // Extract buttplug links before moving source
-    let buttplug_links = source.buttplug_links.clone();
-
-    let state = get_processing_state().await;
-    let mut state = state.write().await;
-
-    let channel_id = crate::processing::ChannelId::from_str(&channel)
-        .ok_or_else(|| format!("Unknown channel: {}", channel))?;
-    let channel_char = channel_id.as_char();
-
-    {
-        let config = &mut state.channel_mut(channel_id).config;
-        match parameter.as_str() {
-            "intensity" => config.intensity = source,
-            "frequency" => config.frequency = source,
-            "frequency_balance" => config.frequency_balance = source,
-            "intensity_balance" => config.intensity_balance = source,
-            _ => {
-                return Err(format!(
-                    "Unknown channel/parameter: {}/{}",
-                    channel, parameter
-                ))
-            }
-        }
-    }
-
-    // Also update buttplug link config if present (for intensity parameter)
-    if parameter == "intensity" {
-        if let Some(links) = buttplug_links {
-            // Determine position feature type - Position vs PositionWithDuration
-            let (position_feature, pos_dur_feature) = match links.position.as_ref() {
-                Some(pos) if pos.feature_type == "PositionWithDuration" => {
-                    (None, Some(pos.feature_index as usize))
-                }
-                Some(pos) => (Some(pos.feature_index as usize), None),
-                None => (None, None),
-            };
-
-            let config = ButtplugLinkConfig {
-                position_feature,
-                pos_dur_feature,
-                vibrate_feature: links.vibrate.as_ref().map(|l| l.feature_index as usize),
-                vibrate_config: links.vibrate.as_ref().map(|l| FeatureTypeConfig {
-                    distance: l.config.distance,
-                    scale: None,
-                    max_speed: None,
-                    min_floor: None,
-                    use_midpoint: None,
-                    method: None,
-                }),
-                rotate_feature: links
-                    .motion
-                    .as_ref()
-                    .filter(|l| l.feature_type == "Rotate")
-                    .map(|l| l.feature_index as usize),
-                rotate_config: links
-                    .motion
-                    .as_ref()
-                    .filter(|l| l.feature_type == "Rotate")
-                    .map(|l| FeatureTypeConfig {
-                        distance: None,
-                        scale: l.config.rotate_scale,
-                        max_speed: l.config.rotate_max_speed,
-                        min_floor: None,
-                        use_midpoint: None,
-                        method: None,
-                    }),
-                oscillate_feature: links
-                    .motion
-                    .as_ref()
-                    .filter(|l| l.feature_type == "Oscillate")
-                    .map(|l| l.feature_index as usize),
-                oscillate_config: links
-                    .motion
-                    .as_ref()
-                    .filter(|l| l.feature_type == "Oscillate")
-                    .map(|l| FeatureTypeConfig {
-                        distance: None,
-                        scale: l.config.oscillate_scale,
-                        max_speed: l.config.oscillate_max_speed,
-                        min_floor: None,
-                        use_midpoint: None,
-                        method: None,
-                    }),
-                constrict_feature: links.constrict.as_ref().map(|l| l.feature_index as usize),
-                constrict_config: links.constrict.as_ref().map(|l| {
-                    let method = l
-                        .config
-                        .constrict_method
-                        .as_ref()
-                        .map(|m| match m.as_str() {
-                            "clamp" => ConstrictionMethod::Clamp,
-                            _ => ConstrictionMethod::Downsample,
-                        })
-                        .unwrap_or(ConstrictionMethod::Downsample);
-                    FeatureTypeConfig {
-                        distance: None,
-                        scale: None,
-                        max_speed: None,
-                        min_floor: l.config.constrict_min_floor,
-                        use_midpoint: l.config.constrict_use_midpoint,
-                        method: Some(method),
-                    }
-                }),
-            };
-            state.set_buttplug_link_config(channel_char, config);
-            println!(
-                "[update_parameter_source] Also updated Buttplug links for channel {}",
-                channel
-            );
-        }
-    }
-
-    Ok(format!(
-        "Updated {} {} parameter source",
-        channel, parameter
-    ))
-}
-
-/// Update Buttplug link configuration for a channel
-/// This connects the frontend UI configuration to the backend processing pipeline
-#[tauri::command]
-async fn update_buttplug_links(
-    channel: String,
-    links: settings::ButtplugLinksSettings,
-) -> Result<String, String> {
-    use crate::processing::get_processing_state;
-
-    // Convert from settings format to runtime format using the method
-    let config = links.to_link_config();
-
-    let channel_char = match channel.as_str() {
-        "A" | "a" => 'A',
-        "B" | "b" => 'B',
-        _ => return Err(format!("Unknown channel: {}", channel)),
-    };
-
-    let state = get_processing_state().await;
-    let mut state_guard = state.write().await;
-    state_guard.set_buttplug_link_config(channel_char, config);
-
-    println!(
-        "[update_buttplug_links] Updated Buttplug links for channel {}",
-        channel
-    );
-    Ok(format!("Updated Buttplug links for channel {}", channel))
-}
-
-// ============================================================================
 // Preset Commands
 // ============================================================================
 
@@ -1344,8 +1153,7 @@ fn main() {
             // Settings commands
             get_app_settings,
             save_app_settings,
-            save_channel_settings,
-            update_channel_config,
+            apply_channel_config,
             save_output_settings,
             save_connection_settings,
             get_websocket_port,
@@ -1364,9 +1172,6 @@ fn main() {
             get_output_paused,
             set_output_paused,
             toggle_output_paused,
-            // Parameter modulation commands
-            update_parameter_source,
-            update_buttplug_links,
             // Preset commands
             get_presets,
             save_preset,

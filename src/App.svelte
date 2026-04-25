@@ -813,7 +813,7 @@
       }
       updateTimerRef.lastFireMs = now;
       updateTimerRef.pendingSettings = null;
-      invoke('update_channel_config', { channel: letter, channelSettings }).catch(() => {});
+      invoke('apply_channel_config', { channel: letter, channelSettings, persist: false }).catch(() => {});
     } else {
       // Within throttle window — stash latest payload; schedule trailing
       // fire only if one isn't already pending. Latest value always wins.
@@ -826,7 +826,7 @@
           updateTimerRef.pendingSettings = null;
           updateTimerRef.lastFireMs = Date.now();
           if (payload) {
-            invoke('update_channel_config', { channel: letter, channelSettings: payload }).catch(() => {});
+            invoke('apply_channel_config', { channel: letter, channelSettings: payload, persist: false }).catch(() => {});
           }
         }, delay);
       }
@@ -837,7 +837,7 @@
     // settling period.
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
-      invoke('save_channel_settings', { channel: letter, channelSettings })
+      invoke('apply_channel_config', { channel: letter, channelSettings, persist: true })
         .catch((e) => console.error(`[Settings] Failed to save channel ${letter} settings:`, e));
     }, SAVE_DEBOUNCE);
   }

@@ -214,31 +214,19 @@
     return 1000 / clampedPeriod;
   }
 
-  // Handle parameter source changes
-  async function handleFrequencySourceChange(event: CustomEvent<ParameterSource>) {
+  // Source-change handlers all share the same shape: update the channel
+  // store and let App.svelte's reactive watcher push the full channel
+  // through apply_channel_config (debounced, with persist=false on the fast
+  // path and persist=true on the trailing edge). Per-parameter Tauri
+  // commands are gone; the store is the only thing the UI writes to.
+  function handleFrequencySourceChange(event: CustomEvent<ParameterSource>) {
     const newSource = event.detail;
-    // Apply frequency snapping when in static mode
     const snappedFreq = newSource.type === 'static'
       ? snapFrequency(newSource.staticValue ?? 100)
       : undefined;
-
     const finalSource = snappedFreq !== undefined
       ? { ...newSource, staticValue: snappedFreq }
       : newSource;
-
-    // Update backend
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('update_parameter_source', {
-        channel: channel,
-        parameter: 'frequency',
-        source: finalSource
-      });
-    } catch (error) {
-      console.error(`Failed to update frequency source for channel ${channel}:`, error);
-    }
-
-    // Update store
     store.update(s => ({
       ...s,
       frequencySource: finalSource,
@@ -246,22 +234,8 @@
     }));
   }
 
-  async function handleFrequencyBalanceSourceChange(event: CustomEvent<ParameterSource>) {
+  function handleFrequencyBalanceSourceChange(event: CustomEvent<ParameterSource>) {
     const newSource = event.detail;
-
-    // Update backend
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('update_parameter_source', {
-        channel: channel,
-        parameter: 'frequency_balance',
-        source: newSource
-      });
-    } catch (error) {
-      console.error(`Failed to update frequency balance source for channel ${channel}:`, error);
-    }
-
-    // Update store
     store.update(s => ({
       ...s,
       frequencyBalanceSource: newSource,
@@ -269,22 +243,8 @@
     }));
   }
 
-  async function handleIntensityBalanceSourceChange(event: CustomEvent<ParameterSource>) {
+  function handleIntensityBalanceSourceChange(event: CustomEvent<ParameterSource>) {
     const newSource = event.detail;
-
-    // Update backend
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('update_parameter_source', {
-        channel: channel,
-        parameter: 'intensity_balance',
-        source: newSource
-      });
-    } catch (error) {
-      console.error(`Failed to update intensity balance source for channel ${channel}:`, error);
-    }
-
-    // Update store
     store.update(s => ({
       ...s,
       intensityBalanceSource: newSource,
@@ -292,22 +252,8 @@
     }));
   }
 
-  async function handleIntensitySourceChange(event: CustomEvent<ParameterSource>) {
+  function handleIntensitySourceChange(event: CustomEvent<ParameterSource>) {
     const newSource = event.detail;
-
-    // Update backend
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('update_parameter_source', {
-        channel: channel,
-        parameter: 'intensity',
-        source: newSource
-      });
-    } catch (error) {
-      console.error(`Failed to update intensity source for channel ${channel}:`, error);
-    }
-
-    // Update store
     store.update(s => ({
       ...s,
       intensitySource: newSource,
