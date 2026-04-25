@@ -22,6 +22,11 @@ pub(crate) mod resolver;
 mod settings;
 pub(crate) mod settings_convert;
 pub(crate) mod tcode_input;
+// Transform variants + apply dispatch lands in sub D; the resolver
+// rewrite in sub E is the first reader. Allow dead-code through the
+// staging window so sub D's self-contained tests stay quiet.
+#[allow(dead_code)]
+pub(crate) mod transforms;
 mod waveform;
 
 // Global AppHandle for emitting events from anywhere

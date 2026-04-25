@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::transforms::{TransformConfig, TransformState};
+
 /// Source type for a parameter value
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +71,17 @@ pub struct ParameterLinkConfig {
     /// = real-time. Capped at AXIS_HISTORY_MS by the lookup window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delay_ms: Option<u32>,
+
+    /// Ordered list of post-curve / pre-range shaping transforms. Each
+    /// entry's `declared_axes()` names the bus axes the resolver
+    /// pre-fetches at this link's `target_time` before calling
+    /// `apply_transform`. `#[serde(default)]` so saved presets that
+    /// pre-date sub D deserialize cleanly with an empty vec.
+    ///
+    /// Sub D introduces the field + the transform variants but no
+    /// caller reads it yet — sub E's resolver rewrite is the consumer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<TransformConfig>,
 }
 
 impl ParameterLinkConfig {
@@ -84,6 +97,7 @@ impl ParameterLinkConfig {
             curve_strength: None,
             midpoint: None,
             delay_ms: None,
+            transforms: Vec::new(),
         }
     }
 
@@ -99,6 +113,7 @@ impl ParameterLinkConfig {
             curve_strength: Some(2.0),
             midpoint: None,
             delay_ms: None,
+            transforms: Vec::new(),
         }
     }
 }
@@ -116,18 +131,6 @@ impl ParameterLinkConfig {
 #[allow(dead_code)] // Read by sub D's transform model; staging shape in sub C.
 pub struct ParameterLinkRuntime {
     pub transform_state: Vec<TransformState>,
-}
-
-/// One slot of mutable transform state, one variant per `TransformConfig`
-/// variant. Sub D will extend this with `Smooth { last_value, last_ts }`,
-/// `Hold { peak_value, peak_ts }`, `Vibrate { phase }`, etc.
-#[derive(Debug, Clone, Default)]
-pub enum TransformState {
-    /// Identity slot — placeholder until sub D introduces real transform
-    /// variants. Lets the type compile in sub C without dictating any
-    /// runtime shape; replace freely when the transform model lands.
-    #[default]
-    None,
 }
 
 /// Per-channel bundle of `ParameterLinkRuntime` slots — one per parameter

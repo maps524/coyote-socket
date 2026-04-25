@@ -1,0 +1,287 @@
+//! Semantic Buttplug-era transform implementations.
+//!
+//! Each function here is the apply-side body for one
+//! `TransformConfig::{Vibrate, Oscillate, Constrict}` variant. The enum
+//! itself + its dispatch table live in `transforms::mod`; this file holds
+//! the device-flavored math so the resolver-primitive boundary
+//! (generic shaping vs Buttplug-shaped wrappers) is enforced by file
+//! layout. Sub F deletes `crate::buttplug::pipeline` once these
+//! semantic wrappers + the resolver rewrite cover everything the old
+//! `process_buttplug_pipeline` did.
+//!
+//! Modifier-axis convention: the resolver pre-fetches every axis named
+//! in `TransformConfig::declared_axes()` at the link's `target_time`
+//! and passes the values into `apply_transform` as a slice. Each
+//! function below documents the slot indexes it reads. A misordered or
+//! short slice falls through to a documented zero/identity default —
+//! the resolver should never produce that, but a hot path can't crash
+//! mid-tick.
+
+use std::f64::consts::PI;
+
+use super::{ConstrictionMethod, TransformState};
+
+/// Sinusoidal wobble around `value`. `modifiers[0]` is the speed input
+/// (typically the resolver's read of `bp:Vibrate_<i>` at `target_ts`)
+/// in `[0, 1]`; it scales the frequency to `[0, 20]` Hz. `distance`
+/// sets amplitude. Phase advances by `freq_hz * dt_seconds * 2π` per
+/// call where `dt = target_ts - state.last_target` (so a missed tick
+/// catches up rather than freezing).
+pub fn apply_vibrate(
+    distance: f64,
+    value: f64,
+    modifiers: &[f64],
+    state: &mut TransformState,
+    target_ts: u64,
+) -> f64 {
+    let speed = modifiers.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+    let TransformState::Vibrate { phase, last_target } = state else {
+        // Mismatched slot: rewrite and pass through this tick. Sub E's
+        // resolver init should guarantee the right slot, so reaching
+        // this branch indicates a bug — but a panic here would kill
+        // the device tick mid-stream.
+        *state = TransformState::Vibrate {
+            phase: 0.0,
+            last_target: target_ts,
+        };
+        return value;
+    };
+    let dt_ms = if *last_target == 0 {
+        0
+    } else {
+        target_ts.saturating_sub(*last_target)
+    };
+    *last_target = target_ts;
+    let freq_hz = speed * 20.0;
+    *phase += freq_hz * (dt_ms as f64 / 1000.0) * 2.0 * PI;
+    let offset = phase.sin() * distance;
+    value + offset
+}
+
+/// Triangle-wave sweep around `value`. `modifiers[0]` is the speed
+/// input in `[0, 1]`; it scales the frequency to `[0, max_speed_hz]`
+/// Hz. `scale` sets amplitude (the wave swings ±scale around `value`).
+///
+/// The wave shape mirrors the pre-refactor
+/// `process_buttplug_pipeline`'s Oscillate stage: phase modulo 1.0,
+/// triangle = `1 - |2*phase - 1|`, offset = `(triangle - 0.5) * 2 *
+/// scale`, then add to `value`. Match-for-match so a saved preset that
+/// previously routed through Oscillate and now routes through this
+/// transform produces the same output.
+pub fn apply_oscillate(
+    scale: f64,
+    max_speed_hz: f64,
+    value: f64,
+    modifiers: &[f64],
+    state: &mut TransformState,
+    target_ts: u64,
+) -> f64 {
+    let speed = modifiers.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+    let TransformState::Oscillate { phase, last_target } = state else {
+        *state = TransformState::Oscillate {
+            phase: 0.0,
+            last_target: target_ts,
+        };
+        return value;
+    };
+    let dt_ms = if *last_target == 0 {
+        0
+    } else {
+        target_ts.saturating_sub(*last_target)
+    };
+    *last_target = target_ts;
+    let freq_hz = speed * max_speed_hz;
+    *phase += freq_hz * (dt_ms as f64 / 1000.0);
+
+    let phase_norm = *phase % 1.0;
+    let triangle = 1.0 - (2.0 * phase_norm - 1.0).abs();
+    let offset = (triangle - 0.5) * 2.0 * scale;
+    value + offset
+}
+
+/// Range-narrowing transform. `modifiers[0]` is the constriction
+/// strength in `[0, 1]`: 0 leaves the full range alone, 1 collapses
+/// to `min_floor`. `use_midpoint = false` centers the shrinking range
+/// on `value` so the bounds follow the input; `true` pins to 0.5.
+/// `method` chooses Downsample (remap `[0, 1]` into `[min_bound,
+/// max_bound]`, preserves shape) vs Clamp (cut off at the bounds, can
+/// flat-spot near saturation).
+///
+/// Stateless — the variant slot stays `TransformState::None`, no
+/// per-call mutation.
+pub fn apply_constrict(
+    min_floor: f64,
+    use_midpoint: bool,
+    method: ConstrictionMethod,
+    value: f64,
+    modifiers: &[f64],
+) -> f64 {
+    let constriction = modifiers.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+
+    // effective range: at constriction=0 → 1.0 (full); at 1.0 → min_floor.
+    let effective = lerp(1.0, min_floor, constriction);
+    let center = if use_midpoint { 0.5 } else { value };
+    let half_range = effective * 0.5;
+    let min_bound = (center - half_range).max(0.0);
+    let max_bound = (center + half_range).min(1.0);
+
+    match method {
+        ConstrictionMethod::Downsample => {
+            let normalized = value.clamp(0.0, 1.0);
+            min_bound + normalized * (max_bound - min_bound)
+        }
+        ConstrictionMethod::Clamp => value.clamp(min_bound, max_bound),
+    }
+}
+
+#[inline]
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transforms::{apply_transform, TransformConfig};
+
+    #[test]
+    fn vibrate_first_call_passes_value_through() {
+        // First call has no prior target_ts, so dt = 0 → phase stays
+        // at 0 → sin(0) = 0 → output equals input. Prevents an
+        // initial-tick wobble that would surprise users.
+        let cfg = TransformConfig::Vibrate {
+            speed_axis: "bp:Vibrate_0".into(),
+            distance: 0.2,
+        };
+        let mut state = cfg.initial_state();
+        let out = apply_transform(&cfg, &mut state, 0.5, &[1.0], 1_000);
+        assert!((out - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vibrate_offsets_output_after_phase_advance() {
+        let cfg = TransformConfig::Vibrate {
+            speed_axis: "bp:Vibrate_0".into(),
+            distance: 0.2,
+        };
+        let mut state = cfg.initial_state();
+        // Prime at t=1000 (no offset).
+        apply_transform(&cfg, &mut state, 0.5, &[1.0], 1_000);
+        // 25ms at speed=1.0 → freq=20Hz → phase += 20 * 0.025 * 2π ≈ π.
+        // sin(π) ≈ 0, so this lands close to the input. Pick a dt that
+        // produces a clearer non-zero offset: 12.5ms → phase ≈ π/2 → sin=1.
+        let out = apply_transform(&cfg, &mut state, 0.5, &[1.0], 1_012);
+        assert!(
+            (out - 0.5).abs() > 0.05,
+            "vibrate should add a non-trivial offset by phase ~π/2, got {}",
+            out
+        );
+    }
+
+    #[test]
+    fn vibrate_speed_zero_holds_phase_so_offset_stays_zero() {
+        let cfg = TransformConfig::Vibrate {
+            speed_axis: "bp:Vibrate_0".into(),
+            distance: 0.5,
+        };
+        let mut state = cfg.initial_state();
+        apply_transform(&cfg, &mut state, 0.4, &[0.0], 1_000);
+        for ts in (1_010..=1_500).step_by(10) {
+            let out = apply_transform(&cfg, &mut state, 0.4, &[0.0], ts);
+            assert!(
+                (out - 0.4).abs() < 1e-12,
+                "speed=0 should freeze phase, got {} at ts={}",
+                out,
+                ts
+            );
+        }
+    }
+
+    #[test]
+    fn oscillate_passes_through_on_first_call() {
+        let cfg = TransformConfig::Oscillate {
+            speed_axis: "bp:Oscillate_0".into(),
+            scale: 0.4,
+            max_speed_hz: 5.0,
+        };
+        let mut state = cfg.initial_state();
+        let out = apply_transform(&cfg, &mut state, 0.5, &[1.0], 1_000);
+        // dt=0 → phase=0 → triangle=0 → offset = (0-0.5)*2*0.4 = -0.4.
+        // First call still sees the offset because the triangle wave's
+        // value at phase=0 is the trough. Document both outcomes the
+        // tests want to pin.
+        assert!(
+            (out - 0.1).abs() < 1e-9,
+            "oscillate at phase 0 should land at value-scale, got {}",
+            out
+        );
+    }
+
+    #[test]
+    fn oscillate_advances_phase_with_speed_and_dt() {
+        let cfg = TransformConfig::Oscillate {
+            speed_axis: "bp:Oscillate_0".into(),
+            scale: 0.4,
+            max_speed_hz: 5.0,
+        };
+        let mut state = cfg.initial_state();
+        // Prime at t=1000.
+        apply_transform(&cfg, &mut state, 0.5, &[1.0], 1_000);
+        // 100ms at max speed=5Hz → phase += 5 * 0.1 = 0.5.
+        // triangle(phase=0.5) = 1.0 → offset = (1-0.5)*2*0.4 = 0.4.
+        let out = apply_transform(&cfg, &mut state, 0.5, &[1.0], 1_100);
+        assert!(
+            (out - 0.9).abs() < 1e-9,
+            "oscillate at phase 0.5 should land at value+scale, got {}",
+            out
+        );
+    }
+
+    #[test]
+    fn constrict_downsample_remaps_around_midpoint() {
+        // constriction=0.5, min_floor=0.0, use_midpoint=true:
+        // effective = 0.5, bounds = [0.25, 0.75].
+        // Input 0.0 → 0.25; 0.5 → 0.5; 1.0 → 0.75.
+        let cfg = TransformConfig::Constrict {
+            amount_axis: "bp:Constrict_0".into(),
+            min_floor: 0.0,
+            use_midpoint: true,
+            method: ConstrictionMethod::Downsample,
+        };
+        let mut state = cfg.initial_state();
+        assert!((apply_transform(&cfg, &mut state, 0.0, &[0.5], 0) - 0.25).abs() < 1e-9);
+        assert!((apply_transform(&cfg, &mut state, 0.5, &[0.5], 0) - 0.5).abs() < 1e-9);
+        assert!((apply_transform(&cfg, &mut state, 1.0, &[0.5], 0) - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn constrict_clamp_cuts_off_at_bounds() {
+        let cfg = TransformConfig::Constrict {
+            amount_axis: "bp:Constrict_0".into(),
+            min_floor: 0.0,
+            use_midpoint: true,
+            method: ConstrictionMethod::Clamp,
+        };
+        let mut state = cfg.initial_state();
+        // bounds = [0.25, 0.75]. Inside-band input survives; outside snaps.
+        assert!((apply_transform(&cfg, &mut state, 0.1, &[0.5], 0) - 0.25).abs() < 1e-9);
+        assert!((apply_transform(&cfg, &mut state, 0.5, &[0.5], 0) - 0.5).abs() < 1e-9);
+        assert!((apply_transform(&cfg, &mut state, 0.9, &[0.5], 0) - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn constrict_zero_strength_leaves_input_alone() {
+        // constriction=0.0 → effective=1.0 → bounds=[0,1] (when
+        // use_midpoint=true) or centered on the input. Either way,
+        // a downsample pass with input 0.4 should hit ~0.4.
+        let cfg = TransformConfig::Constrict {
+            amount_axis: "bp:Constrict_0".into(),
+            min_floor: 0.0,
+            use_midpoint: true,
+            method: ConstrictionMethod::Downsample,
+        };
+        let mut state = cfg.initial_state();
+        let out = apply_transform(&cfg, &mut state, 0.4, &[0.0], 0);
+        assert!((out - 0.4).abs() < 1e-9, "expected 0.4, got {}", out);
+    }
+}

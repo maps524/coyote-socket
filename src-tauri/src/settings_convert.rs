@@ -40,6 +40,7 @@ pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> Para
             } else {
                 None
             },
+            transforms: Vec::new(),
         },
         SettingsSourceType::Linked => ParameterLinkConfig {
             source_type: ParameterSourceType::Linked,
@@ -57,6 +58,7 @@ pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> Para
             } else {
                 None
             },
+            transforms: Vec::new(),
         },
     }
 }
