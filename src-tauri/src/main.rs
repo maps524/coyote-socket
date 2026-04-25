@@ -17,6 +17,7 @@ mod modulation;
 mod processing;
 mod protocol;
 mod settings;
+mod settings_convert;
 mod waveform;
 mod websocket;
 
@@ -611,9 +612,9 @@ async fn sync_settings_to_state(settings: &AppSettings) {
 
     use crate::processing::ChannelId;
     state_guard.channel_mut(ChannelId::A).config =
-        crate::websocket::convert_channel_settings(&settings.channel_a);
+        crate::settings_convert::convert_channel_settings(&settings.channel_a);
     state_guard.channel_mut(ChannelId::B).config =
-        crate::websocket::convert_channel_settings(&settings.channel_b);
+        crate::settings_convert::convert_channel_settings(&settings.channel_b);
 
     if let Some(ref bp_links) = settings.channel_a.intensity_source.buttplug_links {
         state_guard.set_buttplug_link_config('A', bp_links.to_link_config());
@@ -678,7 +679,7 @@ async fn save_channel_settings(
 
     // Convert settings → runtime ChannelConfig before moving channel_settings.
     // Disk write first; on failure processing state stays consistent with disk.
-    let new_config = crate::websocket::convert_channel_settings(&channel_settings);
+    let new_config = crate::settings_convert::convert_channel_settings(&channel_settings);
     let bp_config = channel_settings
         .intensity_source
         .buttplug_links
@@ -725,7 +726,7 @@ async fn update_channel_config(
     channel: String,
     channel_settings: SettingsChannelSettings,
 ) -> Result<String, String> {
-    let new_config = crate::websocket::convert_channel_settings(&channel_settings);
+    let new_config = crate::settings_convert::convert_channel_settings(&channel_settings);
     let bp_config = channel_settings
         .intensity_source
         .buttplug_links

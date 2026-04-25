@@ -637,63 +637,6 @@ pub async fn set_detected_protocol(protocol: InputProtocol) {
     server_guard.detected_protocol = protocol;
 }
 
-/// Convert a ParameterSourceSettings (from settings) to ParameterSource (for runtime)
-pub fn convert_parameter_source(
-    source: &crate::settings::ParameterSourceSettings,
-) -> crate::modulation::ParameterSource {
-    use crate::modulation::{CurveType, ParameterSource, ParameterSourceType};
-    use crate::settings::ParameterSourceType as SettingsSourceType;
-
-    let curve = match source.curve.as_str() {
-        "exponential" => CurveType::Exponential,
-        "logarithmic" => CurveType::Logarithmic,
-        "s-curve" => CurveType::SCurve,
-        "inverse" => CurveType::Inverse,
-        _ => CurveType::Linear,
-    };
-
-    match source.source_type {
-        SettingsSourceType::Static => ParameterSource {
-            source_type: ParameterSourceType::Static,
-            static_value: Some(source.static_value),
-            source_axis: None,
-            range_min: source.range_min,
-            range_max: source.range_max,
-            curve: curve.clone(),
-            curve_strength: Some(source.curve_strength),
-            midpoint: if source.midpoint { Some(true) } else { None },
-            delay_ms: if source.delay_enabled { Some(source.delay_ms) } else { None },
-            buttplug_links: source.buttplug_links.clone(),
-        },
-        SettingsSourceType::Linked => ParameterSource {
-            source_type: ParameterSourceType::Linked,
-            static_value: Some(source.static_value), // Keep as fallback
-            source_axis: Some(source.source_axis.clone()),
-            range_min: source.range_min,
-            range_max: source.range_max,
-            curve,
-            curve_strength: Some(source.curve_strength),
-            midpoint: if source.midpoint { Some(true) } else { None },
-            delay_ms: if source.delay_enabled { Some(source.delay_ms) } else { None },
-            buttplug_links: source.buttplug_links.clone(),
-        },
-    }
-}
-
-/// Convert ChannelSettings (from settings) to ChannelConfig (for runtime)
-pub fn convert_channel_settings(
-    settings: &crate::settings::ChannelSettings,
-) -> crate::modulation::ChannelConfig {
-    use crate::modulation::ChannelConfig;
-
-    ChannelConfig {
-        frequency: convert_parameter_source(&settings.frequency_source),
-        frequency_balance: convert_parameter_source(&settings.frequency_balance_source),
-        intensity_balance: convert_parameter_source(&settings.intensity_balance_source),
-        intensity: convert_parameter_source(&settings.intensity_source),
-    }
-}
-
 /// Apply saved settings to the running ProcessingState
 /// Call this when the server starts to restore user preferences
 pub async fn apply_saved_settings_to_processing() {
@@ -714,8 +657,8 @@ pub async fn apply_saved_settings_to_processing() {
     };
 
     // Convert channel settings to runtime configs
-    let channel_a_config = convert_channel_settings(&all_settings.channel_a);
-    let channel_b_config = convert_channel_settings(&all_settings.channel_b);
+    let channel_a_config = crate::settings_convert::convert_channel_settings(&all_settings.channel_a);
+    let channel_b_config = crate::settings_convert::convert_channel_settings(&all_settings.channel_b);
 
     // Apply to ProcessingState
     let state = get_processing_state().await;
