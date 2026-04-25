@@ -1612,6 +1612,16 @@ impl ProcessingState {
 
     /// Update a Buttplug feature value. `key` is the legacy
     /// `{FeatureType}_{index}` form; the bus axis is `bp:{key}`.
+    ///
+    /// Each call stamps its own `current_time_ms()` value, so a
+    /// multi-feature handler call (e.g. a `ScalarCmd` carrying 6 features)
+    /// produces 6 monotonically-different bus timestamps rather than one
+    /// batch-coherent timestamp. With a per-channel watermark this is
+    /// benign for `Vibrate` / `Position` / `Oscillate` / `Constrict`
+    /// (latest-wins reads), but `bp:LinearCmd_<i>` could in principle
+    /// split a single logical command across two ticks if the tick
+    /// boundary lands inside the batch. Sub E's resolver rewrite is the
+    /// right place to introduce a per-batch timestamp; tracked there.
     pub fn set_buttplug_feature(&mut self, key: String, value: f64) {
         let axis = format!("bp:{}", key);
         self.input_bus
@@ -2207,9 +2217,14 @@ mod tests {
     fn test_clear_all_buttplug_features_drops_only_bp_axes() {
         // `clear_all_buttplug_features` now delegates to `bus.clear_prefix("bp:")`.
         // T-Code / gamepad axes live under non-prefixed keys (`L0`, `GP_LX`)
-        // and must survive a Buttplug stop command.
+        // and must survive a Buttplug stop command. Fixture covers every
+        // `bp:` variant the handlers can write (feature value, control
+        // axes, and the persisted PositionWithDuration value the frontend
+        // renders) so a future `clear_prefix` regression that only drops
+        // a subset is caught.
         let mut state = ProcessingState::default();
         state.set_buttplug_feature("Vibrate_0".to_string(), 0.5);
+        state.set_buttplug_feature("PositionWithDuration_1".to_string(), 0.7);
         state.set_buttplug_linear_cmd(0, 0.3, 200);
         state.set_buttplug_rotate_direction(0, true);
         state.process_command(&TCodeCommand {
@@ -2222,9 +2237,10 @@ mod tests {
         assert!(state.has_buttplug_input());
         state.clear_all_buttplug_features();
 
-        // Buttplug axes gone.
+        // Buttplug axes gone — every variant.
         assert!(!state.has_buttplug_input());
         assert!(state.input_bus.value("bp:Vibrate_0").is_none());
+        assert!(state.input_bus.value("bp:PositionWithDuration_1").is_none());
         assert!(state.input_bus.value("bp:LinearCmd_0").is_none());
         assert!(state.input_bus.value("bp:RotateDir_0").is_none());
         // T-Code axis untouched.
