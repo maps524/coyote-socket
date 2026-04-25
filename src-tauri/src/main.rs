@@ -531,7 +531,7 @@ async fn get_connection_status() -> Result<ConnectionStatus, String> {
 /// This returns all live state so the frontend can restore after reload
 #[tauri::command]
 async fn get_full_state() -> Result<FullAppState, String> {
-    use crate::processing::{get_processing_state, ProcessingEngineType};
+    use crate::processing::get_processing_state;
 
     let connection = get_connection_status().await?;
 
@@ -547,14 +547,7 @@ async fn get_full_state() -> Result<FullAppState, String> {
     let (engine_str, peak_fill_str, range_a, range_b) = {
         let state = get_processing_state().await;
         let state_guard = state.read().await;
-        let engine = match state_guard.options.processing_engine {
-            ProcessingEngineType::V2Smooth => "v2-smooth",
-            ProcessingEngineType::V2Balanced => "v2-balanced",
-            ProcessingEngineType::V2Detailed => "v2-detailed",
-            ProcessingEngineType::V2Dynamic => "v2-dynamic",
-            ProcessingEngineType::V2Sustained => "v2-sustained",
-            ProcessingEngineType::V3Predictive => "v3-predictive",
-        };
+        let engine = state_guard.options.processing_engine.as_str();
         let range_for = |id: crate::processing::ChannelId| -> (u8, u8) {
             let src = &state_guard.channel(id).config.intensity;
             (src.range_min as u8, src.range_max as u8)

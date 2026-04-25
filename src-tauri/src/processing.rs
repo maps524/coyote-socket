@@ -82,6 +82,19 @@ impl ProcessingEngineType {
             _ => Self::default(),
         }
     }
+
+    /// Inverse of `from_str` — kebab-case wire string for this variant.
+    /// Same set of strings the Tauri commands accept on the way in.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::V2Smooth => "v2-smooth",
+            Self::V2Balanced => "v2-balanced",
+            Self::V2Detailed => "v2-detailed",
+            Self::V2Dynamic => "v2-dynamic",
+            Self::V2Sustained => "v2-sustained",
+            Self::V3Predictive => "v3-predictive",
+        }
+    }
 }
 
 /// Which algorithm fills empty buckets in peak-preserving downsampling.
@@ -310,8 +323,10 @@ struct CriticalPoint {
 pub struct V3ChannelState {
     /// Buffered commands sorted by effective time
     command_buffer: VecDeque<BufferedCommand>,
-    /// Current position (0-200) - tracks what we last output
-    current_position: u8,
+    /// Current position (0-200) - tracks what we last output. `pub` so the
+    /// UI display path can show V3's tick-resolved value rather than V2's
+    /// raw target.
+    pub current_position: u8,
     /// How far ahead commands arrive (ms) - default 1000ms
     lookahead_ms: u64,
     /// How long to keep commands in buffer (ms) - default 2000ms
@@ -1300,11 +1315,18 @@ impl Channel {
         self.peak_hold.clear();
     }
 
-    /// Current intensity in 0-1 range (for UI display). All remaining engines
-    /// share the V2-state ramp/interpolation surface; V3 advances `current_position`
-    /// only on tick, so V2 is the most accurate UI indicator for both.
-    pub fn current_intensity_normalized(&self, _engine: ProcessingEngineType, now: u64) -> f64 {
-        self.v2.get_value_at(now) as f64 / 200.0
+    /// Current intensity in 0-1 range (for UI display).
+    ///
+    /// V2-family engines read V2's interpolated ramp value, which moves
+    /// toward the most recent target as time elapses. V3 reads its own
+    /// `current_position`, the lookahead-resolved value the device
+    /// actually sees on each tick — V2's raw target would lie ~1s ahead
+    /// of what's transmitted under V3's lookahead buffer.
+    pub fn current_intensity_normalized(&self, engine: ProcessingEngineType, now: u64) -> f64 {
+        match engine {
+            ProcessingEngineType::V3Predictive => self.v3.current_position as f64 / 200.0,
+            _ => self.v2.get_value_at(now) as f64 / 200.0,
+        }
     }
 }
 
@@ -1862,6 +1884,70 @@ mod tests {
 
         // V3 command buffer should have one entry
         assert_eq!(ch.v3.buffer_size(), 1);
+    }
+
+    #[test]
+    fn test_current_intensity_normalized_dispatch_per_engine() {
+        // Pre-fix this method ignored the engine arg and read V2's ramp
+        // unconditionally. Under V3 that showed the raw target ~1s ahead
+        // of what the device was actually transmitting (V3's lookahead).
+        // Pin the dispatch by driving v2 and v3 to different values and
+        // asserting each engine reads from its own state.
+        let mut ch = Channel::new(ChannelId::A);
+        // V2 ramp lands at 0.5 instantly via apply_tcode (set_target with
+        // duration=0). V3 buffers the same command but its current_position
+        // only advances on a tick — leave it at 0.
+        ch.apply_tcode(0.5, None, 1000);
+        assert_eq!(ch.v2.target_value, 100);
+        assert_eq!(ch.v3.current_position, 0);
+
+        let v2_display =
+            ch.current_intensity_normalized(ProcessingEngineType::V2Balanced, 1000);
+        assert!(
+            (v2_display - 0.5).abs() < 0.01,
+            "V2-family engine should read V2 ramp = 0.5, got {}",
+            v2_display
+        );
+
+        let v3_display =
+            ch.current_intensity_normalized(ProcessingEngineType::V3Predictive, 1000);
+        assert_eq!(
+            v3_display, 0.0,
+            "V3 engine should read V3.current_position = 0 (pre-tick), got {}",
+            v3_display
+        );
+
+        // Now drive V3's current_position directly to a non-zero value
+        // and confirm the V3 path picks it up while V2 stays unchanged.
+        ch.v3.current_position = 150;
+        let v3_after =
+            ch.current_intensity_normalized(ProcessingEngineType::V3Predictive, 1000);
+        assert!(
+            (v3_after - 0.75).abs() < 1e-9,
+            "V3 engine should read 150/200 = 0.75, got {}",
+            v3_after
+        );
+        // V2 path is unaffected by V3 state mutation.
+        let v2_unchanged =
+            ch.current_intensity_normalized(ProcessingEngineType::V2Balanced, 1000);
+        assert!((v2_unchanged - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_processing_engine_as_str_round_trips_through_from_str() {
+        // as_str / from_str are the wire-format pair used by the Tauri
+        // command and the Deserialize impl. Each variant must round-trip
+        // back to itself.
+        for v in [
+            ProcessingEngineType::V2Smooth,
+            ProcessingEngineType::V2Balanced,
+            ProcessingEngineType::V2Detailed,
+            ProcessingEngineType::V2Dynamic,
+            ProcessingEngineType::V2Sustained,
+            ProcessingEngineType::V3Predictive,
+        ] {
+            assert_eq!(ProcessingEngineType::from_str(v.as_str()), v);
+        }
     }
 
     #[test]
