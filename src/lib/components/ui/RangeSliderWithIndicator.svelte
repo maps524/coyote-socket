@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy } from 'svelte';
   import type { ParameterSource, CurveType } from '$lib/types/modulation.js';
-  import { Info, Link, MapPin, Clock, RotateCw, MoveHorizontal, Activity, Minimize2 } from 'lucide-svelte';
+  import { Info, Link, MapPin, Clock, RotateCw, MoveHorizontal, Activity, Minimize2, Gamepad2 } from 'lucide-svelte';
   import Tooltip from './Tooltip.svelte';
   import Slider from './Slider.svelte';
   import Popover from './Popover.svelte';
@@ -468,8 +468,14 @@
               <Link class="h-3.5 w-3.5 opacity-80" />
             {/if}
           {:else if inputMode === 'tcode' && isLinked}
-            <!-- TCode mode with linked axis -->
-            <span class="leading-none">{selectedSource}</span>
+            <!-- TCode mode with linked axis. Gamepad axes get an icon prefix
+                 so the GP_ namespace doesn't bleed into the label. -->
+            {#if selectedSource.startsWith('GP_')}
+              <Gamepad2 class="h-3 w-3" />
+              <span class="leading-none">{selectedSource.replace('GP_', '')}</span>
+            {:else}
+              <span class="leading-none">{selectedSource}</span>
+            {/if}
           {:else}
             <!-- No input or static mode -->
             <Link class="h-3.5 w-3.5 opacity-80" />

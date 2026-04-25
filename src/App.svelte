@@ -5,6 +5,7 @@
   import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
   import { Settings, HelpCircle, Zap, Info, Pause, Play } from 'lucide-svelte';
   import Tooltip from './lib/components/ui/Tooltip.svelte';
+  import Popover from './lib/components/ui/Popover.svelte';
   import ConnectionPanel from './lib/components/ConnectionPanel.svelte';
   import BluetoothPanel, { type BluetoothPanelState, type BluetoothDevice } from './lib/components/BluetoothPanel.svelte';
   import InputStatusPill from './lib/components/InputStatusPill.svelte';
@@ -272,6 +273,11 @@
 
   // Event listener unsubscribe functions
   let unlistenOutputPause: UnlistenFn | null = null;
+
+  // Engine info popover — shows the description of the currently-selected
+  // engine on click. Description text comes from PROCESSING_ENGINES.
+  let engineInfoOpen = false;
+  $: activeEngine = PROCESSING_ENGINES.find(e => e.value === $generalSettings.processingEngine);
 
   // Derive current ecosystem from input source. Lovense input is funneled
   // through the Buttplug feature pipeline, so it shares the buttplug ecosystem
@@ -1544,14 +1550,14 @@
                 <button
                   on:click={saveNewPreset}
                   disabled={!newPresetName.trim()}
-                  class="w-7 flex items-center justify-center bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 border-l border-border"
+                  class="w-7 shrink-0 flex items-center justify-center bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 border-l border-border"
                   title="Save preset"
                 >
                   <Save class="h-3.5 w-3.5" />
                 </button>
                 <button
                   on:click={cancelAddingPreset}
-                  class="w-7 flex items-center justify-center hover:bg-background/50 border-l border-border"
+                  class="w-7 shrink-0 flex items-center justify-center hover:bg-background/50 border-l border-border"
                   title="Cancel"
                 >
                   <X class="h-3.5 w-3.5" />
@@ -1559,8 +1565,8 @@
               {:else}
                 <select
                   class="preset-select flex-1 py-1 pl-2 pr-1 mr-1 text-xs bg-transparent border-none outline-none min-w-0 cursor-pointer"
-                  bind:value={selectedPresetName}
-                  on:change={() => handlePresetSelect(selectedPresetName)}
+                  value={selectedPresetName}
+                  on:change={(e) => handlePresetSelect(e.currentTarget.value)}
                 >
                   <option value="">None</option>
                   {#each filteredPresets as preset}
@@ -1569,7 +1575,7 @@
                 </select>
                 <button
                   on:click={startAddingPreset}
-                  class="w-7 flex items-center justify-center hover:bg-background/50 border-l border-border"
+                  class="w-7 shrink-0 flex items-center justify-center hover:bg-background/50 border-l border-border"
                   title="Save current settings as new preset"
                 >
                   <Plus class="h-3.5 w-3.5" />
@@ -1577,7 +1583,7 @@
                 {#if presetDirty && selectedPresetName}
                   <button
                     on:click={saveCurrentPreset}
-                    class="w-7 flex items-center justify-center bg-primary text-primary-foreground hover:bg-primary/90 border-l border-border"
+                    class="w-7 shrink-0 flex items-center justify-center bg-primary text-primary-foreground hover:bg-primary/90 border-l border-border"
                     title="Save changes to '{selectedPresetName}'"
                   >
                     <Save class="h-3.5 w-3.5" />
@@ -1588,46 +1594,60 @@
           </div>
 
           {#if $currentInputSource === 'tcode' || $currentInputSource === 'none'}
-            <!-- Engine Selector (T-Code Only) -->
-            <div class="flex h-7 pr-1 rounded border border-border overflow-hidden bg-background/50">
-              <Tooltip content="Processing algorithm: v1 (queue-based ramping), v2-Smooth (averaging), v2-Balanced (interpolation, recommended), v2-Detailed (peak-preserving). Configure in General settings.">
-                <span class="text-xs text-muted-foreground px-2 flex items-center gap-1 border-r border-border bg-muted/30 cursor-help">
-                  Engine
-                  <Info class="h-3 w-3" />
-                </span>
-              </Tooltip>
+            <!-- Engine selector (T-Code only). Native dropdown for the pick;
+                 a click-only Info popover next to it shows the description
+                 for the currently-selected engine. -->
+            <div class="flex h-7 rounded border border-border overflow-hidden bg-background/50">
+              <span class="text-xs text-muted-foreground px-2 flex items-center border-r border-border bg-muted/30 whitespace-nowrap">
+                Engine
+              </span>
               <select
-                class="preset-select py-1 pl-2 pr-2 text-xs bg-transparent border-none outline-none cursor-pointer"
+                class="preset-select py-1 pl-2 pr-1 mr-1 text-xs bg-transparent border-none outline-none cursor-pointer"
                 bind:value={$generalSettings.processingEngine}
               >
                 {#each PROCESSING_ENGINES as engine}
                   <option value={engine.value}>{engine.label}</option>
                 {/each}
               </select>
+              <Popover bind:open={engineInfoOpen} compact={true} contentClass="!w-[260px] min-w-0">
+                <button
+                  slot="trigger"
+                  type="button"
+                  class="w-7 h-7 shrink-0 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/50 border-l border-border"
+                  title="About this engine"
+                >
+                  <Info class="h-3.5 w-3.5" />
+                </button>
+                <div class="space-y-1">
+                  <div class="text-xs font-medium">{activeEngine?.label ?? ''}</div>
+                  <div class="text-[11px] leading-snug text-muted-foreground">
+                    {activeEngine?.description ?? ''}
+                  </div>
+                </div>
+              </Popover>
             </div>
 
-            <!-- Peak-fill variant selector (V2 Detailed only — shown for any engine;
-                 the backend ignores it unless V2 Detailed is active). -->
-            <div
-              class="flex h-7 pr-1 rounded border border-border overflow-hidden bg-background/50"
-              class:opacity-40={$generalSettings.processingEngine !== 'v2-detailed'}
-            >
-              <Tooltip content="V2 Detailed peak-fill variant. v1 (Legacy) back-fills empty buckets from previous values. v2 (Forward-fill) prefers the next sample for stronger peak preservation.">
-                <span class="text-xs text-muted-foreground px-2 flex items-center gap-1 border-r border-border bg-muted/30 cursor-help">
-                  Peak Fill
-                  <Info class="h-3 w-3" />
-                </span>
-              </Tooltip>
-              <select
-                class="preset-select py-1 pl-2 pr-2 text-xs bg-transparent border-none outline-none cursor-pointer"
-                bind:value={$generalSettings.peakFill}
-                disabled={$generalSettings.processingEngine !== 'v2-detailed'}
-              >
-                {#each PEAK_FILL_STRATEGIES as strat}
-                  <option value={strat.value}>{strat.label}</option>
-                {/each}
-              </select>
-            </div>
+            <!-- Peak-fill variant selector. Only meaningful for V2 Detailed,
+                 so hide entirely for other engines instead of showing a
+                 disabled-and-faded control. -->
+            {#if $generalSettings.processingEngine === 'v2-detailed'}
+              <div class="flex h-7 pr-1 rounded border border-border overflow-hidden bg-background/50">
+                <Tooltip content="V2 Detailed peak-fill variant. v1 (Legacy) back-fills empty buckets from previous values. v2 (Forward-fill) prefers the next sample for stronger peak preservation.">
+                  <span class="text-[11px] text-muted-foreground px-2 flex items-center gap-1 border-r border-border bg-muted/30 cursor-help whitespace-nowrap">
+                    Peak Fill
+                    <Info class="h-3 w-3" />
+                  </span>
+                </Tooltip>
+                <select
+                  class="preset-select py-1 pl-2 pr-2 text-xs bg-transparent border-none outline-none cursor-pointer"
+                  bind:value={$generalSettings.peakFill}
+                >
+                  {#each PEAK_FILL_STRATEGIES as strat}
+                    <option value={strat.value}>{strat.label}</option>
+                  {/each}
+                </select>
+              </div>
+            {/if}
           {/if}
       </div>
 

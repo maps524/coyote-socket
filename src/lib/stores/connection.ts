@@ -19,38 +19,38 @@ export const connectionState = writable<ConnectionState>({
 export const PROCESSING_ENGINES = [
   {
     value: 'v1',
-    label: 'v1 (Queue-based)',
-    description: 'Original queue-based ramping implementation',
+    label: 'v1 Queued',
+    description: 'Original queue-based ramping. Each tick advances toward the latest target at a fixed rate, so big jumps take several ticks to reach. Predictable but lags fast input.',
   },
   {
     value: 'v2-smooth',
-    label: 'v2 Smooth (Averaging)',
-    description: 'Averaging downsampling - best for ambient/sustained sensations',
+    label: 'v2 Smooth',
+    description: 'Averages incoming samples within each output bucket. Smooths out noisy or rapidly-changing input — best for ambient or sustained sensations.',
   },
   {
     value: 'v2-balanced',
-    label: 'v2 Balanced (Recommended)',
-    description: 'Linear interpolation - general use, smooth transitions',
+    label: 'v2 Balanced',
+    description: 'Linear interpolation between the most recent samples. Good general-purpose default; smooth transitions without losing too much detail.',
   },
   {
     value: 'v2-detailed',
-    label: 'v2 Detailed (Peak-preserving)',
-    description: 'Preserves intensity spikes - best for impacts/rhythm',
+    label: 'v2 Detailed',
+    description: 'Peak-preserving downsample. Empty buckets inherit a neighbor (configurable via Peak Fill) so brief spikes from impacts or rhythm are kept rather than averaged away.',
   },
   {
     value: 'v2-dynamic',
-    label: 'v2 Dynamic (Oscillation)',
-    description: 'Preserves rapid oscillations by alternating min/max values',
+    label: 'v2 Dynamic',
+    description: 'Alternates min and max values across consecutive output slots so rapid oscillations (fast back-and-forth input) survive downsampling instead of cancelling.',
   },
   {
     value: 'v2-sustained',
-    label: 'v2 Sustained (Peak-hold)',
-    description: 'Dynamic shape with 200ms peak-hold on master intensity. Sustains felt strength through fast pole-flicks.',
+    label: 'v2 Sustained',
+    description: 'Dynamic shape with a 200 ms peak-hold on master intensity. Brief peaks linger so felt strength stays during fast pole-flicks instead of dropping between strikes.',
   },
   {
     value: 'v3-predictive',
-    label: 'v3 Predictive (Lookahead)',
-    description: 'Buffers 1s of commands to generate smooth ramps between points',
+    label: 'v3 Predictive',
+    description: 'Buffers ~1 s of commands and generates smooth ramps between known points using lookahead. Highest fidelity for scripted input; adds ~1 s latency.',
   },
 ] as const;
 
@@ -65,12 +65,12 @@ export type ProcessingEngine = (typeof PROCESSING_ENGINES)[number]['value'];
 export const PEAK_FILL_STRATEGIES = [
   {
     value: 'forward',
-    label: 'v2 (Forward-fill)',
+    label: 'Forward Fill',
     description: 'Empty buckets inherit the next sample. Stronger peak preservation.',
   },
   {
     value: 'legacy',
-    label: 'v1 (Legacy cascade)',
+    label: 'Cascade',
     description: 'Empty buckets inherit the previous bucket. Original behavior.',
   },
 ] as const;

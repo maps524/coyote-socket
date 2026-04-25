@@ -7,10 +7,17 @@
   import { currentInputSource, inputSourceState } from '$lib/stores/inputSource.js';
   import { type ParameterSource, type ButtplugLinks, applySourceTransform } from '$lib/types/modulation.js';
 
-  // Lovense input feeds the same Buttplug feature pipeline, so the link UI
-  // (RangeSliderWithIndicator → ButtplugLinkPanel) only knows about
-  // 'tcode' | 'buttplug' | 'none'. Translate at the boundary.
-  $: effectiveInputMode = ($currentInputSource === 'lovense' ? 'buttplug' : $currentInputSource) as 'tcode' | 'buttplug' | 'none';
+  // Translate the live input source into the simpler tri-state
+  // ('tcode' | 'buttplug' | 'none') that RangeSliderWithIndicator and
+  // ButtplugLinkPanel understand:
+  //  - lovense  → buttplug (shares the buttplug feature pipeline)
+  //  - anything else (tcode, none, gamepad-only) → tcode
+  // Falling through to 'tcode' keeps the T-Code-style link UI visible even
+  // when no network input source is detected, so a parameter bound to a
+  // gamepad axis (GP_*) is still configurable.
+  $: effectiveInputMode = ($currentInputSource === 'buttplug' || $currentInputSource === 'lovense')
+    ? 'buttplug' as const
+    : 'tcode' as const;
 
   // Helper: Get Buttplug feature value from the current features based on linked config
   // Returns 0-1 normalized value or 0 if not found
