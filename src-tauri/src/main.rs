@@ -890,6 +890,21 @@ async fn get_gamepad_status() -> Result<gamepad::GamepadStatusPayload, String> {
     Ok(gamepad::current_status())
 }
 
+/// Pick which connected controller drives input. Pass an empty string / null
+/// to clear the explicit selection (which falls back to auto-picking the
+/// first connected controller).
+#[tauri::command]
+async fn set_selected_gamepad(id: Option<String>) -> Result<String, String> {
+    gamepad::set_selected_controller(id.clone());
+    let mut general = settings::get_settings().await.general;
+    general.selected_gamepad = id.clone().unwrap_or_default();
+    settings::update_general(general).await?;
+    Ok(format!(
+        "Selected gamepad set to {}",
+        id.unwrap_or_else(|| "auto".to_string())
+    ))
+}
+
 #[tauri::command]
 async fn save_general_settings(
     no_input_behavior: String,
@@ -947,6 +962,7 @@ async fn save_general_settings(
         gamepad_button_repeat_interval_ms: current.gamepad_button_repeat_interval_ms,
         channel_a_max_intensity: current.channel_a_max_intensity,
         channel_b_max_intensity: current.channel_b_max_intensity,
+        selected_gamepad: current.selected_gamepad,
     };
     settings::update_general(general_settings).await?;
     Ok("General settings saved".to_string())
@@ -1338,6 +1354,7 @@ fn main() {
             get_gamepad_bindings,
             set_gamepad_engine,
             get_gamepad_status,
+            set_selected_gamepad,
             set_gamepad_stick_sensitivity,
             set_gamepad_button_repeat,
             save_general_settings,
@@ -1388,6 +1405,16 @@ fn main() {
                 let app_settings = settings::get_settings().await;
                 let bindings = app_settings.gamepad_bindings.clone();
                 gamepad::init_active_bindings(bindings).await;
+                // Restore the saved controller selection before the engine
+                // starts so the first batch of events from the right pad
+                // pass through immediately. Empty string = no explicit
+                // selection (auto-pick first available).
+                let saved_pick = app_settings.general.selected_gamepad.clone();
+                gamepad::set_selected_controller(if saved_pick.is_empty() {
+                    None
+                } else {
+                    Some(saved_pick)
+                });
                 let engine = gamepad::GamepadEngine::from_str(
                     &app_settings.general.gamepad_engine,
                 );

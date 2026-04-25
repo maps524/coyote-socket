@@ -112,24 +112,49 @@ const REBIND_AXIS_THRESHOLD: f64 = 0.5;
 // ---------------------------------------------------------------------------
 // Connection tracking
 //
-// Tracks how many gamepads the active engine sees, and pushes a Tauri event
-// whenever that changes. Used by the frontend to gate the T-Code monitor and
-// drive the gamepad status pill in the nav.
+// Tracks the list of currently-connected controllers (per the active engine)
+// and which one the user has selected as the input source. Engines filter
+// their event streams to only the selected controller so multiple plugged-in
+// pads don't fight for the same axes.
+//
+// IDs are namespaced by engine so a saved selection from xinput doesn't get
+// mistakenly applied while gilrs is active. Format:
+//   xinput:<slot 0..3>
+//   gilrs:<numeric GamepadId hash>
 // ---------------------------------------------------------------------------
 
 static CONNECTED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CONNECTED_FLAG: AtomicBool = AtomicBool::new(false);
 static ACTIVE_ENGINE_NAME: OnceLock<StdRwLock<String>> = OnceLock::new();
+static CONTROLLERS: OnceLock<StdRwLock<Vec<ControllerInfo>>> = OnceLock::new();
+static SELECTED_ID: OnceLock<StdRwLock<Option<String>>> = OnceLock::new();
+
+#[derive(Clone, Serialize)]
+pub struct ControllerInfo {
+    pub id: String,
+    pub name: String,
+    pub selected: bool,
+}
 
 #[derive(Clone, Serialize)]
 pub struct GamepadStatusPayload {
     pub connected: bool,
     pub count: usize,
     pub engine: String,
+    pub controllers: Vec<ControllerInfo>,
+    pub selected_id: Option<String>,
 }
 
 fn engine_lock() -> &'static StdRwLock<String> {
     ACTIVE_ENGINE_NAME.get_or_init(|| StdRwLock::new("off".to_string()))
+}
+
+fn controllers_lock() -> &'static StdRwLock<Vec<ControllerInfo>> {
+    CONTROLLERS.get_or_init(|| StdRwLock::new(Vec::new()))
+}
+
+fn selected_lock() -> &'static StdRwLock<Option<String>> {
+    SELECTED_ID.get_or_init(|| StdRwLock::new(None))
 }
 
 fn current_engine_name() -> String {
@@ -145,13 +170,53 @@ fn set_active_engine_name(name: &str) {
     }
 }
 
+/// Resolve the effective selected controller id. If the user has not picked
+/// one (or their pick is no longer connected) we fall through to the first
+/// controller in the list, so a single connected pad always works without
+/// requiring an explicit selection.
+fn effective_selected(controllers: &[ControllerInfo], explicit: Option<&str>) -> Option<String> {
+    if let Some(id) = explicit {
+        if controllers.iter().any(|c| c.id == id) {
+            return Some(id.to_string());
+        }
+    }
+    controllers.first().map(|c| c.id.clone())
+}
+
+/// Whether the supplied controller id is the active source. Used by the
+/// engine loops to drop events / state from unselected controllers.
+pub fn is_selected_controller(id: &str) -> bool {
+    let Ok(controllers) = controllers_lock().read() else {
+        return true;
+    };
+    let explicit = selected_lock().read().ok().and_then(|g| g.clone());
+    effective_selected(&controllers, explicit.as_deref())
+        .map(|s| s == id)
+        .unwrap_or(false)
+}
+
 /// Snapshot of the live status — used by the `get_gamepad_status` command for
 /// HMR refresh and by the in-process emitter below.
 pub fn current_status() -> GamepadStatusPayload {
+    let controllers_snapshot: Vec<ControllerInfo> = controllers_lock()
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let explicit = selected_lock().read().ok().and_then(|g| g.clone());
+    let selected_id = effective_selected(&controllers_snapshot, explicit.as_deref());
+    let controllers: Vec<ControllerInfo> = controllers_snapshot
+        .into_iter()
+        .map(|c| ControllerInfo {
+            selected: Some(&c.id) == selected_id.as_ref(),
+            ..c
+        })
+        .collect();
     GamepadStatusPayload {
         connected: CONNECTED_FLAG.load(Ordering::Relaxed),
         count: CONNECTED_COUNT.load(Ordering::Relaxed),
         engine: current_engine_name(),
+        controllers,
+        selected_id,
     }
 }
 
@@ -161,33 +226,90 @@ fn emit_status(payload: &GamepadStatusPayload) {
     }
 }
 
-/// Set the absolute connected-gamepad count for the active engine and emit if
-/// the connected/disconnected boundary or the count changed. Engines call this
-/// whenever their internal "user X is connected" state mutates.
-fn update_connected_count(new_count: usize) {
-    let was = CONNECTED_COUNT.swap(new_count, Ordering::Relaxed);
+/// Replace the controller list for the active engine. Updates the count +
+/// connected flag, falls back the selection if the previous pick is no longer
+/// connected, and emits if anything changed.
+fn set_controllers(new_list: Vec<ControllerInfo>) {
+    let new_count = new_list.len();
+    let mut changed = false;
+    if let Ok(mut guard) = controllers_lock().write() {
+        if guard.len() != new_list.len()
+            || guard.iter().zip(&new_list).any(|(a, b)| a.id != b.id || a.name != b.name)
+        {
+            *guard = new_list;
+            changed = true;
+        }
+    }
+    let was_count = CONNECTED_COUNT.swap(new_count, Ordering::Relaxed);
     let was_connected = CONNECTED_FLAG.load(Ordering::Relaxed);
     let now_connected = new_count > 0;
     if was_connected != now_connected {
         CONNECTED_FLAG.store(now_connected, Ordering::Relaxed);
+        changed = true;
     }
-    if was != new_count || was_connected != now_connected {
+    if was_count != new_count {
+        changed = true;
+    }
+    if changed {
         let payload = current_status();
         log_info!(
-            "[gamepad] status changed: engine={} connected={} count={}",
+            "[gamepad] status changed: engine={} connected={} count={} selected={:?}",
             payload.engine,
             payload.connected,
-            payload.count
+            payload.count,
+            payload.selected_id
         );
         emit_status(&payload);
     }
 }
 
+/// Apply a user-supplied controller selection. Empty / unknown id falls back
+/// to the auto-pick (first controller), which is what the UI sends when it
+/// wants to clear an explicit selection.
+pub fn set_selected_controller(id: Option<String>) {
+    if let Ok(mut guard) = selected_lock().write() {
+        *guard = id.filter(|s| !s.is_empty());
+    }
+    let payload = current_status();
+    log_info!(
+        "[gamepad] selection changed: selected={:?}",
+        payload.selected_id
+    );
+    emit_status(&payload);
+}
+
 fn reset_connection_state() {
     CONNECTED_COUNT.store(0, Ordering::Relaxed);
     CONNECTED_FLAG.store(false, Ordering::Relaxed);
+    if let Ok(mut guard) = controllers_lock().write() {
+        guard.clear();
+    }
     let payload = current_status();
     emit_status(&payload);
+}
+
+#[cfg(target_os = "windows")]
+fn xinput_controller_id(slot: u32) -> String {
+    format!("xinput:{}", slot)
+}
+
+#[cfg(target_os = "windows")]
+fn publish_xinput_controllers(connected_seen: &[bool; 4]) {
+    let list: Vec<ControllerInfo> = connected_seen
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, conn)| {
+            if !*conn {
+                return None;
+            }
+            Some(ControllerInfo {
+                id: xinput_controller_id(slot as u32),
+                name: format!("XInput Controller {}", slot + 1),
+                selected: false,
+            })
+        })
+        .collect();
+    set_controllers(list);
 }
 
 // ---------------------------------------------------------------------------
@@ -853,8 +975,10 @@ async fn gilrs_loop() {
     };
 
     let mut connected_ids: HashSet<gilrs::GamepadId> = HashSet::new();
+    let mut id_names: HashMap<gilrs::GamepadId, String> = HashMap::new();
     for (id, pad) in gilrs.gamepads() {
         connected_ids.insert(id);
+        id_names.insert(id, pad.name().to_string());
         eprintln!(
             "[gamepad/gilrs] {:?}: name='{}' uuid={:?}",
             id,
@@ -868,7 +992,7 @@ async fn gilrs_loop() {
         startup_count
     );
     log_info!("[gamepad/gilrs] initialized, {} gamepad(s)", startup_count);
-    update_connected_count(startup_count);
+    publish_gilrs_controllers(&connected_ids, &id_names);
 
     let mut axis_state: HashMap<(usize, u8), f32> = HashMap::new();
     let mut last_rate_tick = std::time::Instant::now();
@@ -877,6 +1001,9 @@ async fn gilrs_loop() {
         while let Some(event) = gilrs.next_event() {
             match event.event {
                 EventType::ButtonPressed(btn, _code) => {
+                    if !is_selected_controller(&gilrs_controller_id(event.id)) {
+                        continue;
+                    }
                     let index = gilrs_button_to_index(btn);
                     eprintln!("[gamepad/gilrs] ButtonPressed btn={:?} index={}", btn, index);
                     if index == 255 {
@@ -885,6 +1012,9 @@ async fn gilrs_loop() {
                     on_button_press(index).await;
                 }
                 EventType::ButtonReleased(btn, _code) => {
+                    if !is_selected_controller(&gilrs_controller_id(event.id)) {
+                        continue;
+                    }
                     let index = gilrs_button_to_index(btn);
                     if index == 255 {
                         continue;
@@ -892,6 +1022,9 @@ async fn gilrs_loop() {
                     on_button_release(index).await;
                 }
                 EventType::AxisChanged(axis, value, _code) => {
+                    if !is_selected_controller(&gilrs_controller_id(event.id)) {
+                        continue;
+                    }
                     let index = gilrs_axis_to_index(axis);
                     if index == 255 {
                         continue;
@@ -905,14 +1038,20 @@ async fn gilrs_loop() {
                     eprintln!("[gamepad/gilrs] Connected: {:?}", event.id);
                     log_info!("[gamepad/gilrs] connected: {:?}", event.id);
                     if connected_ids.insert(event.id) {
-                        update_connected_count(connected_ids.len());
+                        let name = gilrs
+                            .gamepad(event.id)
+                            .name()
+                            .to_string();
+                        id_names.insert(event.id, name);
+                        publish_gilrs_controllers(&connected_ids, &id_names);
                     }
                 }
                 EventType::Disconnected => {
                     eprintln!("[gamepad/gilrs] Disconnected: {:?}", event.id);
                     log_info!("[gamepad/gilrs] disconnected: {:?}", event.id);
                     if connected_ids.remove(&event.id) {
-                        update_connected_count(connected_ids.len());
+                        id_names.remove(&event.id);
+                        publish_gilrs_controllers(&connected_ids, &id_names);
                     }
                 }
                 _ => {}
@@ -980,6 +1119,34 @@ fn gilrs_id_to_usize(id: gilrs::GamepadId) -> usize {
         .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize))
 }
 
+/// Stable string id for a gilrs gamepad. Used as the controller registry key
+/// and as the persistent selection identifier.
+fn gilrs_controller_id(id: gilrs::GamepadId) -> String {
+    format!("gilrs:{:?}", id)
+}
+
+/// Push the current set of gilrs-detected controllers into the global
+/// controller registry. Called on startup and whenever a Connected /
+/// Disconnected event arrives.
+fn publish_gilrs_controllers(
+    ids: &HashSet<gilrs::GamepadId>,
+    names: &HashMap<gilrs::GamepadId, String>,
+) {
+    let mut list: Vec<ControllerInfo> = ids
+        .iter()
+        .map(|id| ControllerInfo {
+            id: gilrs_controller_id(*id),
+            name: names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| format!("Gamepad {:?}", id)),
+            selected: false,
+        })
+        .collect();
+    list.sort_by(|a, b| a.id.cmp(&b.id));
+    set_controllers(list);
+}
+
 // ---------------------------------------------------------------------------
 // XInput engine (Windows only). Falls back to a no-op on other platforms.
 // ---------------------------------------------------------------------------
@@ -1018,8 +1185,7 @@ async fn xinput_loop() {
                         connected_seen[user_index as usize] = false;
                         prev_buttons[user_index as usize] = 0;
                         prev_axes[user_index as usize] = [0.0; 6];
-                        let live = connected_seen.iter().filter(|c| **c).count();
-                        update_connected_count(live);
+                        publish_xinput_controllers(&connected_seen);
                     }
                     continue;
                 }
@@ -1033,8 +1199,15 @@ async fn xinput_loop() {
                 eprintln!("[gamepad/xinput] user {} connected", user_index);
                 log_info!("[gamepad/xinput] user {} connected", user_index);
                 connected_seen[user_index as usize] = true;
-                let live = connected_seen.iter().filter(|c| **c).count();
-                update_connected_count(live);
+                publish_xinput_controllers(&connected_seen);
+            }
+
+            // Drop input from any slot that isn't the currently-selected
+            // controller. Connection presence is still reported above so the
+            // UI can list it as a switchable option.
+            if !is_selected_controller(&xinput_controller_id(user_index)) {
+                prev_buttons[user_index as usize] = state.raw.Gamepad.wButtons;
+                continue;
             }
 
             let raw = state.raw.Gamepad;

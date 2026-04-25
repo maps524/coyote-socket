@@ -541,6 +541,11 @@ pub struct GeneralSettings {
     pub channel_a_max_intensity: u8,
     #[serde(default = "default_channel_max_intensity")]
     pub channel_b_max_intensity: u8,
+    /// Persistent controller selection (engine-prefixed id, e.g. "xinput:0"
+    /// or "gilrs:..."). Empty string = no explicit pick, fall back to the
+    /// first connected controller per engine.
+    #[serde(default)]
+    pub selected_gamepad: String,
 }
 
 fn default_stick_sensitivity() -> f64 {
@@ -606,6 +611,7 @@ impl Default for GeneralSettings {
             gamepad_button_repeat_interval_ms: default_button_repeat_interval_ms(),
             channel_a_max_intensity: default_channel_max_intensity(),
             channel_b_max_intensity: default_channel_max_intensity(),
+            selected_gamepad: String::new(),
         }
     }
 }

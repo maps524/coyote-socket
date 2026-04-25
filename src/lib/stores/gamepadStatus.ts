@@ -2,16 +2,26 @@ import { writable } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 
+export interface ControllerInfo {
+  id: string;
+  name: string;
+  selected: boolean;
+}
+
 export interface GamepadStatus {
   connected: boolean;
   count: number;
   engine: 'off' | 'gilrs' | 'xinput' | string;
+  controllers: ControllerInfo[];
+  selected_id: string | null;
 }
 
 export const gamepadStatus = writable<GamepadStatus>({
   connected: false,
   count: 0,
   engine: 'off',
+  controllers: [],
+  selected_id: null,
 });
 
 let unlisten: UnlistenFn | null = null;

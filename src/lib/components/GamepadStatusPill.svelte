@@ -27,6 +27,19 @@
       switching = false;
     }
   }
+
+  let selecting = false;
+  async function pickController(id: string) {
+    if (selecting || status.selected_id === id) return;
+    selecting = true;
+    try {
+      await invoke<string>('set_selected_gamepad', { id });
+    } catch (e) {
+      console.error('[GamepadStatusPill] failed to select controller:', e);
+    } finally {
+      selecting = false;
+    }
+  }
 </script>
 
 <Popover bind:open={popoverOpen} align="start">
@@ -74,5 +87,32 @@
             : 'Gamepad input disabled.'}
       </div>
     </div>
+
+    <!-- Controller picker. Hidden when only one controller is connected
+         (auto-selected) or none. Sending an empty id clears the explicit
+         selection on the backend, falling back to first-available. -->
+    {#if status.controllers.length > 1}
+      <div class="space-y-1">
+        <div class="text-[10px] text-muted-foreground uppercase tracking-wider">Controller</div>
+        <div class="space-y-1">
+          {#each status.controllers as ctrl (ctrl.id)}
+            <button
+              type="button"
+              class="w-full text-left px-2 py-1 text-xs rounded border transition-colors flex items-center justify-between gap-2
+                     {ctrl.selected
+                       ? 'bg-primary/15 text-foreground border-primary/50'
+                       : 'bg-muted/30 text-muted-foreground border-border hover:bg-muted'}"
+              disabled={selecting}
+              on:click={() => pickController(ctrl.id)}
+            >
+              <span class="truncate">{ctrl.name}</span>
+              {#if ctrl.selected}
+                <span class="w-1.5 h-1.5 rounded-full bg-green-400 shrink-0"></span>
+              {/if}
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
   </div>
 </Popover>
