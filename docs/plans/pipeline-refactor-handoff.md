@@ -53,8 +53,13 @@ Each step shipped with three reviewer passes (correctness / DRY / design gaps) b
 | `f37aa41` | Bundled sub D follow-up: deduped Vibrate/Oscillate phase-state guards into `step_phase_state` helper; dropped the third `lerp` copy (now imports `crate::modulation::lerp`); renamed `oscillate_passes_through_on_first_call` test to reflect that the assertion pins the trough, not pass-through; captured Constrict centering shift in handoff sub G migration note. |
 | `297f10c` | Plan doc: bundled-phase substep table marked subs A-D shipped with commit refs + sub E carry-forward notes. |
 | `b575447` | Bundled sub E: unified resolver via transforms — drop Buttplug pipeline short-circuit. `TransformConfig::Rotate` variant + `apply_rotate` (paired speed/direction modifier axes). `ResolvedSample` struct in `modulation.rs` (sub G's wire format shape). `resolve_link` / `resolve_link_at_time` thread `&mut ParameterLinkRuntime` through midpoint → curve → transforms → range. `settings_convert::convert_parameter_source` translates `ButtplugLinksSettings` → ordered `Vec<TransformConfig>` (Position is source axis, then Motion/Vibrate/Constrict). `apply_channel_config_to_state` resets `Channel.link_runtime` via `ChannelLinkRuntime::for_config`. Per-batch `arrival_ts_ms` argument on `set_buttplug_feature` / `set_buttplug_linear_cmd` / `set_buttplug_rotate_direction` — handlers compute once per logical command. `Channel.buttplug_link` consumer gone, field marked `#[deprecated]` (write-only path until sub F). `get_resolved_channel_params` + `get_per_slot_frequencies` switched to write locks for stateful transform threading. **Gate intentionally narrow**: only `bp:`-prefixed source axes route through the resolver — T-Code / gamepad intensity stays on V2/V3 engine path, transforms attached to non-`bp:` links are silently ignored until sub G. |
+| `09ebfea` | Bundled sub E follow-up: tightened resolver gate to `bp:` only (a T-Code intensity preset with attached transforms had silently bypassed engines). Extracted `ProcessingState::split_bus_and_channels` helper, deduping the deref + disjoint-borrow dance at three call sites. `pub type InputBusSnapshot<'a> = &'a InputBus` alias (sub G's frozen-frame is a typedef edit, not per-callsite churn). `#[deprecated]` markers on `Channel.buttplug_link` / `buttplug_state` / `set_buttplug_link_config` so any future maintainer re-introducing a reader trips a compiler warning. |
+| `47f1039` | Bundled sub F: deleted `buttplug/pipeline.rs` (311 lines + 5 tests) and `buttplug/state.rs` (210 lines, `ButtplugChannelState` / `ButtplugFeatureValues` / `PositionDurationState`). Trimmed `buttplug/types.rs` to descriptor-only (`ButtplugFeatureType`, `ButtplugFeatureConfig`). Moved canonical `ConstrictionMethod` into `transforms/mod.rs`. Dropped `Channel.buttplug_link` + `Channel.buttplug_state` fields, `set_buttplug_link_config` / `get_buttplug_feature_values` / `has_buttplug_input` methods, `BUTTPLUG_MAX_FEATURES` const. Dropped `ButtplugLinksSettings::to_link_config`. Removed `bp_config` write in `apply_channel_config_to_state`. The schema-side `buttplug_links` field on `ParameterSourceSettings` survives intentionally — sub G's frontend transforms editor lands first. 983 lines deleted, 139 added. |
+| `7fddc0f` | Bundled sub F follow-up: deleted `ButtplugFeatureType` enum (zero live readers; handler hardcodes wire strings; frontend has its own TS copy) and `_touch_buttplug_links` test fixture (residue from a prior compile state). Refreshed plan-doc deletion-manifest rows for `update_parameter_source` / `update_buttplug_links` Tauri commands — both shipped in step 3, plan doc had them stale at "Step 5+6+7". |
+| `bcdb836` | Bundled sub G.0 (backend half): `resolved-update` Tauri event emitted at the 10Hz device tick alongside `waveform-sample`. Wire types `ResolvedSampleSnapshot` / `ChannelResolvedSnapshot` / `ResolvedUpdatePayload` defined in `resolver.rs`. `Channel.last_intensity_sample: Option<ResolvedSample>` stash captures the bp:-path resolver output inside `get_next_waveform_data` — the telemetry pass `.take()`s it rather than re-resolving (re-resolve would double-advance Vibrate / Oscillate phase). `get_resolved_channel_params` returns both device-output params + per-channel snapshots in one resolver pass. Engine-path Linked intensity synthesizes from V2 ramp / V3 `current_position` so the UI sees the device's actual transmitted value (faithful "what device receives" reading); Static synthesizes from the static byte. 5 new tests; 109 pass. |
+| `b4e70a5` | Bundled sub G.0 follow-up: fixed bp:→Static transition stash leak (Static early-return now clears `last_intensity_sample`). Extracted `build_channel_snapshot` free function so the production resolver pass + the in-crate test helper share one body (~80 line dedup). `from_sample` consumes `ResolvedSample` by value (drops 3 String clones per channel per tick). `Channel.last_intensity_sample` tightened from `pub` to `pub(crate)`. `INTENSITY_DEVICE_MAX: f64 = 200.0` named constant replacing the magic divisor. Misnamed `..._with_camel_case_fields` test renamed to `..._with_snake_case_fields` (matches the actual assertion). 110 pass. |
 
-The two pre-existing test failures (`buttplug::pipeline::tests::test_pipeline_oscillate`, `processing::tests::test_parse_tcode_with_interval`) are not new — they live on `main` as well and are out of scope for this refactor. The same two failures persist across subs B-D; total pass count grew from 67 (pre-refactor) → 72 (sub B) → 73 (sub C) → 93 (sub D's 20 transform tests).
+The two pre-existing test failures (`buttplug::pipeline::tests::test_pipeline_oscillate`, `processing::tests::test_parse_tcode_with_interval`) are not new — they live on `main` as well and are out of scope for this refactor. Sub F deleted the pipeline.rs file, so its failure is now gone with the file. Total pass count: 67 (pre-refactor) → 72 (sub B) → 73 (sub C) → 93 (sub D) → 109 (sub E) → 103 (sub F, deleted tests for removed methods) → 109 (sub G.0) → 110 (sub G.0 follow-up).
 
 ---
 
@@ -123,56 +128,158 @@ Follow-up commit `<TBD>` after sub E addressed the in-scope reviewer findings: t
 
 ---
 
-## Next concrete action: sub F (`git rm` + field deletion)
+## Next concrete action: sub G.1 (frontend resolved-state stream)
 
-Sub E shipped the unified resolver and the gate that routes Buttplug-namespaced intensity through it. Sub F is the cleanup: now that `process_buttplug_pipeline` has no live callers and `Channel.buttplug_link` has no readers, delete them.
+Subs A-G.0 shipped the backend half of the bundled phase. Sub G.1 is the
+frontend half: consume the `resolved-update` event the backend now emits at
+10Hz, replace `inputPosition.ts`, render post-curve position dots on every
+linked-parameter card, and ship the transforms editor so users can attach
+`Vibrate` / `Oscillate` / `Rotate` / `Constrict` (or generic `Smooth` /
+`Scale` / etc.) to any link. Plus the wire-format renames: drop
+`axis-update` (replaced by `bus-update`), drop `buttplug-features`
+(superseded by `bus-update` filtered to `bp:*`).
 
-### What goes away
+### Wire format already shipped (sub G.0)
 
-| Symbol | Where | Why it can go now |
-|---|---|---|
-| `process_buttplug_pipeline` (fn + 5 tests) | `src-tauri/src/buttplug/pipeline.rs` | Sub E removed the only caller in `processing.rs::get_next_waveform_data`. The re-export in `buttplug/mod.rs` is already gone. |
-| `ButtplugChannelState`, `PositionDurationState` | `src-tauri/src/buttplug/state.rs` | Pipeline-only state. `ButtplugFeatureValues::from_input_bus` is the only thing in this file the bundled phase still uses (called by `processing.rs::get_buttplug_feature_values` — also dead in sub E, slated for the same delete). |
-| `ButtplugFeatureValues`, `get_buttplug_feature_values`, `has_buttplug_input` | `state.rs` + `processing.rs` | Both methods on `ProcessingState` are now dead-flagged by `cargo check`. The bus snapshot replaces them. |
-| `Channel.buttplug_link`, `Channel.buttplug_state` | `processing.rs` | `#[deprecated]` markers in sub E follow-up; sub F drops the fields plus the constructor entries plus `set_buttplug_link_config`. |
-| `set_buttplug_link_config`, `apply_channel_config_to_state`'s `bp_config` write | `processing.rs` + `main.rs` | Write-only path kept alive in sub E so the field had a coherent value. With the field gone, the call goes too. |
-| `ButtplugLinkConfig`, `FeatureTypeConfig`, `ButtplugLinksSettings::to_link_config` | `buttplug/types.rs`, `settings.rs` | `to_link_config` is the only caller of `ButtplugLinkConfig::default()` left after sub E. Settings-load goes through `settings_convert::buttplug_links_to_transforms` directly now. Trim `types.rs` to what `buttplug/handler.rs` still needs (`ButtplugFeatureConfig` for advertising the device descriptor; possibly `ButtplugFeatureType`). |
-| `ConstrictionMethod` re-export from `buttplug` | `buttplug/types.rs` (canonical definition) → `transforms/buttplug.rs` | Move the canonical enum into `transforms/buttplug.rs` so the resolver layer owns its own type. Drop the `pub use crate::buttplug::ConstrictionMethod` re-export in `transforms/mod.rs`. |
-| `BUTTPLUG_MAX_FEATURES` constant | `processing.rs:22` | Used only by `get_buttplug_feature_values`; dies with it. |
-| `InputBus::has_any_with_prefix`, `clear`, `age_ms`, `latest_timestamp` | `input_bus.rs` | All flagged dead by `cargo check`. Kept for sub G's input-monitor work — verify before deleting. |
+The backend half is done. Sub G.1 only needs to consume what's already
+on the wire. Snake_case JSON keys (matches the existing `WaveformSample`
+shape).
 
-### Files deleted entirely (per deletion manifest, plan doc lines 365-371)
+```rust
+// resolver.rs (sub G.0)
+pub struct ResolvedUpdatePayload {
+    pub timestamp_ms: u64,
+    pub channel_a: ChannelResolvedSnapshot,
+    pub channel_b: ChannelResolvedSnapshot,
+}
 
-- `src-tauri/src/buttplug/pipeline.rs`
-- `src-tauri/src/buttplug/state.rs`
+pub struct ChannelResolvedSnapshot {
+    pub frequency: ResolvedSampleSnapshot,
+    pub frequency_balance: ResolvedSampleSnapshot,
+    pub intensity_balance: ResolvedSampleSnapshot,
+    pub intensity: ResolvedSampleSnapshot,
+}
 
-### Files trimmed
+pub struct ResolvedSampleSnapshot {
+    pub raw_input: f64,             // pre-curve, pre-transforms
+    pub normalized_pre_range: f64,  // 0..1, post-curve+transforms
+    pub device_value: f64,          // post-range, in device units
+    pub target_time_ms: u64,        // now - delay_ms
+    pub source_axis: Option<String>,// None for Static (key omitted)
+    pub is_static: bool,
+}
+```
 
-- `src-tauri/src/buttplug/types.rs` — keep only what `buttplug/handler.rs` reads (verify; likely `ButtplugFeatureConfig`, possibly `ButtplugFeatureType`).
-- `src-tauri/src/buttplug/mod.rs` — drop the re-exports for the dropped types. Keep `pub mod handler` and whatever still survives.
-- `src-tauri/src/processing.rs` — drop `Channel.buttplug_link`, `Channel.buttplug_state`, `set_buttplug_link_config`, `get_buttplug_feature_values`, `has_buttplug_input`, `BUTTPLUG_MAX_FEATURES`, the `use crate::buttplug::{ButtplugChannelState, ButtplugLinkConfig}` import.
-- `src-tauri/src/main.rs` — drop the `bp_config` block in `apply_channel_config_to_state` and the `_touch_buttplug_links` test marker if it references the removed type.
-- `src-tauri/src/settings.rs` — `ButtplugLinksSettings::to_link_config` goes (no caller). The struct itself stays for the field sub F preserves on `ParameterSourceSettings` until the schema-deletion step. Cross-reference plan doc deletion-manifest table.
-- `src-tauri/src/transforms/mod.rs` — replace `pub use crate::buttplug::ConstrictionMethod` with the canonical definition (move from `buttplug/types.rs`).
+### Files to add / change
 
-### Acceptance for sub F
+Frontend:
 
-- `cargo check` clean — most of the dead-code warnings sub E left behind go away.
-- `cargo test` — 109+ pass, 2 pre-existing failures unchanged. The 5 tests inside `buttplug/pipeline.rs` are deleted with the file (drop from the count).
-- `git grep` deletion-manifest checklist (plan doc lines 484-510): `process_buttplug_pipeline`, `ButtplugChannelState`, `ButtplugFeatureValues`, `ButtplugLinkConfig`, `buttplug_features`, `buttplug_linear_commands`, `buttplug_rotate_directions`, `buttplug_link`, `buttplug_state` — zero hits outside `docs/plans/*` and `git log`.
-- The settings schema field `ChannelSettings.intensity_source.buttplug_links` survives sub F (settings-load converts it); the deletion manifest moves it to a later cleanup once the frontend-side editor for transforms lands in sub G. Document this in the sub F commit body.
+- **`src/lib/stores/resolvedState.ts`** (new) — subscribe to
+  `resolved-update`. Keyed by `(channel, parameter)` → latest
+  `ResolvedSampleSnapshot`. Cadence: 10Hz arrivals; consumers can
+  RAF-interpolate. Shape mirrors backend: pull `is_static` straight
+  through, render the position line only when `!is_static`.
+- **`src/lib/stores/inputBus.ts`** (new, can defer to sub G.2) — flat
+  axis-keyed store of raw bus values. Currently no backend
+  `bus-update` event exists; sub G.2 introduces it. For G.1 the
+  store can stay empty / fed by the existing `axis-update` payload's
+  `axes` map until G.2 swaps the source.
+- **`src/lib/stores/inputPosition.ts`** (deleted) — replaced by
+  `resolvedState.ts` + `inputBus.ts`. Plan-doc done-criteria
+  requires zero hits.
+- **`src/lib/types/modulation.ts`** — add `Transform` union mirroring
+  `TransformConfig` discriminator. Kebab-case `type` field per sub D
+  (`{type: "vibrate", speedAxis, distance}`, etc.). Variants: `smooth`,
+  `scale`, `clamp`, `invert`, `hold`, `mix`, `vibrate`, `oscillate`,
+  `rotate`, `constrict`. Field names mirror the Rust struct
+  (`speedAxis`, `directionAxis`, `maxSpeedHz`, etc. — sub D shipped
+  `#[serde(rename = "...")]` for camelCase on the wire).
+- **`src/lib/components/curve plot component`** (locate via grep for
+  the existing curve renderer in `ChannelControl.svelte` /
+  similar) — render two new dots: input-at-target-time + resolved
+  position. Existing curve plot already shows the curve shape; sub G.1
+  overlays the dots.
+- **`src/lib/components/`** transforms editor (new) — list / add /
+  reorder / delete `TransformConfig` entries on a `ParameterLinkConfig`.
+  One sub-component per variant. Posts the updated channel config
+  through the existing `apply_channel_config` Tauri command.
+- **`src/lib/components/InputMonitor.svelte`** — drop the
+  `axis-update` and `buttplug-features` listeners; subscribe to
+  `inputBus` store instead. (Defer to sub G.2 if `bus-update` event
+  isn't shipped yet.)
 
-### Sub F — likely commit shape
+Backend (sub G.2):
 
-One commit. The deletes are tightly coupled (deleting the field and deleting `process_buttplug_pipeline` together prevents an intermediate state where `set_buttplug_link_config` writes a field nothing reads). Expect ~600-800 lines deleted, ~50 added (move of `ConstrictionMethod`, possibly a few `#[allow(dead_code)]` cleanups).
+- **`emit_bus_update` + `BusUpdatePayload`** in `main.rs`. Fired from
+  `input_bus::update` per-write (T-Code, gamepad, Buttplug, Lovense
+  all funnel through this). Source-tagged by axis name prefix
+  (`L0` / `R2` for T-Code, `GP_*` for gamepad, `bp:*` for
+  Buttplug/Lovense).
+- Drop `emit_axis_update` and `emit_buttplug_features` once all
+  frontend listeners have migrated.
 
-### Sub G + Step 8 — sketches (unchanged from previous session)
+### Acceptance for sub G
 
-- **Sub G — Frontend resolved-state stream.** New Tauri event `resolved-update` carrying `ResolvedUpdatePayload { channel_a, channel_b: ChannelResolvedSnapshot { frequency, frequency_balance, intensity_balance, intensity: ResolvedSampleSnapshot { raw_input, normalized_pre_range, device_value, target_time_ms, source_axis } } }`. Emitted at 10Hz tick from `device.rs` send path. New stores `src/lib/stores/resolvedState.ts` + `src/lib/stores/inputBus.ts` replacing `src/lib/stores/inputPosition.ts`. Linked-parameter UI cards render the post-curve position line on their curve plot. **Sub E left a gap here**: the engine-path channels (T-Code intensity) don't run the resolver, so a naive `resolved-update` emission would be blank for them. Sub G must either synthesize a `ResolvedSample` from `Channel.v2.get_value_at(now)` / `Channel.v3.current_position` for engine channels, or close the gate fully (run the resolver after the engine produces its 4-slot output and capture only the post-range value into `ResolvedSample`). Frontend transform editor lands here too — match the kebab-case discriminator (`{"type": "vibrate", ...}`) sub D shipped, and add the new `{"type": "rotate", ...}` variant sub E added.
+- `cargo check` + `cargo test` clean (110+ pass, 1 pre-existing
+  failure unchanged).
+- `npm run check` (svelte-check) clean.
+- The dev-server skill confirms a build that boots without runtime
+  errors. Manual smoke: a linked-intensity preset shows a moving
+  position dot on the curve plot when input arrives.
+- `git grep` deletion-manifest checklist (plan doc lines 484-510):
+  `axis-update`, `buttplug-features`, `inputPosition` — zero hits
+  outside `docs/plans/*` and `git log`. (Sub G.1 may leave
+  `axis-update` for sub G.2 if `bus-update` isn't shipped yet —
+  document the choice in the commit body.)
+- Beta-branch validation on a real device with both a T-Code preset
+  and a Buttplug preset — UI cards show the post-curve dot moving
+  in sync with the input.
 
-### Step 8 — sketch
+### Sub G — likely commit shape
 
-Wrap existing input handlers in an `InputSource` trait. Mostly cosmetic by then. New `src-tauri/src/input/` module with `input/mod.rs` declaring the trait, `input/tcode.rs` (wraps `tcode_input.rs`), `input/gamepad.rs`, `input/buttplug.rs` (with `lovense` as adapter inside). The win: adding a future input source (MIDI, OSC, audio amplitude) is one self-contained file.
+Multiple commits inside the substep:
+
+- **G.1** — Frontend stores + UI integration (no transforms editor,
+  no `bus-update` rename). Just consume `resolved-update` and render
+  the position dots. Smallest user-visible win.
+- **G.2** — Transforms editor UI. Adds the per-variant editors and
+  the parameter-card affordance to attach / reorder / delete.
+- **G.3** — `axis-update` → `bus-update` rename + drop
+  `buttplug-features`. Touch the listeners after the editor lands so
+  the rename PR doesn't have to also handle UI churn.
+
+Pull from this list incrementally; each commit can ship + get its own
+reviewer pass. A single G.1+G.2+G.3 mega-commit is allowed but harder
+to review.
+
+### Carry-forward findings from sub G.0 reviewers
+
+- **`is_static` flag departure from plan-doc spec** (sub G.0 design
+  reviewer flagged): the explicit boolean co-varies with
+  `source_axis: None` today. Frontend can infer Static from
+  `source_axis === undefined` (the JSON omits the key for None). If
+  sub G.1 chooses to read `is_static` directly, document the choice;
+  if it infers, drop the field from the wire format in a follow-up.
+- **`debug_assert!` for stash invariant** (sub G.0 design reviewer
+  flagged): a future write-lock-split refactor could break the bp:
+  → stash → telemetry ordering. Adding a `debug_assert!` that bp:-
+  routed Linked links produce a Some stash before the snapshot pass
+  catches regressions loudly. Cheap; defer to sub G or later.
+- **Beta release-notes draft for Constrict centering** (sub E
+  reviewer carry-forward): "Buttplug presets that combine Vibrate
+  and Constrict will now constrict around the wobbled position, not
+  the un-wobbled base. The change is intentional and matches the
+  layered transform model." Land in the release-tag commit
+  (`release.js` reads notes at tag time).
+
+### Step 8 — sketch (unchanged from prior sessions)
+
+Wrap existing input handlers in an `InputSource` trait. Mostly
+cosmetic by then. New `src-tauri/src/input/` module with `input/mod.rs`
+declaring the trait, `input/tcode.rs` (wraps `tcode_input.rs`),
+`input/gamepad.rs`, `input/buttplug.rs` (with `lovense` as adapter
+inside). The win: adding a future input source (MIDI, OSC, audio
+amplitude) is one self-contained file.
 
 ---
 
