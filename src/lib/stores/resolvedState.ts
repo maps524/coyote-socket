@@ -126,6 +126,11 @@ function animate() {
 }
 
 function handleResolvedUpdate(payload: ResolvedUpdatePayload) {
+  // Race guard: a `resolved-update` event can arrive in the microtask
+  // queue between `unlistenFn()` and the listener's actual teardown.
+  // If we mutated `latestA`/`latestB` after `stopResolvedTracking`, the
+  // next start would lerp from stale targets. Bail out cleanly instead.
+  if (!isTracking) return;
   latestA = payload.channel_a;
   latestB = payload.channel_b;
   targetA.set(latestA);
@@ -187,6 +192,19 @@ export const rawResolvedChannelB: Readable<ChannelResolvedSnapshot> = { subscrib
  */
 export function isLinkedSample(sample: ResolvedSampleSnapshot): boolean {
   return sample.source_axis !== undefined;
+}
+
+/**
+ * Indicator value (0..1) for the position dot on a parameter card. Linked
+ * samples return their `normalized_pre_range`; Static returns 0 so the
+ * indicator hides — Static parameters carry their raw static byte in
+ * `normalized_pre_range` (e.g. 100 for a 100 Hz frequency) which would
+ * land the dot wildly off-track on a 0..1 percent slider. Centralizing
+ * the gate here keeps the wire-contract knowledge ("Static iff source_axis
+ * absent") in one place.
+ */
+export function indicatorOf(sample: ResolvedSampleSnapshot): number {
+  return isLinkedSample(sample) ? sample.normalized_pre_range : 0;
 }
 
 /**

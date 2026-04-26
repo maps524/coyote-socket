@@ -3,7 +3,7 @@
   import { Zap } from 'lucide-svelte';
   import { channelA, channelB } from '$lib/stores/channels.js';
   import { generalSettings } from '$lib/stores/generalSettings.js';
-  import { resolvedChannelA, resolvedChannelB, isLinkedSample } from '$lib/stores/resolvedState.js';
+  import { resolvedChannelA, resolvedChannelB, indicatorOf } from '$lib/stores/resolvedState.js';
   import { currentInputSource } from '$lib/stores/inputSource.js';
   import { type ParameterSource } from '$lib/types/modulation.js';
 
@@ -105,22 +105,26 @@
     curve: 'linear' as const
   };
 
-  // Indicator values come straight from the resolver. `normalized_pre_range`
-  // is the 0..1 value the resolver computed after delay + midpoint + curve +
-  // transforms — i.e. where the device is actually being driven within the
-  // user-configured range. Static parameters omit `source_axis` from the
-  // wire format; gating on `isLinkedSample` keeps the indicator hidden
-  // (RangeSliderWithIndicator only renders when indicatorValue > 0, but
-  // a static parameter's normalized_pre_range can be its raw static value
-  // — e.g. 100 for frequency — which would push the dot off-track).
-  $: freqIndicator = isLinkedSample($resolved.frequency) ? $resolved.frequency.normalized_pre_range : 0;
-  $: freqBalIndicator = isLinkedSample($resolved.frequency_balance)
-    ? $resolved.frequency_balance.normalized_pre_range
-    : 0;
-  $: intBalIndicator = isLinkedSample($resolved.intensity_balance)
-    ? $resolved.intensity_balance.normalized_pre_range
-    : 0;
-  $: intensityIndicator = isLinkedSample($resolved.intensity) ? $resolved.intensity.normalized_pre_range : 0;
+  // Indicator values come straight from the resolver. `indicatorOf`
+  // returns `normalized_pre_range` (0..1, post-delay+curve+transforms)
+  // for Linked samples and 0 for Static — RangeSliderWithIndicator
+  // only renders the dot when the value is > 0, and a Static
+  // parameter's `normalized_pre_range` can carry its raw static byte
+  // (e.g. 100 for frequency) which would push the dot off-track.
+  //
+  // Caveat (sub G open issue from sub E): transforms attached to
+  // non-`bp:` Linked intensity links are silently inert because the
+  // V2/V3 engine path runs instead of the resolver. Backend
+  // synthesizes a coherent `ResolvedSample` from engine state so the
+  // dot still moves, which means the user gets a *plausible* indicator
+  // even when their attached transforms are doing nothing. Closing
+  // this UX hazard is a sub G follow-up: either route engine-path
+  // intensity through a transform tail or surface a "transforms
+  // inactive on this engine" hint here.
+  $: freqIndicator = indicatorOf($resolved.frequency);
+  $: freqBalIndicator = indicatorOf($resolved.frequency_balance);
+  $: intBalIndicator = indicatorOf($resolved.intensity_balance);
+  $: intensityIndicator = indicatorOf($resolved.intensity);
 
   // Build tooltip strings
   $: freqTooltip = `Controls the pulse frequency (1-200 Hz)${shortcuts ? ` <code>${shortcuts.freqDown}/${shortcuts.freqUp}</code>` : ''}`;

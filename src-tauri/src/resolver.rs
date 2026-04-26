@@ -34,10 +34,11 @@ pub struct ResolvedChannelParams {
 
 /// Per-parameter resolved-sample shape projected onto the wire format
 /// for sub G's `resolved-update` Tauri event. Mirrors `ResolvedSample`
-/// in `modulation.rs` plus an explicit `is_static` boolean — the
-/// frontend uses that to decide whether to render the curve plot
-/// position line at all (Static parameters have no input axis to land
-/// on).
+/// in `modulation.rs`. The frontend distinguishes Static from Linked
+/// purely by the presence of `source_axis` (omitted for Static via
+/// `skip_serializing_if`); a separate `is_static` boolean used to
+/// shadow that contract through G.0 and is gone now that G.1 reads
+/// the absence directly.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolvedSampleSnapshot {
     /// Pre-curve, pre-transforms input value (from the bus or the
@@ -56,14 +57,11 @@ pub struct ResolvedSampleSnapshot {
     /// time for Static. Lets the UI align the input dot with the
     /// delayed bus read.
     pub target_time_ms: u64,
-    /// Bus axis name when Linked; absent for Static. The frontend
-    /// uses it to pick which input-monitor card the resolved dot
-    /// belongs on.
+    /// Bus axis name when Linked; absent (key omitted from JSON) for
+    /// Static. The frontend treats absence as "no axis to plot" and
+    /// hides the position dot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_axis: Option<String>,
-    /// `true` when the parameter source is `Static` — UI hides the
-    /// curve plot position line in that case.
-    pub is_static: bool,
 }
 
 impl ResolvedSampleSnapshot {
@@ -72,14 +70,13 @@ impl ResolvedSampleSnapshot {
     /// without a clone — the production resolver pass calls this
     /// once per parameter slot per channel per tick (8 calls/sec at
     /// 10Hz), so saving allocations is cheap and worth it.
-    fn from_sample(sample: crate::modulation::ResolvedSample, is_static: bool) -> Self {
+    fn from_sample(sample: crate::modulation::ResolvedSample) -> Self {
         Self {
             raw_input: sample.raw_input,
             normalized_pre_range: sample.normalized_pre_range,
             device_value: sample.device_value,
             target_time_ms: sample.target_time_ms,
             source_axis: sample.source_axis,
-            is_static,
         }
     }
 }
@@ -203,12 +200,6 @@ fn build_channel_snapshot(
     let freq_device = freq_sample.device_value;
     let freq_bal_device = freq_bal_sample.device_value;
     let int_bal_device = int_bal_sample.device_value;
-    let freq_is_static =
-        ch.config.frequency.source_type == ParameterSourceType::Static;
-    let freq_bal_is_static =
-        ch.config.frequency_balance.source_type == ParameterSourceType::Static;
-    let int_bal_is_static =
-        ch.config.intensity_balance.source_type == ParameterSourceType::Static;
 
     // Intensity sample: prefer the bp-path resolver output stashed
     // by `get_next_waveform_data`. For Static and engine-path Linked,
@@ -234,6 +225,24 @@ fn build_channel_snapshot(
         // faithful "what the device actually receives" reading,
         // which can lag the resolver view under V2 ramping or V3
         // lookahead.
+        //
+        // Invariant: we should not reach this branch for `bp:`-routed
+        // Linked links — `processing.rs::get_next_waveform_data` is
+        // contracted to stash a `ResolvedSample` on every bp:-routed
+        // tick before the snapshot pass runs. A future write-lock-
+        // split refactor could break that ordering silently; assert
+        // it loudly so the next change of the routing topology
+        // catches the regression in tests instead of in field
+        // telemetry.
+        debug_assert!(
+            !ch.config
+                .intensity
+                .source_axis
+                .as_deref()
+                .is_some_and(|a| a.starts_with("bp:")),
+            "bp:-routed Linked intensity must stash a ResolvedSample before \
+             the snapshot pass; see processing.rs::get_next_waveform_data"
+        );
         let device_value = match engine {
             ProcessingEngineType::V3Predictive => ch.v3.current_position as f64,
             _ => ch.v2.get_value_at(now) as f64,
@@ -256,16 +265,10 @@ fn build_channel_snapshot(
     };
 
     let snapshot = ChannelResolvedSnapshot {
-        frequency: ResolvedSampleSnapshot::from_sample(freq_sample, freq_is_static),
-        frequency_balance: ResolvedSampleSnapshot::from_sample(
-            freq_bal_sample,
-            freq_bal_is_static,
-        ),
-        intensity_balance: ResolvedSampleSnapshot::from_sample(
-            int_bal_sample,
-            int_bal_is_static,
-        ),
-        intensity: ResolvedSampleSnapshot::from_sample(intensity_sample, intensity_is_static),
+        frequency: ResolvedSampleSnapshot::from_sample(freq_sample),
+        frequency_balance: ResolvedSampleSnapshot::from_sample(freq_bal_sample),
+        intensity_balance: ResolvedSampleSnapshot::from_sample(int_bal_sample),
+        intensity: ResolvedSampleSnapshot::from_sample(intensity_sample),
     };
 
     let params = ResolvedChannelParams {
@@ -449,7 +452,7 @@ mod tests {
         assert!((snap.intensity.raw_input - 0.42).abs() < 1e-9);
         assert!((snap.intensity.device_value - 80.0).abs() < 1e-9);
         assert_eq!(snap.intensity.target_time_ms, 1_000);
-        assert!(!snap.intensity.is_static);
+        assert_eq!(snap.intensity.source_axis.as_deref(), Some("bp:Position_0"));
         // Stash consumed.
         assert!(ch.last_intensity_sample.is_none());
     }
@@ -471,7 +474,8 @@ mod tests {
             ProcessingEngineType::V2Balanced,
             1_000,
         );
-        assert!(snap.intensity.is_static);
+        // Static parameters omit `source_axis` from the wire; that
+        // absence is the frontend's signal to hide the position dot.
         assert!(snap.intensity.source_axis.is_none());
         assert!((snap.intensity.device_value - 75.0).abs() < 1e-9);
     }
@@ -507,7 +511,6 @@ mod tests {
         assert!((snap.intensity.device_value - 100.0).abs() < 1e-9);
         assert!((snap.intensity.raw_input - 0.7).abs() < 1e-9);
         assert_eq!(snap.intensity.source_axis.as_deref(), Some("L0"));
-        assert!(!snap.intensity.is_static);
     }
 
     #[test]
@@ -569,7 +572,6 @@ mod tests {
             device_value: 100.0,
             target_time_ms: 1_000,
             source_axis: Some("L0".into()),
-            is_static: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         for k in [
@@ -578,10 +580,13 @@ mod tests {
             "device_value",
             "target_time_ms",
             "source_axis",
-            "is_static",
         ] {
             assert!(json.contains(&format!("\"{}\"", k)), "missing key {} in {}", k, json);
         }
+        // Wire-format pin: G.1 follow-up dropped `is_static`; the
+        // frontend infers Static from `source_axis` absence and must
+        // not see this stale field reappear.
+        assert!(!json.contains("is_static"), "is_static must not appear on wire: {}", json);
     }
 
     #[test]
@@ -617,7 +622,8 @@ mod tests {
             ProcessingEngineType::V2Balanced,
             1_000,
         );
-        assert!(snap.intensity.is_static);
+        // The post-clear branch falls into the `intensity_is_static`
+        // path; absence of `source_axis` is the frontend's signal.
         assert!(snap.intensity.source_axis.is_none());
         assert!((snap.intensity.device_value - 75.0).abs() < 1e-9);
     }
@@ -635,10 +641,8 @@ mod tests {
             device_value: 100.0,
             target_time_ms: 1_000,
             source_axis: None,
-            is_static: true,
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(!json.contains("source_axis"), "static snapshot must omit source_axis: {}", json);
-        assert!(json.contains("\"is_static\":true"));
     }
 }
