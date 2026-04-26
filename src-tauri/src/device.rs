@@ -1,15 +1,15 @@
 //! Device Controller - Manages the 10Hz update loop for sending commands to the Coyote device
 
 use crate::bluetooth::{get_bluetooth_manager, DeviceVersion}; // Add DeviceVersion
-use crate::emit_waveform_sample;
+use crate::{emit_resolved_update, emit_waveform_sample};
 // Add V2 related function references
 use crate::processing::{get_processing_state, ProcessingEngineType};
 use crate::protocol::{
     balance_to_v2_z, convert_period, freq_to_v2_xy, frequency_to_period, generate_b0_command,
     generate_bf_command, generate_v2_intensity, generate_v2_waveform,
 };
+use crate::resolver::{get_next_waveform_data, get_resolved_channel_params, ResolvedUpdatePayload};
 use crate::waveform::WaveformSample;
-use crate::resolver::{get_next_waveform_data, get_resolved_channel_params};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -275,12 +275,19 @@ async fn send_device_update() -> Result<(), String> {
         return Err("Not connected".to_string());
     }
 
-    // Get next waveform data (consumes 4 values from queue per channel)
+    // Get next waveform data (consumes 4 values from queue per channel).
+    // For `bp:`-routed intensity links this also stashes the resolver's
+    // `ResolvedSample` on each channel so the telemetry pass below can
+    // read it without re-running the resolver (and double-advancing
+    // phase / smoothing state).
     let (waveform_a, waveform_b) = get_next_waveform_data().await;
 
-    // Get resolved channel parameters (handles both static and linked sources)
-    // This resolves frequency, freqBalance, intBalance with midpoint/curve transformations
-    let (params_a, params_b) = get_resolved_channel_params().await;
+    // Resolved channel parameters + telemetry snapshots in one pass.
+    // Frequency / balance always run through the resolver; intensity
+    // is sourced from the bp-path stash for `bp:` links and synthesized
+    // from the engine output / static value otherwise.
+    let ((params_a, params_b), (resolved_a, resolved_b)) =
+        get_resolved_channel_params().await;
 
     // Per-slot frequency arrays for V3 B0. Window starts 100ms before now so
     // the 4 slots land at now-100, now-75, now-50, now-25 (matching the axis
@@ -375,6 +382,18 @@ async fn send_device_update() -> Result<(), String> {
 
     // Emit to frontend in real-time (push-based)
     emit_waveform_sample(sample);
+
+    // Sub G: emit per-tick resolver snapshot. Pairs with
+    // `waveform-sample` — the latter carries engine output (post
+    // V2-ramp / V3-lookahead, post-range, what BLE sees), this one
+    // carries the resolver's view (post-curve, post-transforms,
+    // pre-engine). UI cards subscribe and render the position line on
+    // each linked-parameter curve plot.
+    emit_resolved_update(ResolvedUpdatePayload {
+        timestamp_ms: timestamp,
+        channel_a: resolved_a,
+        channel_b: resolved_b,
+    });
 
     // Diagnostic tick recording (no-op when capture is off). Records the
     // computed engine output regardless of connection state, so a capture

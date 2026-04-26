@@ -1227,6 +1227,16 @@ pub struct Channel {
     /// tick" detection on this watermark; for now it tracks tick
     /// boundaries but isn't read as a one-shot signal anywhere.
     pub last_buttplug_replay_ts: u64,
+    /// Last `ResolvedSample` produced by the resolver for the
+    /// intensity link, captured during `get_next_waveform_data` for
+    /// `bp:`-routed channels. Sub G's `resolved-update` event reads
+    /// this so the telemetry side doesn't have to re-resolve the
+    /// link (which would double-advance phase / smoothing state on
+    /// stateful transforms). `None` for static intensity and for
+    /// T-Code-driven Linked intensity (engine path doesn't run the
+    /// resolver); the resolved-snapshot helper synthesizes a fresh
+    /// `ResolvedSample` for those branches by other means.
+    pub last_intensity_sample: Option<crate::modulation::ResolvedSample>,
 }
 
 impl Channel {
@@ -1245,6 +1255,7 @@ impl Channel {
             peak_hold: IntensityPeakHold::default(),
             last_intensity_replay_ts: 0,
             last_buttplug_replay_ts: 0,
+            last_intensity_sample: None,
         }
     }
 
@@ -1545,11 +1556,20 @@ impl ProcessingState {
                     now_ms,
                     decay_ms,
                 );
-                ch.last_buttplug_replay_ts = now_ms;
                 let device = resolved.device_value.round().clamp(0.0, 200.0) as u8;
+                ch.last_buttplug_replay_ts = now_ms;
+                // Hand off the resolved sample to sub G's telemetry path.
+                // For non-bp Linked / Static, the field stays at its
+                // prior value; the snapshot helper synthesizes from
+                // config / engine state for those branches.
+                ch.last_intensity_sample = Some(resolved);
                 return intensity_to_values(device);
             }
 
+            // Engine path or static — clear any stale bp-path sample so
+            // the telemetry helper doesn't show a sample from before
+            // the user switched the link source axis.
+            ch.last_intensity_sample = None;
             ch.next_raw_values(engine, window_start, now_ms, peak_fill)
         });
 

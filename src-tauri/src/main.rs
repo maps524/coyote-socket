@@ -233,6 +233,18 @@ pub fn emit_buttplug_features(features: HashMap<String, f64>) {
     }
 }
 
+/// Emit per-tick resolver output for both channels. Sub G's
+/// `resolved-update` event — fired at the 10Hz device tick alongside
+/// `waveform-sample`, so the frontend's `resolvedState.ts` store can
+/// render the post-curve position line on every linked-parameter
+/// card. Static parameters carry `is_static: true` so the UI can hide
+/// the position line for them.
+pub fn emit_resolved_update(payload: resolver::ResolvedUpdatePayload) {
+    if let Some(handle) = get_app_handle() {
+        let _ = handle.emit("resolved-update", payload);
+    }
+}
+
 use bluetooth::get_bluetooth_manager;
 use device::{
     get_channel_a_params, get_channel_b_params, get_last_device_output, start_device_loop,
