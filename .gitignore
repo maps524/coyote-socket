@@ -53,3 +53,5 @@ scripts/setup-local.js
 
 # Claude Code per-user settings (committed: .claude/settings.json)
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
