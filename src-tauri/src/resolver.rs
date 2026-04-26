@@ -12,6 +12,14 @@ use serde::Serialize;
 use crate::modulation::NoInputBehavior;
 use crate::processing::{current_time_ms, get_processing_state, ProcessingEngineType, WaveformData};
 
+/// Device-units max for intensity (matches the engine's 0..200 byte
+/// encoding in `processing.rs::Channel::next_raw_values`). Used by
+/// the engine-path snapshot synthesis to invert the device byte back
+/// into a 0..1 normalized value for the curve plot. Named to flag
+/// that broadening this synthesis to other parameters (e.g. frequency
+/// at 1..200 Hz) would need a different divisor.
+const INTENSITY_DEVICE_MAX: f64 = 200.0;
+
 /// Resolved channel parameters for device output.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // freq_balance and int_balance reserved for BF command support
@@ -59,6 +67,11 @@ pub struct ResolvedSampleSnapshot {
 }
 
 impl ResolvedSampleSnapshot {
+    /// Project a `ResolvedSample` onto the wire-format snapshot.
+    /// Consumes the sample so `source_axis: Option<String>` moves
+    /// without a clone — the production resolver pass calls this
+    /// once per parameter slot per channel per tick (8 calls/sec at
+    /// 10Hz), so saving allocations is cheap and worth it.
     fn from_sample(sample: crate::modulation::ResolvedSample, is_static: bool) -> Self {
         Self {
             raw_input: sample.raw_input,
@@ -124,10 +137,6 @@ pub async fn get_resolved_channel_params() -> (
     (ResolvedChannelParams, ResolvedChannelParams),
     (ChannelResolvedSnapshot, ChannelResolvedSnapshot),
 ) {
-    use crate::modulation::{
-        resolve_link, ParameterSourceType, ResolvedSample,
-    };
-
     let state = get_processing_state().await;
     let mut state_guard = state.write().await;
     let now = current_time_ms();
@@ -136,124 +145,139 @@ pub async fn get_resolved_channel_params() -> (
     let engine = state_guard.options.processing_engine;
 
     let (bus, channels) = state_guard.split_bus_and_channels();
-
-    let resolve_one =
-        |ch: &mut crate::processing::Channel|
-            -> (ResolvedChannelParams, ChannelResolvedSnapshot) {
-            let intensity_is_static =
-                ch.config.intensity.source_type == ParameterSourceType::Static;
-            let range_min = ch.config.intensity.range_min as u8;
-            let range_max = ch.config.intensity.range_max as u8;
-
-            let freq_sample = resolve_link(
-                &ch.config.frequency,
-                &mut ch.link_runtime.frequency,
-                bus,
-                &no_input_behavior,
-                now,
-                decay_ms,
-            );
-            let freq_bal_sample = resolve_link(
-                &ch.config.frequency_balance,
-                &mut ch.link_runtime.frequency_balance,
-                bus,
-                &no_input_behavior,
-                now,
-                decay_ms,
-            );
-            let int_bal_sample = resolve_link(
-                &ch.config.intensity_balance,
-                &mut ch.link_runtime.intensity_balance,
-                bus,
-                &no_input_behavior,
-                now,
-                decay_ms,
-            );
-
-            // Intensity sample: prefer the bp-path resolver output
-            // stashed by `get_next_waveform_data`. For Static and
-            // engine-path Linked, synthesize so the UI sees a
-            // coherent ResolvedSample for every channel.
-            let intensity_sample = if let Some(stash) = ch.last_intensity_sample.take() {
-                stash
-            } else if intensity_is_static {
-                ResolvedSample {
-                    raw_input: ch.config.intensity.static_value.unwrap_or(0.0),
-                    normalized_pre_range: ch.config.intensity.static_value.unwrap_or(0.0),
-                    device_value: ch.config.intensity.static_value.unwrap_or(0.0),
-                    target_time_ms: now,
-                    source_axis: None,
-                }
-            } else {
-                // Engine-path Linked (T-Code / gamepad). Read the
-                // engine's actual transmitted value as `device_value`
-                // (V3 lookahead resolves to `current_position`; V2 reads
-                // the ramp at `now`), and re-derive `raw_input` /
-                // `normalized_pre_range` from the bus + curve so the UI
-                // shows where the curve sees the input. Using the engine
-                // output here gives the user a faithful "what the device
-                // actually receives" reading, which can lag the resolver
-                // view under V2 ramping or V3 lookahead.
-                let device_value = match engine {
-                    ProcessingEngineType::V3Predictive => ch.v3.current_position as f64,
-                    _ => ch.v2.get_value_at(now) as f64,
-                };
-                let axis_name = ch.config.intensity.source_axis.clone();
-                let delay = ch.config.intensity.delay_ms.unwrap_or(0) as u64;
-                let target_time_ms = now.saturating_sub(delay);
-                let raw_input = axis_name
-                    .as_deref()
-                    .and_then(|a| bus.value_at(a, target_time_ms))
-                    .unwrap_or(0.0);
-                // Normalized pre-range: if range_max > range_min,
-                // unmap the device value back into [0, 1]. The engine
-                // already encodes intensity in 0..200 so this is a
-                // simple inverse.
-                let normalized_pre_range = (device_value / 200.0).clamp(0.0, 1.0);
-                ResolvedSample {
-                    raw_input,
-                    normalized_pre_range,
-                    device_value,
-                    target_time_ms,
-                    source_axis: axis_name,
-                }
-            };
-
-            let snapshot = ChannelResolvedSnapshot {
-                frequency: ResolvedSampleSnapshot::from_sample(
-                    freq_sample.clone(),
-                    ch.config.frequency.source_type == ParameterSourceType::Static,
-                ),
-                frequency_balance: ResolvedSampleSnapshot::from_sample(
-                    freq_bal_sample.clone(),
-                    ch.config.frequency_balance.source_type == ParameterSourceType::Static,
-                ),
-                intensity_balance: ResolvedSampleSnapshot::from_sample(
-                    int_bal_sample.clone(),
-                    ch.config.intensity_balance.source_type == ParameterSourceType::Static,
-                ),
-                intensity: ResolvedSampleSnapshot::from_sample(
-                    intensity_sample,
-                    intensity_is_static,
-                ),
-            };
-
-            let params = ResolvedChannelParams {
-                frequency: freq_sample.device_value.clamp(1.0, 200.0),
-                freq_balance: freq_bal_sample.device_value.clamp(0.0, 255.0) as u8,
-                int_balance: int_bal_sample.device_value.clamp(0.0, 255.0) as u8,
-                range_min,
-                range_max,
-                intensity_is_static,
-            };
-
-            (params, snapshot)
-        };
-
     let [a, b] = channels;
-    let (params_a, snap_a) = resolve_one(a);
-    let (params_b, snap_b) = resolve_one(b);
+    let (params_a, snap_a) =
+        build_channel_snapshot(a, bus, &no_input_behavior, decay_ms, engine, now);
+    let (params_b, snap_b) =
+        build_channel_snapshot(b, bus, &no_input_behavior, decay_ms, engine, now);
     ((params_a, params_b), (snap_a, snap_b))
+}
+
+/// Resolve all four parameter slots for one channel and project them
+/// into device-output params + a telemetry snapshot. Pure per-channel
+/// helper — no global state — so production
+/// (`get_resolved_channel_params`) and the in-crate tests share one
+/// body. Caller holds whatever lock guards the bus + channel.
+fn build_channel_snapshot(
+    ch: &mut crate::processing::Channel,
+    bus: crate::input_bus::InputBusSnapshot<'_>,
+    no_input_behavior: &NoInputBehavior,
+    decay_ms: u32,
+    engine: ProcessingEngineType,
+    now: u64,
+) -> (ResolvedChannelParams, ChannelResolvedSnapshot) {
+    use crate::modulation::{resolve_link, ParameterSourceType, ResolvedSample};
+
+    let intensity_is_static = ch.config.intensity.source_type == ParameterSourceType::Static;
+    let range_min = ch.config.intensity.range_min as u8;
+    let range_max = ch.config.intensity.range_max as u8;
+
+    let freq_sample = resolve_link(
+        &ch.config.frequency,
+        &mut ch.link_runtime.frequency,
+        bus,
+        no_input_behavior,
+        now,
+        decay_ms,
+    );
+    let freq_bal_sample = resolve_link(
+        &ch.config.frequency_balance,
+        &mut ch.link_runtime.frequency_balance,
+        bus,
+        no_input_behavior,
+        now,
+        decay_ms,
+    );
+    let int_bal_sample = resolve_link(
+        &ch.config.intensity_balance,
+        &mut ch.link_runtime.intensity_balance,
+        bus,
+        no_input_behavior,
+        now,
+        decay_ms,
+    );
+
+    // Snapshot ergonomics: capture the device values we need for
+    // ResolvedChannelParams BEFORE moving the samples into
+    // ResolvedSampleSnapshot via from_sample (consume-by-value).
+    let freq_device = freq_sample.device_value;
+    let freq_bal_device = freq_bal_sample.device_value;
+    let int_bal_device = int_bal_sample.device_value;
+    let freq_is_static =
+        ch.config.frequency.source_type == ParameterSourceType::Static;
+    let freq_bal_is_static =
+        ch.config.frequency_balance.source_type == ParameterSourceType::Static;
+    let int_bal_is_static =
+        ch.config.intensity_balance.source_type == ParameterSourceType::Static;
+
+    // Intensity sample: prefer the bp-path resolver output stashed
+    // by `get_next_waveform_data`. For Static and engine-path Linked,
+    // synthesize so the UI sees a coherent `ResolvedSample` for
+    // every channel regardless of routing.
+    let intensity_sample = if let Some(stash) = ch.last_intensity_sample.take() {
+        stash
+    } else if intensity_is_static {
+        ResolvedSample {
+            raw_input: ch.config.intensity.static_value.unwrap_or(0.0),
+            normalized_pre_range: ch.config.intensity.static_value.unwrap_or(0.0),
+            device_value: ch.config.intensity.static_value.unwrap_or(0.0),
+            target_time_ms: now,
+            source_axis: None,
+        }
+    } else {
+        // Engine-path Linked (T-Code / gamepad). Read the engine's
+        // actual transmitted value as `device_value` (V3 lookahead
+        // resolves to `current_position`; V2 reads the ramp at
+        // `now`), and re-derive `raw_input` / `normalized_pre_range`
+        // from the bus + curve so the UI shows where the curve sees
+        // the input. Using the engine output here gives the user a
+        // faithful "what the device actually receives" reading,
+        // which can lag the resolver view under V2 ramping or V3
+        // lookahead.
+        let device_value = match engine {
+            ProcessingEngineType::V3Predictive => ch.v3.current_position as f64,
+            _ => ch.v2.get_value_at(now) as f64,
+        };
+        let axis_name = ch.config.intensity.source_axis.clone();
+        let delay = ch.config.intensity.delay_ms.unwrap_or(0) as u64;
+        let target_time_ms = now.saturating_sub(delay);
+        let raw_input = axis_name
+            .as_deref()
+            .and_then(|a| bus.value_at(a, target_time_ms))
+            .unwrap_or(0.0);
+        let normalized_pre_range = (device_value / INTENSITY_DEVICE_MAX).clamp(0.0, 1.0);
+        ResolvedSample {
+            raw_input,
+            normalized_pre_range,
+            device_value,
+            target_time_ms,
+            source_axis: axis_name,
+        }
+    };
+
+    let snapshot = ChannelResolvedSnapshot {
+        frequency: ResolvedSampleSnapshot::from_sample(freq_sample, freq_is_static),
+        frequency_balance: ResolvedSampleSnapshot::from_sample(
+            freq_bal_sample,
+            freq_bal_is_static,
+        ),
+        intensity_balance: ResolvedSampleSnapshot::from_sample(
+            int_bal_sample,
+            int_bal_is_static,
+        ),
+        intensity: ResolvedSampleSnapshot::from_sample(intensity_sample, intensity_is_static),
+    };
+
+    let params = ResolvedChannelParams {
+        frequency: freq_device.clamp(1.0, 200.0),
+        freq_balance: freq_bal_device.clamp(0.0, 255.0) as u8,
+        int_balance: int_bal_device.clamp(0.0, 255.0) as u8,
+        range_min,
+        range_max,
+        intensity_is_static,
+    };
+
+    (params, snapshot)
 }
 
 /// Resolve per-slot frequencies (Hz) for both channels at 25ms intervals
@@ -362,8 +386,7 @@ mod tests {
 
     use crate::input_bus::InputBus;
     use crate::modulation::{
-        ChannelConfig, CurveType, NoInputBehavior, ParameterLinkConfig, ParameterLinkRuntime,
-        ParameterSourceType, ResolvedSample,
+        CurveType, NoInputBehavior, ParameterLinkConfig, ParameterLinkRuntime, ResolvedSample,
     };
     use crate::processing::{Channel, ChannelId, ProcessingEngineType};
     use crate::transforms::TransformConfig;
@@ -375,10 +398,9 @@ mod tests {
         ch
     }
 
-    /// Resolver-side: build a `ChannelResolvedSnapshot` from a single
-    /// channel's state without a global processing-state lock. Mirrors
-    /// the inner closure in `get_resolved_channel_params` so the
-    /// snapshot shape can be tested in isolation.
+    /// Tests share the production `build_channel_snapshot` rather
+    /// than a parallel implementation — sub G.0 follow-up consolidated
+    /// the body so future changes only land in one place.
     fn snapshot_one(
         ch: &mut Channel,
         bus: &InputBus,
@@ -387,82 +409,9 @@ mod tests {
         engine: ProcessingEngineType,
         now: u64,
     ) -> ChannelResolvedSnapshot {
-        use crate::modulation::resolve_link;
-
-        let intensity_is_static =
-            ch.config.intensity.source_type == ParameterSourceType::Static;
-        let freq = resolve_link(
-            &ch.config.frequency,
-            &mut ch.link_runtime.frequency,
-            bus,
-            no_input_behavior,
-            now,
-            decay_ms,
-        );
-        let freq_bal = resolve_link(
-            &ch.config.frequency_balance,
-            &mut ch.link_runtime.frequency_balance,
-            bus,
-            no_input_behavior,
-            now,
-            decay_ms,
-        );
-        let int_bal = resolve_link(
-            &ch.config.intensity_balance,
-            &mut ch.link_runtime.intensity_balance,
-            bus,
-            no_input_behavior,
-            now,
-            decay_ms,
-        );
-
-        let intensity_sample = if let Some(stash) = ch.last_intensity_sample.take() {
-            stash
-        } else if intensity_is_static {
-            ResolvedSample {
-                raw_input: ch.config.intensity.static_value.unwrap_or(0.0),
-                normalized_pre_range: ch.config.intensity.static_value.unwrap_or(0.0),
-                device_value: ch.config.intensity.static_value.unwrap_or(0.0),
-                target_time_ms: now,
-                source_axis: None,
-            }
-        } else {
-            let device_value = match engine {
-                ProcessingEngineType::V3Predictive => ch.v3.current_position as f64,
-                _ => ch.v2.get_value_at(now) as f64,
-            };
-            let axis_name = ch.config.intensity.source_axis.clone();
-            let delay = ch.config.intensity.delay_ms.unwrap_or(0) as u64;
-            let target_time_ms = now.saturating_sub(delay);
-            let raw_input = axis_name
-                .as_deref()
-                .and_then(|a| bus.value_at(a, target_time_ms))
-                .unwrap_or(0.0);
-            let normalized_pre_range = (device_value / 200.0).clamp(0.0, 1.0);
-            ResolvedSample {
-                raw_input,
-                normalized_pre_range,
-                device_value,
-                target_time_ms,
-                source_axis: axis_name,
-            }
-        };
-
-        ChannelResolvedSnapshot {
-            frequency: ResolvedSampleSnapshot::from_sample(
-                freq,
-                ch.config.frequency.source_type == ParameterSourceType::Static,
-            ),
-            frequency_balance: ResolvedSampleSnapshot::from_sample(
-                freq_bal,
-                ch.config.frequency_balance.source_type == ParameterSourceType::Static,
-            ),
-            intensity_balance: ResolvedSampleSnapshot::from_sample(
-                int_bal,
-                ch.config.intensity_balance.source_type == ParameterSourceType::Static,
-            ),
-            intensity: ResolvedSampleSnapshot::from_sample(intensity_sample, intensity_is_static),
-        }
+        let (_, snap) =
+            build_channel_snapshot(ch, bus, no_input_behavior, decay_ms, engine, now);
+        snap
     }
 
     #[test]
@@ -608,12 +557,12 @@ mod tests {
     }
 
     #[test]
-    fn channel_resolved_snapshot_serializes_with_camel_case_fields() {
-        // Wire-format pin: the frontend types/modulation.ts will read
-        // these fields by name. `is_static` lives on each
-        // `ResolvedSampleSnapshot`; serde derives keep the field names
-        // verbatim so the JSON shape is `{ raw_input, normalized_pre_range,
-        // device_value, target_time_ms, source_axis?, is_static }`.
+    fn channel_resolved_snapshot_serializes_with_snake_case_fields() {
+        // Wire-format pin: the frontend types/modulation.ts reads
+        // these fields by name. No `#[serde(rename_all)]` attribute
+        // on the snapshot types, so JSON keeps the Rust field names
+        // verbatim — snake_case. Matches the existing `WaveformSample`
+        // wire shape; sub G.1's frontend store reads the same casing.
         let snap = ResolvedSampleSnapshot {
             raw_input: 0.5,
             normalized_pre_range: 0.5,
@@ -633,6 +582,44 @@ mod tests {
         ] {
             assert!(json.contains(&format!("\"{}\"", k)), "missing key {} in {}", k, json);
         }
+    }
+
+    #[test]
+    fn snapshot_clears_stale_bp_stash_on_link_to_static_transition() {
+        // Regression for sub G.0 reviewer finding: a user toggling a
+        // bp:-routed intensity link to Static mid-session must not
+        // leak the prior tick's bp: stash into the next telemetry
+        // pass. `processing.rs::get_next_waveform_data` clears the
+        // stash inside the Static early-return; this test simulates
+        // that contract by clearing the stash before the snapshot
+        // helper runs (matching the production flow) and asserts the
+        // result reports the static value, not a stale bp: sample.
+        let cfg = ParameterLinkConfig::static_source(75.0);
+        let mut ch = build_channel_with_intensity(cfg, ChannelId::A);
+        // Stale bp: stash from the prior tick.
+        ch.last_intensity_sample = Some(ResolvedSample {
+            raw_input: 0.42,
+            normalized_pre_range: 0.4,
+            device_value: 80.0,
+            target_time_ms: 999,
+            source_axis: Some("bp:Position_0".into()),
+        });
+        // Production-equivalent clear (the Static early-return in
+        // get_next_waveform_data does this).
+        ch.last_intensity_sample = None;
+
+        let bus = InputBus::new();
+        let snap = snapshot_one(
+            &mut ch,
+            &bus,
+            &NoInputBehavior::Hold,
+            1000,
+            ProcessingEngineType::V2Balanced,
+            1_000,
+        );
+        assert!(snap.intensity.is_static);
+        assert!(snap.intensity.source_axis.is_none());
+        assert!((snap.intensity.device_value - 75.0).abs() < 1e-9);
     }
 
     #[test]

@@ -1230,13 +1230,20 @@ pub struct Channel {
     /// Last `ResolvedSample` produced by the resolver for the
     /// intensity link, captured during `get_next_waveform_data` for
     /// `bp:`-routed channels. Sub G's `resolved-update` event reads
-    /// this so the telemetry side doesn't have to re-resolve the
-    /// link (which would double-advance phase / smoothing state on
-    /// stateful transforms). `None` for static intensity and for
-    /// T-Code-driven Linked intensity (engine path doesn't run the
-    /// resolver); the resolved-snapshot helper synthesizes a fresh
-    /// `ResolvedSample` for those branches by other means.
-    pub last_intensity_sample: Option<crate::modulation::ResolvedSample>,
+    /// this via `.take()` so the telemetry side doesn't have to
+    /// re-resolve the link (re-resolving would double-advance phase
+    /// / smoothing state on stateful transforms). `None` for static
+    /// intensity and for T-Code-driven Linked intensity (engine path
+    /// doesn't run the resolver); the resolved-snapshot helper
+    /// synthesizes a fresh `ResolvedSample` for those branches by
+    /// other means.
+    ///
+    /// `pub(crate)` so only the resolver layer (production +
+    /// in-crate tests) can `.take()` the stash. Crate-external
+    /// callers consuming this would silently force the next
+    /// telemetry pass to synthesize from V2/V3 instead of using the
+    /// resolver's output.
+    pub(crate) last_intensity_sample: Option<crate::modulation::ResolvedSample>,
 }
 
 impl Channel {
@@ -1527,6 +1534,12 @@ impl ProcessingState {
             let ch = &mut channels[i];
 
             if ch.config.intensity.source_type == ParameterSourceType::Static {
+                // Clear any stash from a prior bp:-routed tick — without
+                // this, a bp:→Static transition mid-session would leave
+                // the previous tick's `ResolvedSample` intact, and the
+                // next telemetry pass would surface a stale Linked
+                // sample with `is_static: true`.
+                ch.last_intensity_sample = None;
                 let static_val = ch.config.intensity.static_value.unwrap_or(0.0);
                 return intensity_to_values(static_val.round().clamp(0.0, 200.0) as u8);
             }
