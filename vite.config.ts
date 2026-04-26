@@ -43,6 +43,7 @@ export default defineConfig(async () => ({
         "**/docs/**",
         "**/dist/**",
         "**/target/**",
+        "**/scripts/**",
       ],
     },
   },
