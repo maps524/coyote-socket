@@ -142,81 +142,11 @@ pub struct ButtplugLinksSettings {
     pub constrict: Option<ButtplugFeatureLinkSettings>,
 }
 
-impl ButtplugLinksSettings {
-    /// Convert settings-based links to processing-ready ButtplugLinkConfig
-    pub fn to_link_config(&self) -> crate::buttplug::ButtplugLinkConfig {
-        use crate::buttplug::{ButtplugLinkConfig, ConstrictionMethod, FeatureTypeConfig};
-
-        let mut config = ButtplugLinkConfig::default();
-
-        // Position link - can be Position or PositionWithDuration
-        if let Some(ref pos) = self.position {
-            match pos.feature_type.as_str() {
-                "Position" => {
-                    config.position_feature = Some(pos.feature_index as usize);
-                }
-                "PositionWithDuration" => {
-                    config.pos_dur_feature = Some(pos.feature_index as usize);
-                }
-                _ => {}
-            }
-        }
-
-        // Motion link - Rotate OR Oscillate (mutually exclusive)
-        if let Some(ref motion) = self.motion {
-            match motion.feature_type.as_str() {
-                "Rotate" => {
-                    config.rotate_feature = Some(motion.feature_index as usize);
-                    config.rotate_config = Some(FeatureTypeConfig {
-                        scale: motion.config.rotate_scale,
-                        max_speed: motion.config.rotate_max_speed,
-                        ..Default::default()
-                    });
-                }
-                "Oscillate" => {
-                    config.oscillate_feature = Some(motion.feature_index as usize);
-                    config.oscillate_config = Some(FeatureTypeConfig {
-                        scale: motion.config.oscillate_scale,
-                        max_speed: motion.config.oscillate_max_speed,
-                        ..Default::default()
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        // Vibrate link
-        if let Some(ref vib) = self.vibrate {
-            config.vibrate_feature = Some(vib.feature_index as usize);
-            config.vibrate_config = Some(FeatureTypeConfig {
-                distance: vib.config.distance,
-                ..Default::default()
-            });
-        }
-
-        // Constrict link
-        if let Some(ref con) = self.constrict {
-            config.constrict_feature = Some(con.feature_index as usize);
-            let method = con
-                .config
-                .constrict_method
-                .as_ref()
-                .and_then(|m| match m.as_str() {
-                    "downsample" | "Downsample" => Some(ConstrictionMethod::Downsample),
-                    "clamp" | "Clamp" => Some(ConstrictionMethod::Clamp),
-                    _ => None,
-                });
-            config.constrict_config = Some(FeatureTypeConfig {
-                min_floor: con.config.constrict_min_floor,
-                use_midpoint: con.config.constrict_use_midpoint,
-                method,
-                ..Default::default()
-            });
-        }
-
-        config
-    }
-}
+// `ButtplugLinksSettings` deserializes from saved presets but its only
+// runtime consumer is `settings_convert::convert_parameter_source`,
+// which translates it into `ParameterLinkConfig.transforms`. Sub F
+// deleted the legacy `to_link_config` builder along with the
+// `ButtplugLinkConfig` type.
 
 /// Parameter source settings - stores both static value and linked range
 /// so switching between modes preserves both values

@@ -42,10 +42,9 @@ pub enum NoInputBehavior {
 /// `ParameterLinkRuntime` so it can never accidentally be persisted.
 ///
 /// Pre-refactor name: `ParameterSource`. The rename matches the resolver
-/// terminology in the plan doc; the struct shape is unchanged apart from
-/// the dropped `buttplug_links` field (resolver never read it; real
-/// consumer was `Channel.buttplug_link` which still lives off
-/// `ChannelSettings.intensity_source.buttplug_links` until sub F).
+/// terminology in the plan doc; the struct shape post-sub-F is the
+/// resolver-side input (no Buttplug-link payload — sub E translates
+/// settings-side `buttplug_links` into `transforms` at load time).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParameterLinkConfig {
@@ -351,6 +350,12 @@ pub fn lerp(min: f64, max: f64, t: f64) -> f64 {
 /// `source_axis`). Sub G's `resolved-update` Tauri event projects this
 /// shape onto the wire format directly — defining it once now keeps the
 /// frontend wire format stable as more callers pick up the resolver.
+///
+/// `#[allow(dead_code)]` covers the telemetry fields until sub G wires
+/// the event emission. Today only `device_value` and
+/// `normalized_pre_range` have live readers (the engine path + the
+/// resolver tests).
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ResolvedSample {
     /// Pre-curve, pre-transform input value. For Static parameters this

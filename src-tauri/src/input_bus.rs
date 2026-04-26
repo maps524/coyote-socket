@@ -25,11 +25,16 @@ pub type InputBusSnapshot<'a> = &'a InputBus;
 /// Container for every named axis the runtime cares about. `AxisState`
 /// already owns the per-axis history ring + staleness check; the bus is a
 /// thin namespace + lookup layer over that.
+///
+/// `#[allow(dead_code)]` on the impl blocks below covers methods that
+/// are exercised by tests + sub G's input-monitor work but unread by
+/// the binary in the cargo-check pass.
 #[derive(Debug, Default, Clone)]
 pub struct InputBus {
     channels: HashMap<String, AxisState>,
 }
 
+#[allow(dead_code)]
 impl InputBus {
     pub fn new() -> Self {
         Self::default()

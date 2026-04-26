@@ -1,22 +1,16 @@
-/// Buttplug Feature Pipeline - Backend Foundation
-///
-/// This module implements the composable processing pipeline for Buttplug integration,
-/// where each output type serves a distinct role in shaping the final output.
-///
-/// Pipeline order: Position → Motion (Rotate/Oscillate) → Vibrate → Constrict → Output
+//! Buttplug protocol surface — wire format + message handler only.
+//!
+//! Sub F dropped the runtime pipeline (`pipeline.rs`, `state.rs`) and the
+//! `ButtplugLinkConfig` / `FeatureTypeConfig` shape. Feature samples flow
+//! into `InputBus` under the `bp:` namespace and are read by the unified
+//! resolver via `ParameterLinkConfig.transforms`. The Buttplug client
+//! still talks to this module for handshake + device descriptor +
+//! command parsing; everything downstream of that lives in the resolver.
 #[allow(dead_code)]
 pub mod handler;
 #[allow(dead_code, non_snake_case)]
 pub mod messages;
 #[allow(dead_code)]
-pub mod pipeline;
-#[allow(dead_code)]
-pub mod state;
-#[allow(dead_code)]
 pub mod types;
 
-// Re-export commonly used items. The `process_buttplug_pipeline`
-// re-export is gone in sub E — no live caller, full deletion happens
-// in sub F alongside the pipeline.rs file itself.
-pub use state::{ButtplugChannelState, ButtplugFeatureValues};
-pub use types::{ButtplugFeatureConfig, ButtplugLinkConfig, ConstrictionMethod, FeatureTypeConfig};
+pub use types::ButtplugFeatureConfig;

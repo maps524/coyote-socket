@@ -15,16 +15,6 @@ use crate::modulation::{
     resolve_link, ChannelConfig, ChannelLinkRuntime, NoInputBehavior, ParameterSourceType,
 };
 
-// Import Buttplug types — pipeline is gone in sub E (replaced by transforms);
-// the channel still carries `buttplug_link` + `buttplug_state` until sub F
-// deletes the fields.
-use crate::buttplug::{ButtplugChannelState, ButtplugLinkConfig};
-
-/// Per-feature-type slot count for the bus → `ButtplugFeatureValues`
-/// projection. Eight is the upper bound the v3 device descriptor advertises;
-/// raising it just reserves more index slots without semantic effect.
-const BUTTPLUG_MAX_FEATURES: usize = 8;
-
 lazy_static::lazy_static! {
     static ref TCODE_REGEX: Regex = Regex::new(r"(?:([LRVAD])(\d)([^\s]*))+").unwrap();
     static ref POSITION_REGEX: Regex = Regex::new(r"^(\d+)(?:I|$)").unwrap();
@@ -1126,6 +1116,7 @@ pub enum ChannelId {
 impl ChannelId {
     pub const ALL: [ChannelId; 2] = [ChannelId::A, ChannelId::B];
 
+    #[allow(dead_code)]
     pub fn from_char(c: char) -> Option<Self> {
         match c {
             'A' | 'a' => Some(ChannelId::A),
@@ -1142,6 +1133,7 @@ impl ChannelId {
         }
     }
 
+    #[allow(dead_code)]
     pub fn as_char(&self) -> char {
         match self {
             ChannelId::A => 'A',
@@ -1220,25 +1212,6 @@ pub struct Channel {
     pub v2: V2ChannelState,
     pub v3: V3ChannelState,
     pub downsampler: Downsampler,
-    /// TODO(sub F): replaced by transforms in
-    /// `ParameterLinkConfig.transforms` (config) +
-    /// `ParameterLinkRuntime.transform_state` (runtime). Sub E removed
-    /// the only consumer (`process_buttplug_pipeline`); the field is
-    /// kept as a write-only path until sub F deletes both. The
-    /// `#[deprecated]` marker stops any future maintainer from quietly
-    /// re-introducing a reader thinking the field is load-bearing —
-    /// `#[allow(deprecated)]` is applied at the remaining intentional
-    /// write sites (`Channel::new`, `set_buttplug_link_config`).
-    #[deprecated(
-        note = "Sub F: replaced by ParameterLinkConfig.transforms; do not add readers"
-    )]
-    pub buttplug_link: ButtplugLinkConfig,
-    /// TODO(sub F): see `buttplug_link` above. Same fate, same
-    /// deprecation contract.
-    #[deprecated(
-        note = "Sub F: replaced by ParameterLinkRuntime.transform_state; do not add readers"
-    )]
-    pub buttplug_state: ButtplugChannelState,
     /// Master-intensity peak history. Only populated when V2Sustained is
     /// the active engine; idle otherwise. Lives on Channel so each channel
     /// holds its own peak independently.
@@ -1247,11 +1220,12 @@ pub struct Channel {
     /// of axis-history timestamps already fed into engines, so each tick
     /// only replays new samples in `(watermark, now - delay_ms]`.
     pub last_intensity_replay_ts: u64,
-    /// Watermark for the Buttplug "new LinearCmd since last tick" buffer.
-    /// `ButtplugFeatureValues::from_input_bus` reports a `bp:LinearCmd_<i>`
-    /// sample as new only when its timestamp is strictly greater than this
-    /// value. Updated to `now_ms` after each Buttplug-pipeline run, which
-    /// replaces the old post-tick `clear()` of the linear-commands HashMap.
+    /// Watermark for the Buttplug-driven resolver pass. Updated to
+    /// `now_ms` after each tick that ran `resolve_link` for an
+    /// intensity link in the `bp:` namespace. Sub G's resolved-update
+    /// emit will re-anchor the per-tick "new LinearCmd since last
+    /// tick" detection on this watermark; for now it tracks tick
+    /// boundaries but isn't read as a one-shot signal anywhere.
     pub last_buttplug_replay_ts: u64,
 }
 
@@ -1261,10 +1235,6 @@ impl Channel {
             ChannelId::A => ChannelConfig::channel_a_default(),
             ChannelId::B => ChannelConfig::channel_b_default(),
         };
-        // Construction must initialize every field, including the
-        // deprecated buttplug_link / buttplug_state pair that sub F
-        // deletes. `#[allow(deprecated)]` is intentional here.
-        #[allow(deprecated)]
         Self {
             id,
             config,
@@ -1272,8 +1242,6 @@ impl Channel {
             v2: V2ChannelState::default(),
             v3: V3ChannelState::default(),
             downsampler: Downsampler::default(),
-            buttplug_link: ButtplugLinkConfig::default(),
-            buttplug_state: ButtplugChannelState::default(),
             peak_hold: IntensityPeakHold::default(),
             last_intensity_replay_ts: 0,
             last_buttplug_replay_ts: 0,
@@ -1353,7 +1321,7 @@ impl Channel {
         }
     }
 
-    /// Reset all engine states to zero; leaves config + buttplug_link untouched.
+    /// Reset all engine states to zero; leaves config + link_runtime untouched.
     pub fn reset_engines(&mut self) {
         self.v2.reset();
         self.v3.reset();
@@ -1723,52 +1691,6 @@ impl ProcessingState {
         let axis = format!("bp:RotateDir_{}", index);
         let v = if clockwise { 1.0 } else { 0.0 };
         self.input_bus.update(&axis, v, arrival_ts_ms, None);
-    }
-
-    /// Build a per-tick `ButtplugFeatureValues` snapshot from the bus.
-    /// `last_replay_ts` is the channel's previous tick boundary — the
-    /// resulting `position_with_duration` buffer reports `bp:LinearCmd_<i>`
-    /// samples newer than that watermark exactly once.
-    pub fn get_buttplug_feature_values(
-        &self,
-        last_replay_ts: u64,
-    ) -> crate::buttplug::ButtplugFeatureValues {
-        crate::buttplug::ButtplugFeatureValues::from_input_bus(
-            &self.input_bus,
-            last_replay_ts,
-            BUTTPLUG_MAX_FEATURES,
-        )
-    }
-
-    /// True iff any axis under the `bp:` prefix has received data.
-    pub fn has_buttplug_input(&self) -> bool {
-        self.input_bus.has_any_with_prefix("bp:")
-    }
-
-    // ===== Buttplug Link Config Methods =====
-
-    /// Update the Buttplug link configuration for a channel's intensity
-    /// parameter. Sub E removed the consumer; this method now only
-    /// keeps `Channel.buttplug_link` in sync with persisted settings so
-    /// the field has a coherent value until sub F deletes it. The
-    /// `#[allow(deprecated)]` is intentional — write site only, no
-    /// reader.
-    #[deprecated(
-        note = "Sub F: write-only path to a deprecated field; deleted alongside Channel.buttplug_link"
-    )]
-    pub fn set_buttplug_link_config(&mut self, channel: char, config: ButtplugLinkConfig) {
-        match ChannelId::from_char(channel) {
-            Some(id) => {
-                #[allow(deprecated)]
-                {
-                    self.channel_mut(id).buttplug_link = config;
-                }
-            }
-            None => println!(
-                "[ProcessingState] Unknown channel for Buttplug link config: {}",
-                channel
-            ),
-        }
     }
 
 }
@@ -2313,11 +2235,12 @@ mod tests {
             received_at: 1000,
         });
 
-        assert!(state.has_buttplug_input());
+        // Pre-clear: bus carries `bp:` traffic.
+        assert!(state.input_bus.has_any_with_prefix("bp:"));
         state.clear_all_buttplug_features();
 
         // Buttplug axes gone — every variant.
-        assert!(!state.has_buttplug_input());
+        assert!(!state.input_bus.has_any_with_prefix("bp:"));
         assert!(state.input_bus.value("bp:Vibrate_0").is_none());
         assert!(state.input_bus.value("bp:PositionWithDuration_1").is_none());
         assert!(state.input_bus.value("bp:LinearCmd_0").is_none());
@@ -2326,63 +2249,12 @@ mod tests {
         assert_eq!(state.get_axis_value("L0"), Some(0.9));
     }
 
-    #[test]
-    fn test_buttplug_linear_cmd_watermark_reports_new_arrival_once_per_channel() {
-        // The "new LinearCmd since last tick" semantic moved off the
-        // post-tick `clear()` of a shared HashMap onto a per-channel
-        // watermark (`Channel.last_buttplug_replay_ts`). Same axis, same
-        // sample timestamp; first read past the watermark sees `Some`,
-        // subsequent reads at-or-before the watermark see `None`.
-        let mut state = ProcessingState::default();
-        let arrival_ts = 1_234_567u64;
-        state.set_buttplug_linear_cmd(0, 0.4, 250, arrival_ts);
-
-        // Watermark below the sample timestamp → reports as new with the
-        // (position, duration_ms, arrival_ms) triple intact.
-        let fresh = state.get_buttplug_feature_values(arrival_ts.saturating_sub(1));
-        assert_eq!(
-            fresh.get_new_position_with_duration(Some(0)),
-            Some((0.4, 250, arrival_ts))
-        );
-
-        // Watermark at-or-after the sample timestamp → consumed.
-        let consumed = state.get_buttplug_feature_values(arrival_ts);
-        assert!(consumed.get_new_position_with_duration(Some(0)).is_none());
-
-        // The persisted value vector still defaults to midpoint because
-        // LinearCmd writes only `bp:LinearCmd_<i>`, not `bp:PositionWithDuration_<i>`.
-        assert_eq!(
-            consumed.get_position_with_duration_value(Some(0)),
-            Some(0.5)
-        );
-    }
-
-    #[test]
-    fn test_buttplug_feature_values_round_trip_position_and_rotate_direction() {
-        // Position/Vibrate/Oscillate/Constrict slots come straight off bus
-        // axes; Rotate carries an out-of-band `bp:RotateDir_<i>` axis
-        // encoded as 1.0/0.0. Confirm the bus → ButtplugFeatureValues
-        // projection reassembles both shapes.
-        let mut state = ProcessingState::default();
-        let ts = 1_000u64;
-        state.set_buttplug_feature("Position_0".to_string(), 0.6, ts);
-        state.set_buttplug_feature("Vibrate_0".to_string(), 0.3, ts);
-        state.set_buttplug_feature("Oscillate_1".to_string(), 0.8, ts);
-        state.set_buttplug_feature("Constrict_0".to_string(), 0.2, ts);
-        state.set_buttplug_feature("Rotate_0".to_string(), 0.5, ts);
-        state.set_buttplug_rotate_direction(0, false, ts);
-        state.set_buttplug_feature("PositionWithDuration_1".to_string(), 0.9, ts);
-
-        let v = state.get_buttplug_feature_values(0);
-        assert_eq!(v.get_position(Some(0)), Some(0.6));
-        assert_eq!(v.get_vibrate(Some(0)), Some(0.3));
-        assert_eq!(v.get_oscillate(Some(1)), Some(0.8));
-        assert_eq!(v.get_constrict(Some(0)), Some(0.2));
-        assert_eq!(v.get_rotate(Some(0)), Some((0.5, false)));
-        assert_eq!(v.get_position_with_duration_value(Some(1)), Some(0.9));
-        // Slot 1 has no Position write → defaults to 0.0 (the type's init).
-        assert_eq!(v.get_position(Some(1)), Some(0.0));
-        // Slot 0 has no PositionWithDuration write → defaults to 0.5 (midpoint).
-        assert_eq!(v.get_position_with_duration_value(Some(0)), Some(0.5));
-    }
+    // The pre-sub-F watermark + feature-projection tests
+    // (`test_buttplug_linear_cmd_watermark_reports_new_arrival_once_per_channel`,
+    // `test_buttplug_feature_values_round_trip_position_and_rotate_direction`)
+    // were dropped along with `get_buttplug_feature_values`. The same
+    // watermark / direction-axis behavior is now covered at the resolver
+    // layer by `transforms::buttplug::tests::rotate_*` and the bus-level
+    // tests in `input_bus::tests`. The frontend feature-display path is
+    // covered by `test_set_buttplug_feature_writes_through_bus_under_bp_namespace`.
 }

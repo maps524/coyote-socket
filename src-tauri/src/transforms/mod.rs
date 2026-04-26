@@ -20,21 +20,33 @@
 //! reintroduce the time-travel bug where the base parameter resolves at
 //! `now - delay_ms` while the transform's modifier reads `now`.
 //!
-//! Sub D introduces the variants + apply dispatch + tests but no caller
-//! reads them yet. Sub E's resolver rewrite wires the
-//! `ParameterLinkConfig.transforms` field into the per-tick loop and
-//! sub F deletes the old `process_buttplug_pipeline`.
+//! Sub D introduced the variants + apply dispatch + tests; sub E's
+//! resolver rewrite wired `ParameterLinkConfig.transforms` into the
+//! per-tick loop; sub F deleted the old `process_buttplug_pipeline` and
+//! moved `ConstrictionMethod` here as the canonical home.
 
 use serde::{Deserialize, Serialize};
 
 pub mod buttplug;
 
-/// Method for applying Constrict bounds. Re-exports the existing
-/// `crate::buttplug::ConstrictionMethod` so saved presets that referenced
-/// the old `buttplug::types::ConstrictionMethod` round-trip without
-/// touching the wire format. Sub F is where this file becomes the new
-/// home; until then we re-export rather than duplicate the enum.
-pub use crate::buttplug::ConstrictionMethod;
+/// Method for applying Constrict bounds. Sub F moved this enum from
+/// `crate::buttplug::types` into the transforms layer so the resolver
+/// owns its own type. Saved presets that referenced the old wire path
+/// round-trip identically — `#[serde(rename_all = ...)]` is unchanged
+/// from the pre-refactor definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConstrictionMethod {
+    /// Remap 0.0-1.0 input to constrained range (preserves relative position).
+    Downsample,
+    /// Cut off values outside bounds (can cause flat spots).
+    Clamp,
+}
+
+impl Default for ConstrictionMethod {
+    fn default() -> Self {
+        ConstrictionMethod::Downsample
+    }
+}
 
 /// One ordered shaping step inside a `ParameterLinkConfig.transforms`
 /// vector. The variant payload carries everything the

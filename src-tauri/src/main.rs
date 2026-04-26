@@ -615,11 +615,6 @@ async fn apply_channel_config_to_state(
     use crate::modulation::ChannelLinkRuntime;
 
     let new_config = crate::settings_convert::convert_channel_settings(channel_settings);
-    let bp_config = channel_settings
-        .intensity_source
-        .buttplug_links
-        .as_ref()
-        .map(|bp| bp.to_link_config());
 
     let state = processing::get_processing_state().await;
     let mut state_guard = state.write().await;
@@ -631,16 +626,6 @@ async fn apply_channel_config_to_state(
     // resolver expects on the next tick.
     ch.link_runtime = ChannelLinkRuntime::for_config(&new_config);
     ch.config = new_config;
-    // Buttplug link kept as a write-only field until sub F's deletion;
-    // no consumer reads it now that `process_buttplug_pipeline` is
-    // gone, so the assignment is effectively a no-op for hot-path
-    // behavior. Removing the call here would leave `set_buttplug_link_config`
-    // unreferenced — pull the trigger in sub F alongside the field.
-    // `#[allow(deprecated)]` is intentional: write-only path, no reader.
-    if let Some(cfg) = bp_config {
-        #[allow(deprecated)]
-        state_guard.set_buttplug_link_config(channel_id.as_char(), cfg);
-    }
 }
 
 /// Snapshot static fallback values for HMR recovery. When a source is linked,

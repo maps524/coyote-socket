@@ -21,7 +21,7 @@ Eight steps total. Steps 1–4.5 are shipped. Steps 5+6+7 are bundled into one l
 
 Use the `EnterWorktree` deferred tool to switch the session into the worktree if you aren't already there. The session normally enters via `EnterWorktree({ path: "C:/Dev/Repos/hobby/electrado/coyote-socket/.claude/worktrees/pipeline-refactor" })` or by name if a fresh worktree is needed (don't create a fresh one — work continues in the existing one).
 
-The outer repo's `main` may have unrelated commits from the maintainer landing in parallel. Don't merge or rebase onto main from inside the worktree without checking with the maintainer first.
+The outer repo's `main` may have unrelated commits landing in parallel. Don't merge or rebase onto main from inside the worktree without checking with the maintainer first.
 
 ---
 
@@ -192,8 +192,8 @@ When all subs A–G + Step 8 are in:
 
 ## Communication style the maintainer uses
 
-He's running on a multi-agent dashboard with TTS. Keep voice updates short (1–3 sentences), set status `goal` once and `task` per substep, use emojis. Caveman mode is active — drop articles / fluff / hedging in conversation. Code, commits, and security writeups stay normal English.
+The maintainer runs a multi-agent dashboard with TTS. Keep voice updates short (1–3 sentences), set status `goal` once and `task` per substep, use emojis. Caveman mode is active — drop articles / fluff / hedging in conversation. Code, commits, and security writeups stay normal English.
 
-He values: thoughtful migration over speed; deletion over deprecation; tests pinning behavior before refactors; reviewer feedback distinguishing "should have caught" from "deferred to later sub".
+The maintainer values: thoughtful migration over speed; deletion over deprecation; tests pinning behavior before refactors; reviewer feedback distinguishing "should have caught" from "deferred to later sub".
 
-He doesn't like: parallel architectures, modal dialogs for migration, dead code left "for compat", silent fallbacks without observability.
+The maintainer doesn't like: parallel architectures, modal dialogs for migration, dead code left "for compat", silent fallbacks without observability.
