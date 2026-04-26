@@ -407,8 +407,8 @@ This refactor must leave **no remnants** of the old pipeline. Every item below i
 | `get_per_slot_frequencies` | 5+6+7 | Same per-tick resolver pass; produces 4-slot freq alongside intensity. |
 | `apply_saved_settings_to_processing` | 3 → 5+6+7 | `apply_channel_config_to_state` (one helper, no per-field ceremony). |
 | `sync_settings_to_state` | 3 | Same helper. |
-| `update_parameter_source` (Tauri command + 100-line ButtplugLinkConfig builder in main.rs) | 3 | Replaced by single Tauri command `apply_channel_config { channel, config }`. |
-| `update_buttplug_links` (Tauri command) | 5+6+7 | Folded into `apply_channel_config`. |
+| `update_parameter_source` (Tauri command + 100-line ButtplugLinkConfig builder in main.rs) | 3 (shipped) | Replaced by single Tauri command `apply_channel_config { channel, config }`. |
+| `update_buttplug_links` (Tauri command) | 3 (shipped) | Folded into `apply_channel_config` alongside `update_parameter_source`. |
 | `Channel.apply_tcode` | 5+6+7 | None. |
 | `device.rs::scale_intensity` | 5+6+7 | None. Range scaling is part of the resolver now; engine output is already in device units. |
 
@@ -416,8 +416,8 @@ This refactor must leave **no remnants** of the old pipeline. Every item below i
 
 | Command | Step | Replacement |
 |---|---|---|
-| `update_parameter_source` | 3 | `apply_channel_config { channel, config: ChannelConfig }`. Frontend `ChannelControl.svelte` (4 callsites) + `GeneralTab.svelte` (1 callsite) rewritten to call `apply_channel_config` with the full channel config payload. |
-| `update_buttplug_links` | 5+6+7 | Same — Buttplug-specific link updates fold into `apply_channel_config`. |
+| `update_parameter_source` | 3 (shipped) | `apply_channel_config { channel, config: ChannelConfig }`. Frontend `ChannelControl.svelte` (4 callsites) + `GeneralTab.svelte` (1 callsite) rewritten to call `apply_channel_config` with the full channel config payload. |
+| `update_buttplug_links` | 3 (shipped) | Same — Buttplug-specific link updates fold into `apply_channel_config`. |
 | `update_channel_config` | 3 | Same — debounced fast-path uses the same command, distinguished by a `persist: bool` flag. |
 | `save_channel_settings` | 3 | Same — `apply_channel_config { ..., persist: true }`. |
 

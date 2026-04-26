@@ -1461,9 +1461,4 @@ mod tests {
         assert_eq!(p.int_balance, 0);
     }
 
-    // Suppresses "unused" if test fixtures grow new fields.
-    #[allow(dead_code)]
-    fn _touch_buttplug_links() -> Option<ButtplugLinksSettings> {
-        None
-    }
 }

@@ -1,19 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// Buttplug feature output types — wire-format identifiers used by the
-/// device descriptor. Sub F dropped the runtime pipeline that consumed
-/// these as routing tags; the enum stays for `buttplug/handler.rs` to
-/// label features advertised over the protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ButtplugFeatureType {
-    Position,
-    PositionWithDuration,
-    Vibrate,
-    Rotate,
-    Oscillate,
-    Constrict,
-}
-
 /// Per-feature-type slot count for the device descriptor advertisement.
 /// Determines how many features of each type the virtual Buttplug
 /// device reports as available.
