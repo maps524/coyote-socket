@@ -26,7 +26,7 @@
   import { outputOptions, connectionStatus, PROCESSING_ENGINES, PEAK_FILL_STRATEGIES, type ProcessingEngine, type PeakFillStrategy } from './lib/stores/connection.js';
   import { channelA, channelB } from './lib/stores/channels.js';
   import { generalSettings } from './lib/stores/generalSettings.js';
-  import { startInputTracking, stopInputTracking } from './lib/stores/inputPosition.js';
+  import { startResolvedTracking, stopResolvedTracking } from './lib/stores/resolvedState.js';
   import {
     startStateSync,
     stopStateSync,
@@ -499,8 +499,9 @@
     hmrReloading = false;
     console.log('[Settings] settingsLoaded set to true, hmrReloading reset after tick');
 
-    // Start input position tracking for range slider indicators
-    startInputTracking();
+    // Start resolved-state tracking for range slider indicators (10Hz
+    // post-resolver snapshot from backend, RAF-smoothed for display).
+    startResolvedTracking();
 
     // Set initial window size based on T-Code monitor setting
     const initialHeight = $generalSettings.showTCodeMonitor ? WINDOW_HEIGHT_WITH_MONITOR : WINDOW_HEIGHT_COMPACT;
@@ -606,8 +607,8 @@
     hmrReloading = true;
 
     coyoteService.destroy();
-    // Stop input position tracking
-    stopInputTracking();
+    // Stop resolved-state tracking
+    stopResolvedTracking();
     // Stop state sync event listeners
     stopStateSync();
     stopGamepadStatusSync();

@@ -3,9 +3,9 @@
   import { Zap } from 'lucide-svelte';
   import { channelA, channelB } from '$lib/stores/channels.js';
   import { generalSettings } from '$lib/stores/generalSettings.js';
-  import { allAxisValues } from '$lib/stores/inputPosition.js';
-  import { currentInputSource, inputSourceState } from '$lib/stores/inputSource.js';
-  import { type ParameterSource, type ButtplugLinks, applySourceTransform } from '$lib/types/modulation.js';
+  import { resolvedChannelA, resolvedChannelB, isLinkedSample } from '$lib/stores/resolvedState.js';
+  import { currentInputSource } from '$lib/stores/inputSource.js';
+  import { type ParameterSource } from '$lib/types/modulation.js';
 
   // Translate the live input source into the simpler tri-state
   // ('tcode' | 'buttplug' | 'none') that RangeSliderWithIndicator and
@@ -18,54 +18,6 @@
   $: effectiveInputMode = ($currentInputSource === 'buttplug' || $currentInputSource === 'lovense')
     ? 'buttplug' as const
     : 'tcode' as const;
-
-  // Helper: Get Buttplug feature value from the current features based on linked config
-  // Returns 0-1 normalized value or 0 if not found
-  function getButtplugIndicatorValue(links: ButtplugLinks | undefined): number {
-    if (!links) return 0;
-
-    const features = $inputSourceState.buttplugFeatures;
-    if (features.length === 0) return 0;
-
-    // Check each pipeline stage in order of priority for the indicator
-    // Position is the primary source, others modulate it
-    if (links.position) {
-      const feature = features.find(f =>
-        f.featureType === links.position!.featureType &&
-        f.featureIndex === links.position!.featureIndex
-      );
-      if (feature) return feature.value;
-    }
-
-    // Fall back to motion features if no position
-    if (links.motion) {
-      const feature = features.find(f =>
-        f.featureType === links.motion!.featureType &&
-        f.featureIndex === links.motion!.featureIndex
-      );
-      if (feature) return feature.value;
-    }
-
-    // Fall back to vibrate if no position/motion
-    if (links.vibrate) {
-      const feature = features.find(f =>
-        f.featureType === 'Vibrate' &&
-        f.featureIndex === links.vibrate!.featureIndex
-      );
-      if (feature) return feature.value;
-    }
-
-    // Fall back to constrict
-    if (links.constrict) {
-      const feature = features.find(f =>
-        f.featureType === 'Constrict' &&
-        f.featureIndex === links.constrict!.featureIndex
-      );
-      if (feature) return feature.value;
-    }
-
-    return 0;
-  }
 
   export let channel: 'A' | 'B';
   export let compact = false;
@@ -82,6 +34,10 @@
 
   // Get reactive store for this channel
   $: store = channel === 'A' ? channelA : channelB;
+  // Resolver-side snapshot for this channel — feeds the per-parameter
+  // position indicators with post-curve, post-transforms values from the
+  // backend `resolved-update` event (10Hz, RAF-smoothed).
+  $: resolved = channel === 'A' ? resolvedChannelA : resolvedChannelB;
 
   // Channel parameters matching the original Python implementation
   $: frequency = $store.frequency;
@@ -149,47 +105,22 @@
     curve: 'linear' as const
   };
 
-  // Get indicator values based on linked source axis or Buttplug features
-  // In Buttplug mode, use Buttplug feature values; in T-Code mode, use axis values
-  $: freqIndicator = (() => {
-    if (($currentInputSource === 'buttplug' || $currentInputSource === 'lovense') && frequencySource.buttplugLinks) {
-      return getButtplugIndicatorValue(frequencySource.buttplugLinks);
-    }
-    if (frequencySource.type === 'linked' && frequencySource.sourceAxis) {
-      return applySourceTransform($allAxisValues[frequencySource.sourceAxis] ?? 0, frequencySource);
-    }
-    return 0;
-  })();
-
-  $: freqBalIndicator = (() => {
-    if (($currentInputSource === 'buttplug' || $currentInputSource === 'lovense') && frequencyBalanceSource.buttplugLinks) {
-      return getButtplugIndicatorValue(frequencyBalanceSource.buttplugLinks);
-    }
-    if (frequencyBalanceSource.type === 'linked' && frequencyBalanceSource.sourceAxis) {
-      return applySourceTransform($allAxisValues[frequencyBalanceSource.sourceAxis] ?? 0, frequencyBalanceSource);
-    }
-    return 0;
-  })();
-
-  $: intBalIndicator = (() => {
-    if (($currentInputSource === 'buttplug' || $currentInputSource === 'lovense') && intensityBalanceSource.buttplugLinks) {
-      return getButtplugIndicatorValue(intensityBalanceSource.buttplugLinks);
-    }
-    if (intensityBalanceSource.type === 'linked' && intensityBalanceSource.sourceAxis) {
-      return applySourceTransform($allAxisValues[intensityBalanceSource.sourceAxis] ?? 0, intensityBalanceSource);
-    }
-    return 0;
-  })();
-
-  $: intensityIndicator = (() => {
-    if (($currentInputSource === 'buttplug' || $currentInputSource === 'lovense') && intensitySource.buttplugLinks) {
-      return getButtplugIndicatorValue(intensitySource.buttplugLinks);
-    }
-    if (intensitySource.type === 'linked' && intensitySource.sourceAxis) {
-      return applySourceTransform($allAxisValues[intensitySource.sourceAxis] ?? 0, intensitySource);
-    }
-    return 0;
-  })();
+  // Indicator values come straight from the resolver. `normalized_pre_range`
+  // is the 0..1 value the resolver computed after delay + midpoint + curve +
+  // transforms — i.e. where the device is actually being driven within the
+  // user-configured range. Static parameters omit `source_axis` from the
+  // wire format; gating on `isLinkedSample` keeps the indicator hidden
+  // (RangeSliderWithIndicator only renders when indicatorValue > 0, but
+  // a static parameter's normalized_pre_range can be its raw static value
+  // — e.g. 100 for frequency — which would push the dot off-track).
+  $: freqIndicator = isLinkedSample($resolved.frequency) ? $resolved.frequency.normalized_pre_range : 0;
+  $: freqBalIndicator = isLinkedSample($resolved.frequency_balance)
+    ? $resolved.frequency_balance.normalized_pre_range
+    : 0;
+  $: intBalIndicator = isLinkedSample($resolved.intensity_balance)
+    ? $resolved.intensity_balance.normalized_pre_range
+    : 0;
+  $: intensityIndicator = isLinkedSample($resolved.intensity) ? $resolved.intensity.normalized_pre_range : 0;
 
   // Build tooltip strings
   $: freqTooltip = `Controls the pulse frequency (1-200 Hz)${shortcuts ? ` <code>${shortcuts.freqDown}/${shortcuts.freqUp}</code>` : ''}`;

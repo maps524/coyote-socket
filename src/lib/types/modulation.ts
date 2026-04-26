@@ -209,73 +209,15 @@ export const defaultGeneralSettings: GeneralSettings = {
 };
 
 // ============================================================================
-// Curve Utility Functions
+// Math utilities
 // ============================================================================
 
 /**
- * Smoothstep function for S-curve (3t^2 - 2t^3)
- */
-function smoothstep(t: number): number {
-  const clamped = Math.max(0, Math.min(1, t));
-  return clamped * clamped * (3 - 2 * clamped);
-}
-
-/**
- * Apply curve transformation to normalized input (0.0-1.0)
- * Matches the Rust implementation in modulation.rs
- */
-export function applyCurve(input: number, curve: CurveType, strength: number = 2.0): number {
-  const clamped = Math.max(0, Math.min(1, input));
-  switch (curve) {
-    case 'linear':
-      return clamped;
-    case 'exponential':
-      return Math.pow(clamped, strength);
-    case 'logarithmic':
-      return Math.pow(clamped, 1.0 / strength);
-    case 's-curve':
-      return smoothstep(clamped);
-    case 'inverse':
-      return 1.0 - clamped;
-    default:
-      return clamped;
-  }
-}
-
-/**
- * Linear interpolation between min and max
+ * Linear interpolation between min and max.
  */
 export function lerp(min: number, max: number, t: number): number {
   const clamped = Math.max(0, Math.min(1, t));
   return min + (max - min) * clamped;
-}
-
-/**
- * Apply midpoint transformation if enabled
- * Converts input so center (0.5) becomes 0, and edges (0 or 1) become 1
- * Formula: abs(input - 0.5) * 2
- */
-export function applyMidpoint(value: number): number {
-  return Math.abs(value - 0.5) * 2;
-}
-
-/**
- * Apply curve and range mapping to a raw axis value
- * Returns a value in the range [0, 1] suitable for indicator display
- */
-export function applySourceTransform(
-  rawValue: number,
-  source: ParameterSource
-): number {
-  if (source.type === 'static') {
-    return 0; // No indicator for static sources
-  }
-
-  // Apply midpoint transformation first if enabled
-  let value = source.midpoint ? applyMidpoint(rawValue) : rawValue;
-
-  const strength = source.curveStrength ?? 2.0;
-  return applyCurve(value, source.curve, strength);
 }
 
 // ============================================================================

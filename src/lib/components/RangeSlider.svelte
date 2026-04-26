@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { channelA, channelB } from '$lib/stores/channels.js';
-  import { inputPositionA, inputPositionB } from '$lib/stores/inputPosition.js';
+  import { resolvedChannelA, resolvedChannelB, isLinkedSample } from '$lib/stores/resolvedState.js';
 
   export let channel: 'A' | 'B';
   export let compact = false;
@@ -11,7 +11,13 @@
 
   // Get reactive store for this channel
   $: store = channel === 'A' ? channelA : channelB;
-  $: inputPosition = channel === 'A' ? $inputPositionA : $inputPositionB;
+  // Position indicator reads the resolver's intensity sample. The 0..1
+  // `normalized_pre_range` value already accounts for delay + curve +
+  // transforms, so the dot lands at the device's actual operating point
+  // within the min/max range. Hide the dot when the parameter is Static
+  // (no source axis to reflect).
+  $: resolvedIntensity = (channel === 'A' ? $resolvedChannelA : $resolvedChannelB).intensity;
+  $: inputPosition = isLinkedSample(resolvedIntensity) ? resolvedIntensity.normalized_pre_range : 0;
 
   $: minValue = $store.rangeMin;
   $: maxValue = $store.rangeMax;
