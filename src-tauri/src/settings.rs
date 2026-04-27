@@ -98,56 +98,6 @@ impl Default for ParameterSourceType {
     }
 }
 
-/// Buttplug feature link configuration for persistence
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ButtplugFeatureLinkSettings {
-    pub feature_type: String, // "Position", "Vibrate", etc.
-    pub feature_index: u32,
-    #[serde(default)]
-    pub config: ButtplugFeatureConfigSettings,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ButtplugFeatureConfigSettings {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub distance: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rotate_scale: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rotate_max_speed: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub oscillate_scale: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub oscillate_max_speed: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub constrict_min_floor: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub constrict_use_midpoint: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub constrict_method: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ButtplugLinksSettings {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub position: Option<ButtplugFeatureLinkSettings>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub motion: Option<ButtplugFeatureLinkSettings>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vibrate: Option<ButtplugFeatureLinkSettings>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub constrict: Option<ButtplugFeatureLinkSettings>,
-}
-
-// `ButtplugLinksSettings` deserializes from saved presets but its only
-// runtime consumer is `settings_convert::convert_parameter_source`,
-// which translates it into `ParameterLinkConfig.transforms`. Sub F
-// deleted the legacy `to_link_config` builder along with the
-// `ButtplugLinkConfig` type.
-
 /// Parameter source settings - stores both static value and linked range
 /// so switching between modes preserves both values
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,18 +121,16 @@ pub struct ParameterSourceSettings {
     /// Input delay in ms (0-200). Only honored when `delay_ms` is true.
     #[serde(default)]
     pub delay_ms: u32,
-    /// Ordered shaping transforms attached to the link by the new editor
+    /// Ordered shaping transforms attached to the link by the editor
     /// (sub G.2). Round-trips as `Vec<TransformConfig>` directly into the
-    /// runtime `ParameterLinkConfig.transforms`. Older saves omit this
-    /// key and fall back to the legacy `buttplug_links` translation in
-    /// `settings_convert.rs` until sub G.3 retires the legacy path.
+    /// runtime `ParameterLinkConfig.transforms`. Per the plan-doc
+    /// migration table, saved presets that previously carried the
+    /// removed `buttplug_links` key load with an empty `transforms` —
+    /// users re-attach their Buttplug-side transforms via the editor.
+    /// Sub G.3 retired the legacy field-by-field translation in
+    /// `settings_convert.rs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<crate::transforms::TransformConfig>,
-    /// Legacy Buttplug feature links. Sub G.3 deletes this field; until
-    /// then the convert layer reads it as a fallback when `transforms` is
-    /// empty so saved Buttplug presets keep working.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub buttplug_links: Option<ButtplugLinksSettings>,
 }
 
 impl ParameterSourceSettings {
@@ -199,7 +147,6 @@ impl ParameterSourceSettings {
             delay_enabled: false,
             delay_ms: 0,
             transforms: Vec::new(),
-            buttplug_links: None,
         }
     }
 
@@ -216,7 +163,6 @@ impl ParameterSourceSettings {
             delay_enabled: false,
             delay_ms: 0,
             transforms: Vec::new(),
-            buttplug_links: None,
         }
     }
 }

@@ -1,11 +1,10 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy } from 'svelte';
   import type { ParameterSource, CurveType, Transform } from '$lib/types/modulation.js';
-  import { Info, Link, MapPin, Clock, RotateCw, MoveHorizontal, Activity, Minimize2, Gamepad2 } from 'lucide-svelte';
+  import { Info, Link, Gamepad2 } from 'lucide-svelte';
   import Tooltip from './Tooltip.svelte';
   import Slider from './Slider.svelte';
   import Popover from './Popover.svelte';
-  import ButtplugLinkPanel from './ButtplugLinkPanel.svelte';
   import TransformsEditor from './TransformsEditor.svelte';
 
   // Props
@@ -22,7 +21,6 @@
   export let tooltip: string = ''; // Optional tooltip text
   export let isIntensity: boolean = false; // Special handling for intensity display
   export let wheelStep: ((currentValue: number, direction: 'up' | 'down') => number) | undefined = undefined;
-  export let inputMode: 'tcode' | 'buttplug' | 'none' = 'tcode'; // Input source mode
 
   const dispatch = createEventDispatcher<{
     sourceChange: ParameterSource;
@@ -90,59 +88,10 @@
   // Calculate indicator position within the min-max range
   $: indicatorPercent = minPercent + (indicatorValue * (maxPercent - minPercent));
 
-  // Is linked mode active? Depends on active input ecosystem
-  // - In TCode mode: check if a TCode axis is linked
-  // - In Buttplug mode: check if any Buttplug features are linked
-  $: isLinked = inputMode === 'buttplug'
-    ? hasButtplugLinks
-    : source.type === 'linked';
-
-  // Feature type icons mapping
-  const featureIcons: Record<string, any> = {
-    Position: MapPin,
-    PositionWithDuration: Clock,
-    Rotate: RotateCw,
-    Oscillate: MoveHorizontal,
-    Vibrate: Activity,
-    Constrict: Minimize2
-  };
-
-  // Reactive: Get buttplug link items for display (icon + number pairs)
-  // This is reactive so it updates when source.buttplugLinks changes
-  $: buttplugLinkItems = (() => {
-    const links = source.buttplugLinks;
-    if (!links) return [];
-
-    const items: Array<{ icon: any; index: number }> = [];
-    if (links.position) {
-      items.push({
-        icon: featureIcons[links.position.featureType],
-        index: links.position.featureIndex + 1
-      });
-    }
-    if (links.motion) {
-      items.push({
-        icon: featureIcons[links.motion.featureType],
-        index: links.motion.featureIndex + 1
-      });
-    }
-    if (links.vibrate) {
-      items.push({
-        icon: featureIcons.Vibrate,
-        index: links.vibrate.featureIndex + 1
-      });
-    }
-    if (links.constrict) {
-      items.push({
-        icon: featureIcons.Constrict,
-        index: links.constrict.featureIndex + 1
-      });
-    }
-    return items;
-  })();
-
-  // Check if buttplug links are set (derived from buttplugLinkItems)
-  $: hasButtplugLinks = buttplugLinkItems.length > 0;
+  // Sub G.3 unified the editor — Linked iff source_type is 'linked'.
+  // The previous Buttplug-mode branch (hasButtplugLinks) is gone with
+  // the legacy ButtplugLinkPanel.
+  $: isLinked = source.type === 'linked';
 
   // Format value for display
   function formatValue(value: number): string {
@@ -196,11 +145,6 @@
         transforms: source.transforms
       });
     }
-  }
-
-  // Handle Buttplug link changes
-  function handleButtplugLinkChange(event: CustomEvent<ParameterSource>) {
-    dispatch('sourceChange', event.detail);
   }
 
   // Handle transforms list changes (sub G.2 — TransformsEditor). Merges
@@ -472,28 +416,23 @@
         </Tooltip>
       {/if}
 
-      <!-- Source popover -->
+      <!-- Source popover. Sub G.3 unified the editor — one path for
+           T-Code, gamepad, and Buttplug links. Buttplug-side feature
+           pickers now live in the transforms list (Vibrate, Oscillate,
+           Rotate, Constrict variants); the parameter's `source_axis`
+           is picked from the same axis-button grid that T-Code uses,
+           and `bp:*` axes show up there as the user-typed name in the
+           transforms editor (sub G.3.2 will replace the typed-name
+           inputs with a discovery dropdown driven by the bus store). -->
       <Popover bind:open={popoverOpen} compact={true} contentClass="!w-[160px] min-w-0">
         <button
           slot="trigger"
           type="button"
           class="inline-flex items-center justify-center gap-0.5 px-1.5 h-5 rounded text-xs font-mono
                  bg-muted/50 hover:bg-muted border border-border/50 transition-colors min-w-[28px]
-                 {(isLinked || hasButtplugLinks) ? (channel === 'A' ? 'text-primary' : 'text-secondary') : 'text-muted-foreground'}"
+                 {isLinked ? (channel === 'A' ? 'text-primary' : 'text-secondary') : 'text-muted-foreground'}"
         >
-          {#if inputMode === 'buttplug'}
-            <!-- Buttplug mode: show linked features or default link icon -->
-            {#if buttplugLinkItems.length > 0}
-              {#each buttplugLinkItems as item}
-                <svelte:component this={item.icon} class="h-3 w-3" />
-                <span class="leading-none text-[10px]">{item.index}</span>
-              {/each}
-            {:else}
-              <Link class="h-3.5 w-3.5 opacity-80" />
-            {/if}
-          {:else if inputMode === 'tcode' && isLinked}
-            <!-- TCode mode with linked axis. Gamepad axes get an icon prefix
-                 so the GP_ namespace doesn't bleed into the label. -->
+          {#if isLinked}
             {#if selectedSource.startsWith('GP_')}
               <Gamepad2 class="h-3 w-3" />
               <span class="leading-none">{selectedSource.replace('GP_', '')}</span>
@@ -501,111 +440,98 @@
               <span class="leading-none">{selectedSource}</span>
             {/if}
           {:else}
-            <!-- No input or static mode -->
             <Link class="h-3.5 w-3.5 opacity-80" />
           {/if}
         </button>
 
-        {#if inputMode === 'tcode' || inputMode === 'none'}
-          <!-- T-Code Mode (or no input - default to tcode options) -->
-          <div class="space-y-1 mb-2">
-            {#each axisRows as row}
-              <div class="flex gap-1">
-                {#each row as axis}
-                  <button
-                    type="button"
-                    class="flex-1 px-2 py-1 text-xs font-mono rounded transition-colors
-                           {selectedSource === axis
-                             ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
-                             : 'bg-muted/50 hover:bg-muted text-foreground'}"
-                    on:click={() => handleAxisClick(axis)}
-                  >
-                    {axis}
-                  </button>
-                {/each}
-              </div>
-            {/each}
-            <!-- Gamepad axis rows -->
-            <div class="pt-1 border-t border-border/50 text-[10px] text-muted-foreground">Gamepad</div>
-            {#each gamepadAxisRows as row}
-              <div class="flex gap-1">
-                {#each row as axis}
-                  <button
-                    type="button"
-                    class="flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors
-                           {selectedSource === axis
-                             ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
-                             : 'bg-muted/50 hover:bg-muted text-foreground'}"
-                    on:click={() => handleAxisClick(axis)}
-                  >
-                    {axis.replace('GP_', '')}
-                  </button>
-                {/each}
-              </div>
-            {/each}
-          </div>
-
-          <!-- Curve selector dropdown -->
-          <select
-            class="w-full px-2 py-1 pr-6 text-xs rounded border border-border bg-background text-foreground cursor-pointer appearance-none bg-no-repeat bg-right"
-            style="background-image: url('data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%23888%22 stroke-width=%222%22%3E%3Cpath d=%22m6 9 6 6 6-6%22/%3E%3C/svg%3E'); background-position: right 6px center;"
-            value={selectedCurve}
-            on:change={handleCurveChange}
-          >
-            {#each curveOptions as option}
-              <option value={option.value}>{option.label}</option>
-            {/each}
-          </select>
-
-          <!-- Curve strength slider (only for exponential/logarithmic) -->
-          {#if curveSupportsStrength}
-          <div class="mt-2 space-y-1">
-            <div class="flex justify-between items-center text-[10px] text-muted-foreground">
-              <span>Strength</span>
-              <span class="font-mono">{curveStrength.toFixed(1)}</span>
+        <div class="space-y-1 mb-2">
+          {#each axisRows as row, ri (ri)}
+            <div class="flex gap-1">
+              {#each row as axis (axis)}
+                <button
+                  type="button"
+                  class="flex-1 px-2 py-1 text-xs font-mono rounded transition-colors
+                         {selectedSource === axis
+                           ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
+                           : 'bg-muted/50 hover:bg-muted text-foreground'}"
+                  on:click={() => handleAxisClick(axis)}
+                >
+                  {axis}
+                </button>
+              {/each}
             </div>
-            <Slider
-              value={curveStrength}
-              min={0.5}
-              max={3.0}
-              step={0.1}
-              variant={channel === 'A' ? 'primary' : 'secondary'}
-              on:change={handleStrengthChange}
-              class="h-3"
-            />
+          {/each}
+          <!-- Gamepad axis rows -->
+          <div class="pt-1 border-t border-border/50 text-[10px] text-muted-foreground">Gamepad</div>
+          {#each gamepadAxisRows as row, ri (ri)}
+            <div class="flex gap-1">
+              {#each row as axis (axis)}
+                <button
+                  type="button"
+                  class="flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors
+                         {selectedSource === axis
+                           ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
+                           : 'bg-muted/50 hover:bg-muted text-foreground'}"
+                  on:click={() => handleAxisClick(axis)}
+                >
+                  {axis.replace('GP_', '')}
+                </button>
+              {/each}
+            </div>
+          {/each}
+        </div>
+
+        <!-- Curve selector dropdown -->
+        <select
+          class="w-full px-2 py-1 pr-6 text-xs rounded border border-border bg-background text-foreground cursor-pointer appearance-none bg-no-repeat bg-right"
+          style="background-image: url('data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%23888%22 stroke-width=%222%22%3E%3Cpath d=%22m6 9 6 6 6-6%22/%3E%3C/svg%3E'); background-position: right 6px center;"
+          value={selectedCurve}
+          on:change={handleCurveChange}
+        >
+          {#each curveOptions as option (option.value)}
+            <option value={option.value}>{option.label}</option>
+          {/each}
+        </select>
+
+        <!-- Curve strength slider (only for exponential/logarithmic) -->
+        {#if curveSupportsStrength}
+        <div class="mt-2 space-y-1">
+          <div class="flex justify-between items-center text-[10px] text-muted-foreground">
+            <span>Strength</span>
+            <span class="font-mono">{curveStrength.toFixed(1)}</span>
           </div>
-          {/if}
-
-          <!-- Midpoint toggle -->
-          <label class="mt-2 flex items-center justify-between cursor-pointer">
-            <span class="text-[10px] text-muted-foreground">Midpoint</span>
-            <input
-              type="checkbox"
-              checked={midpointEnabled}
-              on:change={handleMidpointChange}
-              class="w-4 h-4 rounded border-border bg-background text-primary focus:ring-primary focus:ring-offset-0 cursor-pointer"
-            />
-          </label>
-
-          <!-- Transforms list (sub G.2). T-Code/none mode only for now;
-               sub G.3 unifies the Buttplug branch onto the same editor.
-               `sourceAxis` drives the inert-transforms hint inside the
-               editor — only `bp:`-prefixed Linked links route through
-               the resolver's transforms pipeline today. -->
-          <TransformsEditor
-            {channel}
-            transforms={source.transforms ?? []}
-            sourceAxis={source.type === 'linked' ? source.sourceAxis : undefined}
-            on:change={handleTransformsChange}
+          <Slider
+            value={curveStrength}
+            min={0.5}
+            max={3.0}
+            step={0.1}
+            variant={channel === 'A' ? 'primary' : 'secondary'}
+            on:change={handleStrengthChange}
+            class="h-3"
           />
-        {:else if inputMode === 'buttplug'}
-          <!-- Buttplug Mode: Feature selection grid (TCode options hidden) -->
-          <ButtplugLinkPanel
-            {channel}
-            source={source}
-            on:linkChange={handleButtplugLinkChange}
-          />
+        </div>
         {/if}
+
+        <!-- Midpoint toggle -->
+        <label class="mt-2 flex items-center justify-between cursor-pointer">
+          <span class="text-[10px] text-muted-foreground">Midpoint</span>
+          <input
+            type="checkbox"
+            checked={midpointEnabled}
+            on:change={handleMidpointChange}
+            class="w-4 h-4 rounded border-border bg-background text-primary focus:ring-primary focus:ring-offset-0 cursor-pointer"
+          />
+        </label>
+
+        <!-- Transforms list. `sourceAxis` drives the inert-transforms
+             hint inside the editor — only `bp:`-prefixed Linked links
+             route through the resolver's transforms pipeline today. -->
+        <TransformsEditor
+          {channel}
+          transforms={source.transforms ?? []}
+          sourceAxis={source.type === 'linked' ? source.sourceAxis : undefined}
+          on:change={handleTransformsChange}
+        />
       </Popover>
     </div>
 

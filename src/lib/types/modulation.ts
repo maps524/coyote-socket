@@ -27,63 +27,11 @@ export type CurveType = 'linear' | 'exponential' | 'logarithmic' | 's-curve' | '
  */
 export type NoInputBehavior = 'hold' | 'default' | 'decay' | 'zero';
 
-// ============================================================================
-// Buttplug Feature Types (defined early for use in ParameterSource)
-// ============================================================================
-
 /**
- * Buttplug feature types that can be linked to channel parameters
- * Note: Position (ScalarCmd) is not used - clients prefer LinearCmd (PositionWithDuration)
- */
-export type ButtplugFeatureType =
-  | 'PositionWithDuration'
-  | 'Vibrate'
-  | 'Rotate'
-  | 'Oscillate'
-  | 'Constrict';
-
-/**
- * Configuration specific to each Buttplug feature type
- */
-export interface ButtplugFeatureConfig {
-  // Vibrate
-  distance?: number;              // 0.0-1.0, max amplitude of wobble (default: 0.2)
-
-  // Rotate
-  rotateScale?: number;           // 0.0-1.0, how much of range to sweep (default: 0.5)
-  rotateMaxSpeed?: number;        // Hz, max sweep rate (default: 5.0)
-
-  // Oscillate
-  oscillateScale?: number;        // 0.0-1.0, portion of range to cover (default: 0.5)
-  oscillateMaxSpeed?: number;     // Hz, max sweep rate (default: 5.0)
-
-  // Constrict
-  constrictMinFloor?: number;     // 0.0-1.0, what "0" constriction means (default: 0.0)
-  constrictUseMidpoint?: boolean; // Center around midpoint vs position (default: false)
-  constrictMethod?: 'downsample' | 'clamp'; // How to apply bounds (default: 'downsample')
-}
-
-/**
- * Buttplug feature link - identifies which feature is linked
- */
-export interface ButtplugFeatureLink {
-  featureType: ButtplugFeatureType;
-  featureIndex: number;           // 0-based index (e.g., 0 for Position 1, 1 for Position 2)
-  config?: ButtplugFeatureConfig;
-}
-
-/**
- * Buttplug links for a parameter (pipeline stages)
- */
-export interface ButtplugLinks {
-  position?: ButtplugFeatureLink;     // Position or PositionWithDuration (base value)
-  motion?: ButtplugFeatureLink;       // Rotate or Oscillate (mutually exclusive)
-  vibrate?: ButtplugFeatureLink;      // Vibrate (wobble modulation)
-  constrict?: ButtplugFeatureLink;    // Constrict (range limiter)
-}
-
-/**
- * Configuration for a single parameter's source
+ * Configuration for a single parameter's source. Sub G.3 unified the
+ * Buttplug-feature pipeline into the same `transforms` vector that
+ * T-Code / gamepad links use, dropping the legacy `buttplugLinks`
+ * field and the parallel ecosystem branch.
  */
 export interface ParameterSource {
   type: ParameterSourceType;
@@ -91,8 +39,9 @@ export interface ParameterSource {
   // For 'static' mode
   staticValue?: number;
 
-  // For 'linked' mode (T-Code)
-  sourceAxis?: string;      // 'L0', 'L1', 'R0', 'R1', 'R2', 'V0-V3', 'A0-A1'
+  // For 'linked' mode — any axis name the bus knows about
+  // (`L0`, `R2`, `GP_LX`, `bp:Position_0`, ...).
+  sourceAxis?: string;
   rangeMin: number;         // Output when input = 0%
   rangeMax: number;         // Output when input = 100%
   curve: CurveType;         // Transform curve
@@ -100,17 +49,11 @@ export interface ParameterSource {
   midpoint?: boolean;       // If true, input is distance from center (0.5 -> 0, 0 or 1 -> 1)
   delayMs?: number;         // Lag axis input by this many ms (0-200, step 25). 0/undefined = no delay.
 
-  // Ordered shaping transforms attached to this link by the new G.2 editor.
+  // Ordered shaping transforms attached to this link by the G.2 editor.
   // Round-trips as Vec<TransformConfig> directly into the runtime
   // ParameterLinkConfig.transforms. Optional + omitted-when-empty matches the
   // backend's `#[serde(default, skip_serializing_if = "Vec::is_empty")]`.
   transforms?: Transform[];
-
-  // For Buttplug mode (pipeline stages) — legacy; G.3 retires this in favor
-  // of the unified `transforms` list. The convert layer prefers `transforms`
-  // when non-empty; when empty, it falls back to translating
-  // `buttplugLinks` so saved Buttplug presets keep working.
-  buttplugLinks?: ButtplugLinks;
 }
 
 // ============================================================================

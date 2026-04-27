@@ -4,20 +4,7 @@
   import { channelA, channelB } from '$lib/stores/channels.js';
   import { generalSettings } from '$lib/stores/generalSettings.js';
   import { resolvedChannelA, resolvedChannelB, indicatorOf } from '$lib/stores/resolvedState.js';
-  import { currentInputSource } from '$lib/stores/inputSource.js';
   import { type ParameterSource } from '$lib/types/modulation.js';
-
-  // Translate the live input source into the simpler tri-state
-  // ('tcode' | 'buttplug' | 'none') that RangeSliderWithIndicator and
-  // ButtplugLinkPanel understand:
-  //  - lovense  → buttplug (shares the buttplug feature pipeline)
-  //  - anything else (tcode, none, gamepad-only) → tcode
-  // Falling through to 'tcode' keeps the T-Code-style link UI visible even
-  // when no network input source is detected, so a parameter bound to a
-  // gamepad axis (GP_*) is still configurable.
-  $: effectiveInputMode = ($currentInputSource === 'buttplug' || $currentInputSource === 'lovense')
-    ? 'buttplug' as const
-    : 'tcode' as const;
 
   export let channel: 'A' | 'B';
   export let compact = false;
@@ -222,7 +209,6 @@
       showWrapper={false}
       tooltip={freqTooltip}
       wheelStep={frequencyWheelStep}
-      inputMode={effectiveInputMode}
       on:sourceChange={handleFrequencySourceChange}
     />
 
@@ -239,7 +225,6 @@
       showLabels={true}
       showWrapper={false}
       tooltip={freqBalTooltip}
-      inputMode={effectiveInputMode}
       on:sourceChange={handleFrequencyBalanceSourceChange}
     />
 
@@ -256,7 +241,6 @@
       showLabels={true}
       showWrapper={false}
       tooltip={intBalTooltip}
-      inputMode={effectiveInputMode}
       on:sourceChange={handleIntensityBalanceSourceChange}
     />
 
@@ -276,7 +260,6 @@
       showWrapper={false}
       tooltip={intensityTooltip}
       isIntensity={true}
-      inputMode={effectiveInputMode}
       on:sourceChange={handleIntensitySourceChange}
     />
   </div>

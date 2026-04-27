@@ -3,7 +3,7 @@
  * These match the Rust structs in src-tauri/src/settings.rs
  */
 
-import type { ParameterSource, CurveType, ButtplugLinks } from './modulation.js';
+import type { ParameterSource, CurveType, Transform } from './modulation.js';
 
 export interface SavedBluetoothDevice {
     address: string;
@@ -11,48 +11,14 @@ export interface SavedBluetoothDevice {
 }
 
 /**
- * Buttplug feature link configuration for persistence
- * Uses string for featureType for JSON serialization compatibility
- */
-export interface ButtplugFeatureLinkSettings {
-    featureType: string;  // "Position", "Vibrate", etc.
-    featureIndex: number;
-    config: ButtplugFeatureConfigSettings;
-}
-
-/**
- * Configuration options for a Buttplug feature link
- */
-export interface ButtplugFeatureConfigSettings {
-    distance?: number;
-    rotateScale?: number;
-    rotateMaxSpeed?: number;
-    oscillateScale?: number;
-    oscillateMaxSpeed?: number;
-    constrictMinFloor?: number;
-    constrictUseMidpoint?: boolean;
-    constrictMethod?: string;
-}
-
-/**
- * All Buttplug links for a single parameter (settings format)
- * Uses string-typed featureType for JSON serialization
- */
-export interface ButtplugLinksSettings {
-    position?: ButtplugFeatureLinkSettings;
-    motion?: ButtplugFeatureLinkSettings;
-    vibrate?: ButtplugFeatureLinkSettings;
-    constrict?: ButtplugFeatureLinkSettings;
-}
-
-/**
- * Serializable version of ParameterSource for settings storage
- * All fields are always present to ensure proper serialization
+ * Serializable version of ParameterSource for settings storage. Sub G.3
+ * dropped the legacy `buttplugLinks` field; the unified `transforms`
+ * vector replaces it.
  */
 export interface ParameterSourceSettings {
     type: 'static' | 'linked';
     staticValue: number;      // Value when in static mode
-    sourceAxis: string;       // Axis when in linked mode (e.g., 'L0', 'R2')
+    sourceAxis: string;       // Axis when in linked mode (e.g., 'L0', 'R2', 'bp:Vibrate_0')
     rangeMin: number;         // Min output when linked
     rangeMax: number;         // Max output when linked
     curve: string;            // Curve type as string for serialization
@@ -60,7 +26,7 @@ export interface ParameterSourceSettings {
     midpoint?: boolean;       // If true, use distance from center as input
     delayEnabled?: boolean;   // Whether input delay is active (separate from value)
     delayMs?: number;         // Input delay in ms (0-200, step 25); only honored if delayEnabled
-    buttplugLinks?: ButtplugLinksSettings; // Buttplug feature links for this parameter
+    transforms?: Transform[]; // Ordered shaping transforms attached by the editor (sub G.2+)
 }
 
 /**
@@ -281,67 +247,3 @@ export function migrateLegacyChannelSettings(
     };
 }
 
-/**
- * Convert ButtplugLinksSettings (settings format with string featureType)
- * to ButtplugLinks (runtime format with union type featureType)
- */
-export function settingsToButtplugLinks(settings: ButtplugLinksSettings | undefined): ButtplugLinks | undefined {
-    if (!settings) return undefined;
-
-    const convertLink = (link: ButtplugFeatureLinkSettings | undefined) => {
-        if (!link) return undefined;
-        return {
-            featureType: link.featureType as any, // Trust the string matches the union
-            featureIndex: link.featureIndex,
-            config: link.config ? {
-                distance: link.config.distance,
-                rotateScale: link.config.rotateScale,
-                rotateMaxSpeed: link.config.rotateMaxSpeed,
-                oscillateScale: link.config.oscillateScale,
-                oscillateMaxSpeed: link.config.oscillateMaxSpeed,
-                constrictMinFloor: link.config.constrictMinFloor,
-                constrictUseMidpoint: link.config.constrictUseMidpoint,
-                constrictMethod: link.config.constrictMethod as any
-            } : undefined
-        };
-    };
-
-    return {
-        position: convertLink(settings.position),
-        motion: convertLink(settings.motion),
-        vibrate: convertLink(settings.vibrate),
-        constrict: convertLink(settings.constrict)
-    };
-}
-
-/**
- * Convert ButtplugLinks (runtime format) to ButtplugLinksSettings (settings format)
- */
-export function buttplugLinksToSettings(links: ButtplugLinks | undefined): ButtplugLinksSettings | undefined {
-    if (!links) return undefined;
-
-    const convertLink = (link: any): ButtplugFeatureLinkSettings | undefined => {
-        if (!link) return undefined;
-        return {
-            featureType: link.featureType,
-            featureIndex: link.featureIndex,
-            config: {
-                distance: link.config?.distance,
-                rotateScale: link.config?.rotateScale,
-                rotateMaxSpeed: link.config?.rotateMaxSpeed,
-                oscillateScale: link.config?.oscillateScale,
-                oscillateMaxSpeed: link.config?.oscillateMaxSpeed,
-                constrictMinFloor: link.config?.constrictMinFloor,
-                constrictUseMidpoint: link.config?.constrictUseMidpoint,
-                constrictMethod: link.config?.constrictMethod
-            }
-        };
-    };
-
-    return {
-        position: convertLink(links.position),
-        motion: convertLink(links.motion),
-        vibrate: convertLink(links.vibrate),
-        constrict: convertLink(links.constrict)
-    };
-}

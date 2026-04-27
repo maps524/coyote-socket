@@ -39,7 +39,6 @@
   import { currentInputSource } from './lib/stores/inputSource.js';
   import { presetSelectionStore, setSelectedPreset, clearSelectedPreset } from './lib/stores/presetSelection.js';
   import type { AppSettings, ChannelPreset, ChannelSettings, ChordPart, GamepadBinding, GamepadBindings, PresetEcosystem } from './lib/types/settings';
-  import { settingsToButtplugLinks } from './lib/types/settings';
   import type { NoInputBehavior } from './lib/types/modulation';
   import { coyoteService } from './lib/services/CoyoteService.js';
   import { Plus, Save, X } from 'lucide-svelte';
@@ -365,10 +364,10 @@
         period: Math.round(1000 / (freqA.type === 'static' ? freqA.staticValue : 100)),
         rangeMin: intA.rangeMin,
         rangeMax: intA.rangeMax,
-        frequencySource: { ...freqA, curve: freqA.curve as any, buttplugLinks: settingsToButtplugLinks(freqA.buttplugLinks) },
-        frequencyBalanceSource: { ...freqBalA, curve: freqBalA.curve as any, buttplugLinks: settingsToButtplugLinks(freqBalA.buttplugLinks) },
-        intensityBalanceSource: { ...intBalA, curve: intBalA.curve as any, buttplugLinks: settingsToButtplugLinks(intBalA.buttplugLinks) },
-        intensitySource: { ...intA, curve: intA.curve as any, buttplugLinks: settingsToButtplugLinks(intA.buttplugLinks) }
+        frequencySource: { ...freqA, curve: freqA.curve as any },
+        frequencyBalanceSource: { ...freqBalA, curve: freqBalA.curve as any },
+        intensityBalanceSource: { ...intBalA, curve: intBalA.curve as any },
+        intensitySource: { ...intA, curve: intA.curve as any }
       };
 
       // Apply channel B settings with new ParameterSource format
@@ -384,10 +383,10 @@
         period: Math.round(1000 / (freqB.type === 'static' ? freqB.staticValue : 100)),
         rangeMin: intB.rangeMin,
         rangeMax: intB.rangeMax,
-        frequencySource: { ...freqB, curve: freqB.curve as any, buttplugLinks: settingsToButtplugLinks(freqB.buttplugLinks) },
-        frequencyBalanceSource: { ...freqBalB, curve: freqBalB.curve as any, buttplugLinks: settingsToButtplugLinks(freqBalB.buttplugLinks) },
-        intensityBalanceSource: { ...intBalB, curve: intBalB.curve as any, buttplugLinks: settingsToButtplugLinks(intBalB.buttplugLinks) },
-        intensitySource: { ...intB, curve: intB.curve as any, buttplugLinks: settingsToButtplugLinks(intB.buttplugLinks) }
+        frequencySource: { ...freqB, curve: freqB.curve as any },
+        frequencyBalanceSource: { ...freqBalB, curve: freqBalB.curve as any },
+        intensityBalanceSource: { ...intBalB, curve: intBalB.curve as any },
+        intensitySource: { ...intB, curve: intB.curve as any }
       };
 
       // Apply keyboard shortcuts
@@ -755,7 +754,7 @@
         rangeMax: ch.frequencySource?.rangeMax ?? 200,
         curve: ch.frequencySource?.curve ?? 'linear',
         curveStrength: ch.frequencySource?.curveStrength ?? 2.0,
-        buttplugLinks: ch.frequencySource?.buttplugLinks
+        transforms: ch.frequencySource?.transforms
       },
       frequencyBalanceSource: {
         type: ch.frequencyBalanceSource?.type ?? 'static',
@@ -765,7 +764,7 @@
         rangeMax: ch.frequencyBalanceSource?.rangeMax ?? 255,
         curve: ch.frequencyBalanceSource?.curve ?? 'linear',
         curveStrength: ch.frequencyBalanceSource?.curveStrength ?? 2.0,
-        buttplugLinks: ch.frequencyBalanceSource?.buttplugLinks
+        transforms: ch.frequencyBalanceSource?.transforms
       },
       intensityBalanceSource: {
         type: ch.intensityBalanceSource?.type ?? 'static',
@@ -775,7 +774,7 @@
         rangeMax: ch.intensityBalanceSource?.rangeMax ?? 255,
         curve: ch.intensityBalanceSource?.curve ?? 'linear',
         curveStrength: ch.intensityBalanceSource?.curveStrength ?? 2.0,
-        buttplugLinks: ch.intensityBalanceSource?.buttplugLinks
+        transforms: ch.intensityBalanceSource?.transforms
       },
       intensitySource: {
         type: ch.intensitySource?.type ?? 'linked',
@@ -785,7 +784,7 @@
         rangeMax: ch.intensitySource?.rangeMax ?? ch.rangeMax,
         curve: ch.intensitySource?.curve ?? 'linear',
         curveStrength: ch.intensitySource?.curveStrength ?? 2.0,
-        buttplugLinks: ch.intensitySource?.buttplugLinks
+        transforms: ch.intensitySource?.transforms
       }
     };
   }
@@ -1336,10 +1335,10 @@
       period: Math.round(1000 / (aFreq.type === 'static' ? aFreq.staticValue : 100)),
       rangeMin: aInt.rangeMin,
       rangeMax: aInt.rangeMax,
-      frequencySource: { ...aFreq, curve: aFreq.curve as any, buttplugLinks: settingsToButtplugLinks(aFreq.buttplugLinks) },
-      frequencyBalanceSource: { ...aFreqBal, curve: aFreqBal.curve as any, buttplugLinks: settingsToButtplugLinks(aFreqBal.buttplugLinks) },
-      intensityBalanceSource: { ...aIntBal, curve: aIntBal.curve as any, buttplugLinks: settingsToButtplugLinks(aIntBal.buttplugLinks) },
-      intensitySource: { ...aInt, curve: aInt.curve as any, buttplugLinks: settingsToButtplugLinks(aInt.buttplugLinks) }
+      frequencySource: { ...aFreq, curve: aFreq.curve as any },
+      frequencyBalanceSource: { ...aFreqBal, curve: aFreqBal.curve as any },
+      intensityBalanceSource: { ...aIntBal, curve: aIntBal.curve as any },
+      intensitySource: { ...aInt, curve: aInt.curve as any }
     };
 
     // Apply channel B
@@ -1355,10 +1354,10 @@
       period: Math.round(1000 / (bFreq.type === 'static' ? bFreq.staticValue : 100)),
       rangeMin: bInt.rangeMin,
       rangeMax: bInt.rangeMax,
-      frequencySource: { ...bFreq, curve: bFreq.curve as any, buttplugLinks: settingsToButtplugLinks(bFreq.buttplugLinks) },
-      frequencyBalanceSource: { ...bFreqBal, curve: bFreqBal.curve as any, buttplugLinks: settingsToButtplugLinks(bFreqBal.buttplugLinks) },
-      intensityBalanceSource: { ...bIntBal, curve: bIntBal.curve as any, buttplugLinks: settingsToButtplugLinks(bIntBal.buttplugLinks) },
-      intensitySource: { ...bInt, curve: bInt.curve as any, buttplugLinks: settingsToButtplugLinks(bInt.buttplugLinks) }
+      frequencySource: { ...bFreq, curve: bFreq.curve as any },
+      frequencyBalanceSource: { ...bFreqBal, curve: bFreqBal.curve as any },
+      intensityBalanceSource: { ...bIntBal, curve: bIntBal.curve as any },
+      intensitySource: { ...bInt, curve: bInt.curve as any }
     };
 
     // Store state for dirty tracking

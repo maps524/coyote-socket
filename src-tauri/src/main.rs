@@ -1313,7 +1313,7 @@ fn main() {
 mod tests {
     use super::*;
     use crate::settings::{
-        ButtplugLinksSettings, ChannelSettings, ParameterSourceSettings, ParameterSourceType,
+        ChannelSettings, ParameterSourceSettings, ParameterSourceType,
     };
 
     fn static_source(value: f64) -> ParameterSourceSettings {
@@ -1329,7 +1329,6 @@ mod tests {
             delay_enabled: false,
             delay_ms: 0,
             transforms: Vec::new(),
-            buttplug_links: None,
         }
     }
 
@@ -1346,7 +1345,6 @@ mod tests {
             delay_enabled: false,
             delay_ms: 0,
             transforms: Vec::new(),
-            buttplug_links: None,
         }
     }
 
