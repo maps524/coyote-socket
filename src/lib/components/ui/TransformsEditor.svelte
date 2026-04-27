@@ -27,8 +27,37 @@
 
   export let channel: 'A' | 'B';
   export let transforms: Transform[] = [];
+  /**
+   * Source axis of the parameter link this editor is editing. Used to
+   * surface the inert-transforms hint: the resolver only routes
+   * `bp:`-prefixed Linked links through the transforms pipeline today
+   * (sub E gate), so transforms attached to T-Code / gamepad / Static
+   * links are silently ignored. Pass `undefined` for Static.
+   */
+  export let sourceAxis: string | undefined = undefined;
 
   const dispatch = createEventDispatcher<{ change: Transform[] }>();
+
+  // Inert transforms: the sub E resolver only routes `bp:`-prefixed
+  // Linked links through the transforms pipeline. Anything else (Static,
+  // T-Code, gamepad) bypasses transforms entirely. Surface a hint so
+  // the user knows their attached transforms aren't running. Sub G open
+  // issue tracks unifying engine-path Linked into the resolver tail.
+  $: transformsActive = sourceAxis?.startsWith('bp:') ?? false;
+  $: showInertHint = transforms.length > 0 && !transformsActive;
+
+  // Empty-axis hint: backend transforms with empty modifier-axis names
+  // silently `unwrap_or(0.0)` the modifier value at runtime. Mark
+  // unfilled axis fields with a destructive border so the user notices
+  // they need to type an axis name in (sub G.3 replaces the text inputs
+  // with a discovery dropdown fed by `bus-update`).
+  function axisInputClass(value: string): string {
+    const base =
+      'px-1 py-0.5 text-xs font-mono rounded border bg-background text-foreground';
+    return value.trim().length === 0
+      ? `${base} border-destructive`
+      : `${base} border-border`;
+  }
 
   // Variant picker for the "+ Add" dropdown. Defaults to the first
   // variant; users pick any variant from `TRANSFORM_TYPES`.
@@ -91,6 +120,16 @@
     <span class="text-[10px] uppercase tracking-wide text-muted-foreground">Transforms</span>
     <span class="text-[10px] font-mono text-muted-foreground">{transforms.length}</span>
   </div>
+
+  {#if showInertHint}
+    <!-- Sub E gate: only bp:-prefixed Linked links route through the
+         transforms pipeline. Until the engine path runs through a
+         resolver tail (open sub G follow-up), transforms attached here
+         are saved but inert. -->
+    <div class="px-1.5 py-1 text-[10px] text-muted-foreground border border-destructive/40 bg-destructive/5 rounded">
+      Transforms attached to T-Code / gamepad / Static links are saved but currently inert; only bp:* links route through transforms today.
+    </div>
+  {/if}
 
   {#each transforms as t, i (i)}
     <div class="rounded border border-border/50 bg-muted/30 px-1.5 py-1 space-y-1">
@@ -191,7 +230,7 @@
             value={t.otherAxis}
             placeholder="L1"
             on:input={(e) => set(i, t, 'otherAxis', e.currentTarget.value)}
-            class="w-20 px-1 py-0.5 text-xs font-mono rounded border border-border bg-background text-foreground"
+            class="w-20 {axisInputClass(t.otherAxis)}"
           />
         </label>
         <div class="space-y-0.5">
@@ -217,7 +256,7 @@
             value={t.speedAxis}
             placeholder="bp:Vibrate_0"
             on:input={(e) => set(i, t, 'speedAxis', e.currentTarget.value)}
-            class="w-24 px-1 py-0.5 text-xs font-mono rounded border border-border bg-background text-foreground"
+            class="w-24 {axisInputClass(t.speedAxis)}"
           />
         </label>
         <div class="space-y-0.5">
@@ -243,7 +282,7 @@
             value={t.speedAxis}
             placeholder="bp:Oscillate_0"
             on:input={(e) => set(i, t, 'speedAxis', e.currentTarget.value)}
-            class="w-24 px-1 py-0.5 text-xs font-mono rounded border border-border bg-background text-foreground"
+            class="w-24 {axisInputClass(t.speedAxis)}"
           />
         </label>
         <div class="space-y-0.5">
@@ -280,7 +319,7 @@
             value={t.speedAxis}
             placeholder="bp:Rotate_0"
             on:input={(e) => set(i, t, 'speedAxis', e.currentTarget.value)}
-            class="w-24 px-1 py-0.5 text-xs font-mono rounded border border-border bg-background text-foreground"
+            class="w-24 {axisInputClass(t.speedAxis)}"
           />
         </label>
         <label class="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
@@ -290,7 +329,7 @@
             value={t.directionAxis}
             placeholder="bp:RotateDir_0"
             on:input={(e) => set(i, t, 'directionAxis', e.currentTarget.value)}
-            class="w-24 px-1 py-0.5 text-xs font-mono rounded border border-border bg-background text-foreground"
+            class="w-24 {axisInputClass(t.directionAxis)}"
           />
         </label>
         <div class="space-y-0.5">
@@ -327,7 +366,7 @@
             value={t.amountAxis}
             placeholder="bp:Constrict_0"
             on:input={(e) => set(i, t, 'amountAxis', e.currentTarget.value)}
-            class="w-24 px-1 py-0.5 text-xs font-mono rounded border border-border bg-background text-foreground"
+            class="w-24 {axisInputClass(t.amountAxis)}"
           />
         </label>
         <div class="space-y-0.5">

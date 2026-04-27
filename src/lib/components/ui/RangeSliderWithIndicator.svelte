@@ -588,10 +588,14 @@
           </label>
 
           <!-- Transforms list (sub G.2). T-Code/none mode only for now;
-               sub G.3 unifies the Buttplug branch onto the same editor. -->
+               sub G.3 unifies the Buttplug branch onto the same editor.
+               `sourceAxis` drives the inert-transforms hint inside the
+               editor — only `bp:`-prefixed Linked links route through
+               the resolver's transforms pipeline today. -->
           <TransformsEditor
             {channel}
             transforms={source.transforms ?? []}
+            sourceAxis={source.type === 'linked' ? source.sourceAxis : undefined}
             on:change={handleTransformsChange}
           />
         {:else if inputMode === 'buttplug'}

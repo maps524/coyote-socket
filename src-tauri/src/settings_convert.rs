@@ -57,11 +57,28 @@ pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> Para
     let transforms = if !source.transforms.is_empty() {
         source.transforms.clone()
     } else {
-        source
-            .buttplug_links
-            .as_ref()
-            .map(buttplug_links_to_transforms)
-            .unwrap_or_default()
+        match source.buttplug_links.as_ref() {
+            Some(links) => {
+                let translated = buttplug_links_to_transforms(links);
+                if !translated.is_empty() {
+                    // Observability: a saved preset took the legacy
+                    // path. The maintainer's stated dislikes include
+                    // "silent fallbacks without observability"; log
+                    // when this fires so a user opening logs after
+                    // editing a Buttplug preset can see whether the
+                    // legacy translation or the new editor produced
+                    // their transforms vector. Sub G.3 deletes the
+                    // legacy path entirely.
+                    crate::log_warn!(
+                        "settings_convert: legacy buttplug_links translation produced {} transform(s) for source_axis={:?} (preset saved before G.2 editor; rewrite via the editor or wait for G.3 cleanup)",
+                        translated.len(),
+                        source.source_axis,
+                    );
+                }
+                translated
+            }
+            None => Vec::new(),
+        }
     };
 
     // Determine the effective source for the runtime config. Order of
