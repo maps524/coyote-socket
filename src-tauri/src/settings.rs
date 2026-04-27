@@ -168,10 +168,19 @@ pub struct ParameterSourceSettings {
     /// the data round-trips through this flat schema.
     #[serde(default)]
     pub delay_enabled: bool,
-    /// Input delay in ms (0-200). Only honored when `delay_enabled` is true.
+    /// Input delay in ms (0-200). Only honored when `delay_ms` is true.
     #[serde(default)]
     pub delay_ms: u32,
-    /// Buttplug feature links for this parameter (used when input source is Buttplug)
+    /// Ordered shaping transforms attached to the link by the new editor
+    /// (sub G.2). Round-trips as `Vec<TransformConfig>` directly into the
+    /// runtime `ParameterLinkConfig.transforms`. Older saves omit this
+    /// key and fall back to the legacy `buttplug_links` translation in
+    /// `settings_convert.rs` until sub G.3 retires the legacy path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<crate::transforms::TransformConfig>,
+    /// Legacy Buttplug feature links. Sub G.3 deletes this field; until
+    /// then the convert layer reads it as a fallback when `transforms` is
+    /// empty so saved Buttplug presets keep working.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buttplug_links: Option<ButtplugLinksSettings>,
 }
@@ -189,6 +198,7 @@ impl ParameterSourceSettings {
             midpoint: false,
             delay_enabled: false,
             delay_ms: 0,
+            transforms: Vec::new(),
             buttplug_links: None,
         }
     }
@@ -205,6 +215,7 @@ impl ParameterSourceSettings {
             midpoint: false,
             delay_enabled: false,
             delay_ms: 0,
+            transforms: Vec::new(),
             buttplug_links: None,
         }
     }

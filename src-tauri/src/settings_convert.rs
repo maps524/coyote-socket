@@ -23,15 +23,20 @@ const DEFAULT_MOTION_SCALE: f64 = 0.5;
 const DEFAULT_MOTION_MAX_HZ: f64 = 5.0;
 
 /// Convert a `ParameterSourceSettings` (persisted shape) into a runtime
-/// `ParameterLinkConfig`. When the persisted side carries
-/// `buttplug_links`, this is also the place where the legacy 4-stage
-/// Buttplug pipeline gets translated into an ordered `transforms` vector
-/// (Position → Oscillate/Rotate → Vibrate → Constrict, mirroring the
-/// pre-refactor stage order). The `Position` / `PositionWithDuration`
-/// link drives the `source_axis` directly; everything else becomes a
-/// transform with explicit modifier axes. Sub F deletes the persisted
-/// `buttplug_links` field; until then, the conversion is the only
-/// caller-facing path that reads it.
+/// `ParameterLinkConfig`.
+///
+/// The runtime `transforms` vector is sourced in this order:
+/// 1. The settings' own `transforms: Vec<TransformConfig>` field if
+///    non-empty (sub G.2 — the new transforms editor writes here).
+/// 2. Otherwise the legacy `buttplug_links` 4-stage pipeline gets
+///    translated into an ordered transforms vector (Position →
+///    Oscillate/Rotate → Vibrate → Constrict, mirroring the pre-refactor
+///    stage order). The `Position` / `PositionWithDuration` link drives
+///    the `source_axis` directly; everything else becomes a transform
+///    with explicit modifier axes.
+///
+/// Sub G.3 retires the legacy `buttplug_links` path; saved Buttplug
+/// presets get written through the new editor before then.
 pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> ParameterLinkConfig {
     let curve = match source.curve.as_str() {
         "exponential" => CurveType::Exponential,
@@ -45,11 +50,19 @@ pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> Para
         .buttplug_links
         .as_ref()
         .and_then(buttplug_links_position_axis);
-    let bp_transforms = source
-        .buttplug_links
-        .as_ref()
-        .map(buttplug_links_to_transforms)
-        .unwrap_or_default();
+    // Editor-supplied transforms win over the legacy buttplug_links
+    // translation. An empty editor vector falls through to the legacy
+    // path so saved Buttplug presets keep their behavior until sub G.3
+    // rewrites them through the new editor.
+    let transforms = if !source.transforms.is_empty() {
+        source.transforms.clone()
+    } else {
+        source
+            .buttplug_links
+            .as_ref()
+            .map(buttplug_links_to_transforms)
+            .unwrap_or_default()
+    };
 
     // Determine the effective source for the runtime config. Order of
     // precedence:
@@ -96,7 +109,7 @@ pub(crate) fn convert_parameter_source(source: &ParameterSourceSettings) -> Para
         } else {
             None
         },
-        transforms: bp_transforms,
+        transforms,
     }
 }
 
@@ -204,6 +217,7 @@ mod tests {
             midpoint: false,
             delay_enabled: false,
             delay_ms: 0,
+            transforms: Vec::new(),
             buttplug_links: None,
         }
     }
@@ -446,6 +460,49 @@ mod tests {
         links.vibrate = Some(bp_link("Vibrate", 0, Default::default()));
         let s = ParameterSourceSettings {
             source_type: SettingsSourceType::Linked,
+            buttplug_links: Some(links),
+            ..base_settings()
+        };
+        let p = convert_parameter_source(&s);
+        assert_eq!(p.transforms.len(), 1);
+        assert!(matches!(&p.transforms[0], TransformConfig::Vibrate { .. }));
+    }
+
+    #[test]
+    fn editor_supplied_transforms_win_over_legacy_buttplug_links() {
+        // Sub G.2: when both `transforms` and `buttplug_links` are
+        // present, the editor-supplied vector wins. Old saves only
+        // carry `buttplug_links`; new saves write `transforms` directly
+        // and the legacy field becomes a stale shadow until sub G.3
+        // drops it.
+        let mut links = ButtplugLinksSettings::default();
+        links.vibrate = Some(bp_link("Vibrate", 0, Default::default()));
+        let s = ParameterSourceSettings {
+            source_type: SettingsSourceType::Linked,
+            transforms: vec![TransformConfig::Scale { factor: 0.5 }],
+            buttplug_links: Some(links),
+            ..base_settings()
+        };
+        let p = convert_parameter_source(&s);
+        assert_eq!(p.transforms.len(), 1);
+        assert!(matches!(
+            &p.transforms[0],
+            TransformConfig::Scale { factor } if (*factor - 0.5).abs() < 1e-9
+        ));
+    }
+
+    #[test]
+    fn empty_transforms_falls_back_to_buttplug_links_translation() {
+        // Older saves omit the `transforms` field entirely (serde
+        // default = empty vec). The convert layer falls back to the
+        // legacy `buttplug_links → transforms` translation so saved
+        // Buttplug presets keep their behavior until they get rewritten
+        // through the new editor.
+        let mut links = ButtplugLinksSettings::default();
+        links.vibrate = Some(bp_link("Vibrate", 0, Default::default()));
+        let s = ParameterSourceSettings {
+            source_type: SettingsSourceType::Linked,
+            transforms: Vec::new(),
             buttplug_links: Some(links),
             ..base_settings()
         };

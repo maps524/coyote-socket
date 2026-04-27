@@ -1,11 +1,12 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy } from 'svelte';
-  import type { ParameterSource, CurveType } from '$lib/types/modulation.js';
+  import type { ParameterSource, CurveType, Transform } from '$lib/types/modulation.js';
   import { Info, Link, MapPin, Clock, RotateCw, MoveHorizontal, Activity, Minimize2, Gamepad2 } from 'lucide-svelte';
   import Tooltip from './Tooltip.svelte';
   import Slider from './Slider.svelte';
   import Popover from './Popover.svelte';
   import ButtplugLinkPanel from './ButtplugLinkPanel.svelte';
+  import TransformsEditor from './TransformsEditor.svelte';
 
   // Props
   export let channel: 'A' | 'B';
@@ -174,7 +175,10 @@
         rangeMin: minValue,
         rangeMax: maxValue,
         curve: selectedCurve,
-        midpoint: midpointEnabled
+        midpoint: midpointEnabled,
+        // Preserve attached transforms across an axis-deselect; they're a
+        // property of the parameter link, not the axis pick.
+        transforms: source.transforms
       });
     } else {
       // Select this axis
@@ -187,7 +191,9 @@
         rangeMax: maxValue,
         curve: selectedCurve,
         curveStrength: curveStrength,
-        midpoint: midpointEnabled
+        midpoint: midpointEnabled,
+        // Same reasoning — switching axis keeps the attached transforms.
+        transforms: source.transforms
       });
     }
   }
@@ -195,6 +201,24 @@
   // Handle Buttplug link changes
   function handleButtplugLinkChange(event: CustomEvent<ParameterSource>) {
     dispatch('sourceChange', event.detail);
+  }
+
+  // Handle transforms list changes (sub G.2 — TransformsEditor). Merges
+  // the new vector into the source and round-trips through the same
+  // sourceChange path, preserving everything else (axis pick, range,
+  // curve, etc.) so the debounced apply_channel_config sync stays
+  // correct.
+  function handleTransformsChange(event: CustomEvent<Transform[]>) {
+    dispatch('sourceChange', {
+      ...source,
+      staticValue: staticValue,
+      rangeMin: minValue,
+      rangeMax: maxValue,
+      curve: selectedCurve,
+      curveStrength: curveStrength,
+      midpoint: midpointEnabled,
+      transforms: event.detail
+    });
   }
 
   // Handle curve selection change
@@ -562,6 +586,14 @@
               class="w-4 h-4 rounded border-border bg-background text-primary focus:ring-primary focus:ring-offset-0 cursor-pointer"
             />
           </label>
+
+          <!-- Transforms list (sub G.2). T-Code/none mode only for now;
+               sub G.3 unifies the Buttplug branch onto the same editor. -->
+          <TransformsEditor
+            {channel}
+            transforms={source.transforms ?? []}
+            on:change={handleTransformsChange}
+          />
         {:else if inputMode === 'buttplug'}
           <!-- Buttplug Mode: Feature selection grid (TCode options hidden) -->
           <ButtplugLinkPanel

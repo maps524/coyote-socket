@@ -100,8 +100,130 @@ export interface ParameterSource {
   midpoint?: boolean;       // If true, input is distance from center (0.5 -> 0, 0 or 1 -> 1)
   delayMs?: number;         // Lag axis input by this many ms (0-200, step 25). 0/undefined = no delay.
 
-  // For Buttplug mode (pipeline stages)
+  // Ordered shaping transforms attached to this link by the new G.2 editor.
+  // Round-trips as Vec<TransformConfig> directly into the runtime
+  // ParameterLinkConfig.transforms. Optional + omitted-when-empty matches the
+  // backend's `#[serde(default, skip_serializing_if = "Vec::is_empty")]`.
+  transforms?: Transform[];
+
+  // For Buttplug mode (pipeline stages) — legacy; G.3 retires this in favor
+  // of the unified `transforms` list. The convert layer prefers `transforms`
+  // when non-empty; when empty, it falls back to translating
+  // `buttplugLinks` so saved Buttplug presets keep working.
   buttplugLinks?: ButtplugLinks;
+}
+
+// ============================================================================
+// Transforms (sub G.2)
+// ============================================================================
+
+/**
+ * Per-tag discriminated union mirroring the Rust `TransformConfig` enum in
+ * `src-tauri/src/transforms/mod.rs`. The backend uses
+ * `#[serde(tag = "type", rename_all = "kebab-case")]` plus per-field
+ * `#[serde(rename = "...")]` for the camelCase modifier-axis names. Field
+ * names without a `rename` keep their snake_case Rust names (e.g.
+ * `time_constant_ms`, `duration_ms`).
+ *
+ * Variants split into two categories:
+ *
+ * - **Generic primitives** (`smooth`, `scale`, `clamp`, `invert`, `hold`,
+ *   `mix`) — composable shaping functions. Read at most one bus modifier
+ *   axis (Mix); the others are pure value-in / value-out.
+ * - **Buttplug semantic wrappers** (`vibrate`, `oscillate`, `rotate`,
+ *   `constrict`) — single-purpose variants that carry the labels users
+ *   recognize from the legacy Buttplug pipeline. `rotate` is the only
+ *   variant that declares two modifier axes (speed + direction).
+ */
+export type Transform =
+  | { type: 'smooth'; time_constant_ms: number }
+  | { type: 'scale'; factor: number }
+  | { type: 'clamp'; min: number; max: number }
+  | { type: 'invert' }
+  | { type: 'hold'; duration_ms: number }
+  | { type: 'mix'; otherAxis: string; weight: number }
+  | { type: 'vibrate'; speedAxis: string; distance: number }
+  | { type: 'oscillate'; speedAxis: string; scale: number; maxSpeedHz: number }
+  | { type: 'rotate'; speedAxis: string; directionAxis: string; scale: number; maxSpeedHz: number }
+  | {
+      type: 'constrict';
+      amountAxis: string;
+      minFloor: number;
+      useMidpoint: boolean;
+      method: 'Downsample' | 'Clamp';
+    };
+
+/** All transform variant tags, in editor display order. */
+export const TRANSFORM_TYPES: ReadonlyArray<Transform['type']> = [
+  'smooth',
+  'scale',
+  'clamp',
+  'invert',
+  'hold',
+  'mix',
+  'vibrate',
+  'oscillate',
+  'rotate',
+  'constrict'
+] as const;
+
+/** Human-readable labels for the variant picker dropdown. */
+export const TRANSFORM_LABELS: Record<Transform['type'], string> = {
+  smooth: 'Smooth',
+  scale: 'Scale',
+  clamp: 'Clamp',
+  invert: 'Invert',
+  hold: 'Hold',
+  mix: 'Mix',
+  vibrate: 'Vibrate',
+  oscillate: 'Oscillate',
+  rotate: 'Rotate',
+  constrict: 'Constrict'
+};
+
+/**
+ * Defaults for newly added transforms. Mirrors the backend's
+ * `TransformConfig::initial_state` priming: zero-state types start at zero,
+ * Buttplug wrappers default to the legacy `convert_parameter_source` defaults
+ * (Vibrate distance 0.2, Oscillate/Rotate scale 0.5 + 5Hz, Constrict
+ * downsample). Modifier-axis fields default to empty so the editor surfaces
+ * them as "fill me in".
+ */
+export function defaultTransform(type: Transform['type']): Transform {
+  switch (type) {
+    case 'smooth':
+      return { type: 'smooth', time_constant_ms: 100 };
+    case 'scale':
+      return { type: 'scale', factor: 1 };
+    case 'clamp':
+      return { type: 'clamp', min: 0, max: 1 };
+    case 'invert':
+      return { type: 'invert' };
+    case 'hold':
+      return { type: 'hold', duration_ms: 200 };
+    case 'mix':
+      return { type: 'mix', otherAxis: '', weight: 0.5 };
+    case 'vibrate':
+      return { type: 'vibrate', speedAxis: '', distance: 0.2 };
+    case 'oscillate':
+      return { type: 'oscillate', speedAxis: '', scale: 0.5, maxSpeedHz: 5 };
+    case 'rotate':
+      return {
+        type: 'rotate',
+        speedAxis: '',
+        directionAxis: '',
+        scale: 0.5,
+        maxSpeedHz: 5
+      };
+    case 'constrict':
+      return {
+        type: 'constrict',
+        amountAxis: '',
+        minFloor: 0,
+        useMidpoint: false,
+        method: 'Downsample'
+      };
+  }
 }
 
 /**

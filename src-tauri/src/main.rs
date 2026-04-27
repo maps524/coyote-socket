@@ -1351,6 +1351,7 @@ mod tests {
             midpoint: false,
             delay_enabled: false,
             delay_ms: 0,
+            transforms: Vec::new(),
             buttplug_links: None,
         }
     }
@@ -1367,6 +1368,7 @@ mod tests {
             midpoint: false,
             delay_enabled: false,
             delay_ms: 0,
+            transforms: Vec::new(),
             buttplug_links: None,
         }
     }
