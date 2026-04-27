@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { Activity, Radio, Zap, MapPin, RotateCw, MoveHorizontal, Minimize2 } from 'lucide-svelte';
   import { currentInputSource, updateButtplugFeatures } from '$lib/stores/inputSource';
   import { refreshConnectionStatus } from '$lib/stores/stateSync';
   import { gamepadStatus } from '$lib/stores/gamepadStatus';
+  import { inputBus } from '$lib/stores/inputBus';
   import SynthWaveformChart from './SynthWaveformChart.svelte';
   import WaveformChart from './WaveformChart.svelte';
 
@@ -39,32 +39,11 @@
     value: number;       // 0.0-1.0
   }
 
-  // Event payloads
-  interface AxisUpdatePayload {
-    axes: Record<string, number>;
-    channel_a: number;
-    channel_b: number;
-    timestamp: number;
-  }
-
-  interface ButtplugFeaturesPayload {
-    features: Record<string, number>;
-    timestamp: number;
-  }
-
-  // Latest values written by event handlers, sampled by RAF into display state.
-  // Splitting the two decouples Svelte reactivity from inbound event rate so
-  // the bars always reflect the newest sample at the next paint.
-  let latestTcodeAxes: Record<string, number> = {};
-  let latestButtplugFeatures: Record<string, number> = {};
-  let tcodeDirty = false;
-  let buttplugDirty = false;
-
   // Display state for T-Code axes - populated dynamically from received commands
   let tcodeAxes: TCodeAxisValue[] = [];
 
-  // Display lists derived from latestTcodeAxes: gamepad axes (GP_* prefix)
-  // and network T-Code axes (everything else). Recomputed in the RAF tick.
+  // Display lists derived from $inputBus, partitioned by axis-name prefix
+  // (sub G.3): bare names → T-Code, `GP_*` → gamepad, `bp:*` → buttplug.
   let networkAxes: TCodeAxisValue[] = [];
   let gamepadAxes: TCodeAxisValue[] = [];
 
@@ -77,6 +56,17 @@
 
   function isGamepadKey(k: string): boolean {
     return k.startsWith('GP_');
+  }
+
+  function isButtplugKey(k: string): boolean {
+    return k.startsWith('bp:');
+  }
+
+  // Filter out the bp: control axes (LinearCmd_<i>, RotateDir_<i>) — those
+  // are watermark / direction signals, not user-facing feature values, and
+  // the legacy `get_buttplug_features` projection skipped them too.
+  function isButtplugDisplayKey(stripped: string): boolean {
+    return !stripped.startsWith('LinearCmd_') && !stripped.startsWith('RotateDir_');
   }
 
   // Buttplug features - populated dynamically from backend
@@ -92,11 +82,7 @@
   let waveformBufferMs = 2000;
   let chartType: 'synth' | 'envelope' = 'synth';
 
-  // Event listeners
-  let unlistenAxisUpdate: UnlistenFn | null = null;
-  let unlistenButtplugFeatures: UnlistenFn | null = null;
   let statusPollInterval: ReturnType<typeof setInterval> | null = null;
-  let rafHandle: number | null = null;
 
   export let compact = true;
 
@@ -112,72 +98,64 @@
     knownButtplugFeatureKeys = [];
   }
 
-  function rafTick() {
-    if (tcodeDirty) {
-      // Add any new keys to the sticky set, then render the union with the
-      // latest values (defaulting absent keys to 0).
-      for (const k of Object.keys(latestTcodeAxes)) {
-        if (!isGamepadKey(k) && !knownNetworkAxisKeys.includes(k)) {
-          knownNetworkAxisKeys = [...knownNetworkAxisKeys, k].sort((a, b) => a.localeCompare(b));
+  // Reactive: whenever the bus map changes, recompute the three display
+  // lists. The bus store is per-write so it updates at full input cadence;
+  // Svelte's reactive batching collapses bursty arrivals into one paint per
+  // frame without a manual RAF loop. Sticky keys preserve last-known
+  // entries so a Stop command's bus clear doesn't collapse the section.
+  $: {
+    const networkLive: Record<string, number> = {};
+    const gamepadLive: Record<string, number> = {};
+    const buttplugLive: Record<string, number> = {};
+    for (const [axis, sample] of Object.entries($inputBus)) {
+      if (isGamepadKey(axis)) {
+        gamepadLive[axis] = sample.value;
+      } else if (isButtplugKey(axis)) {
+        const stripped = axis.slice(3); // drop "bp:"
+        if (isButtplugDisplayKey(stripped)) {
+          buttplugLive[stripped] = sample.value;
         }
+      } else {
+        networkLive[axis] = sample.value;
+        isInputConnected = true;
       }
-      networkAxes = knownNetworkAxisKeys.map(axis => ({
-        axis,
-        value: latestTcodeAxes[axis] ?? 0,
-      }));
-      gamepadAxes = Object.entries(latestTcodeAxes)
-        .filter(([k]) => isGamepadKey(k))
-        .map(([axis, value]) => ({ axis, value }))
-        .sort((a, b) => a.axis.localeCompare(b.axis));
-      tcodeDirty = false;
     }
-    if (buttplugDirty) {
-      for (const k of Object.keys(latestButtplugFeatures)) {
-        if (!knownButtplugFeatureKeys.includes(k)) {
-          knownButtplugFeatureKeys = [...knownButtplugFeatureKeys, k].sort((a, b) => a.localeCompare(b));
-        }
+
+    for (const k of Object.keys(networkLive)) {
+      if (!knownNetworkAxisKeys.includes(k)) {
+        knownNetworkAxisKeys = [...knownNetworkAxisKeys, k].sort((a, b) => a.localeCompare(b));
       }
-      buttplugFeatures = knownButtplugFeatureKeys.map(key => {
-        const parts = key.split('_');
-        const featureType = parts[0] || key;
-        const index = parseInt(parts[1] || '0', 10);
-        return { key, featureType, index, value: latestButtplugFeatures[key] ?? 0 };
-      });
-      updateButtplugFeatures(buttplugFeatures.map(f => ({
+    }
+    networkAxes = knownNetworkAxisKeys.map((axis) => ({ axis, value: networkLive[axis] ?? 0 }));
+    gamepadAxes = Object.entries(gamepadLive)
+      .map(([axis, value]) => ({ axis, value }))
+      .sort((a, b) => a.axis.localeCompare(b.axis));
+
+    for (const k of Object.keys(buttplugLive)) {
+      if (!knownButtplugFeatureKeys.includes(k)) {
+        knownButtplugFeatureKeys = [...knownButtplugFeatureKeys, k].sort((a, b) => a.localeCompare(b));
+      }
+    }
+    buttplugFeatures = knownButtplugFeatureKeys.map((key) => {
+      const parts = key.split('_');
+      const featureType = parts[0] || key;
+      const index = parseInt(parts[1] || '0', 10);
+      return { key, featureType, index, value: buttplugLive[key] ?? 0 };
+    });
+    updateButtplugFeatures(
+      buttplugFeatures.map((f) => ({
         featureType: f.featureType,
         featureIndex: f.index,
         value: f.value,
         label: `${f.featureType} ${f.index + 1}`
-      })));
-      buttplugDirty = false;
+      }))
+    );
+    if (buttplugFeatures.some((f) => f.value > 0)) {
+      isInputConnected = true;
     }
-    rafHandle = requestAnimationFrame(rafTick);
   }
 
   onMount(async () => {
-    unlistenAxisUpdate = await listen<AxisUpdatePayload>('axis-update', (event) => {
-      const { axes } = event.payload;
-      latestTcodeAxes = axes;
-      tcodeDirty = true;
-      for (const k of Object.keys(axes)) {
-        if (!isGamepadKey(k)) {
-          isInputConnected = true;
-          break;
-        }
-      }
-    });
-
-    unlistenButtplugFeatures = await listen<ButtplugFeaturesPayload>('buttplug-features', (event) => {
-      const { features } = event.payload;
-      latestButtplugFeatures = features;
-      buttplugDirty = true;
-      if (Object.keys(features).length > 0) {
-        isInputConnected = true;
-      }
-    });
-
-    rafHandle = requestAnimationFrame(rafTick);
-
     // Poll less frequently for connection status, logs, and device output (1Hz)
     statusPollInterval = setInterval(pollStatus, 1000);
 
@@ -186,10 +164,7 @@
   });
 
   onDestroy(() => {
-    if (unlistenAxisUpdate) unlistenAxisUpdate();
-    if (unlistenButtplugFeatures) unlistenButtplugFeatures();
     if (statusPollInterval) clearInterval(statusPollInterval);
-    if (rafHandle !== null) cancelAnimationFrame(rafHandle);
   });
 
   async function pollStatus() {

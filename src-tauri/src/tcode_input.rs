@@ -1,11 +1,12 @@
 //! T-Code message handler. Parses T-Code commands off a WebSocket text
-//! frame, applies them to `ProcessingState`, and pushes an axis-update
-//! event to the frontend.
+//! frame and applies them to `ProcessingState`. Per-axis bus writes fire
+//! `bus-update` Tauri events automatically via
+//! `ProcessingState::bus_write`, so the handler doesn't emit anything
+//! itself.
 //!
 //! Lifted out of `websocket.rs` so the WebSocket layer (`net.rs`) is left
 //! with only connection / framing / routing logic.
 
-use crate::emit_axis_update;
 use crate::processing::{get_processing_state, parse_tcode};
 
 /// Handle an inbound T-Code text message and return an optional response
@@ -47,16 +48,6 @@ pub async fn handle_tcode_message(message: &str) -> Option<String> {
             state_guard.process_command(cmd);
             crate::diagnostic::record_input(&cmd.axis, cmd.value, cmd.interval_ms);
         }
-
-        let (channel_a, channel_b) = state_guard.get_current_intensities();
-        let axes: std::collections::HashMap<String, f64> = state_guard
-            .input_bus
-            .iter()
-            .map(|(k, v)| (k.clone(), v.value))
-            .collect();
-        drop(state_guard);
-
-        emit_axis_update(axes, channel_a, channel_b);
     }
 
     None

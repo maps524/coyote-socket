@@ -751,7 +751,6 @@ async fn feed_gamepad_axes_to_processing() {
 
     let state = get_processing_state().await;
     let mut state_guard = state.write().await;
-    let mut axes_snapshot: HashMap<String, f64> = HashMap::new();
     for (idx, name, value) in updates {
         if locked.contains(&idx) {
             continue;
@@ -764,12 +763,9 @@ async fn feed_gamepad_axes_to_processing() {
         };
         state_guard.process_command(&cmd);
     }
-    let (channel_a, channel_b) = state_guard.get_current_intensities();
-    for (k, v) in state_guard.input_bus.iter() {
-        axes_snapshot.insert(k.clone(), v.value);
-    }
-    drop(state_guard);
-    crate::emit_axis_update(axes_snapshot, channel_a, channel_b);
+    // Per-axis `bus-update` events fire from inside `process_command` →
+    // `bus_write`, so the gamepad poll no longer emits its own batched
+    // event (sub G.3 retired `axis-update`).
 }
 
 fn part_active(part: &ChordPart, buttons: &HashSet<u8>, axis_values: &HashMap<u8, f64>) -> bool {

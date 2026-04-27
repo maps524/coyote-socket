@@ -5,7 +5,7 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -1436,8 +1436,21 @@ impl ProcessingState {
     /// time so a per-parameter `delay_ms` can offset *when* the engines see
     /// each sample without duplicating sample state.
     pub fn process_command(&mut self, cmd: &TCodeCommand) {
-        self.input_bus
-            .update(&cmd.axis, cmd.value, cmd.received_at, cmd.interval_ms);
+        self.bus_write(&cmd.axis, cmd.value, cmd.received_at, cmd.interval_ms);
+    }
+
+    /// Single per-write hook: stores the sample in the bus and emits a
+    /// `bus-update` Tauri event so the frontend's `inputBus` store sees
+    /// every axis write at full per-input-event cadence (sub G.3 — replaces
+    /// the batched `axis-update` and `buttplug-features` events). Every
+    /// bus mutator on `ProcessingState` (`process_command`,
+    /// `set_buttplug_feature`, `set_buttplug_linear_cmd`,
+    /// `set_buttplug_rotate_direction`) routes through this helper so a
+    /// future input source automatically gets observability without
+    /// touching the emit layer.
+    fn bus_write(&mut self, axis: &str, value: f64, timestamp: u64, interval_ms: Option<u32>) {
+        self.input_bus.update(axis, value, timestamp, interval_ms);
+        crate::emit_bus_update(axis, value, timestamp, interval_ms);
     }
 
     /// Drain pending TCode samples from axis history into engine state for
@@ -1658,33 +1671,12 @@ impl ProcessingState {
     /// the per-write `current_time_ms()` race the sub B note flagged.
     pub fn set_buttplug_feature(&mut self, key: String, value: f64, arrival_ts_ms: u64) {
         let axis = format!("bp:{}", key);
-        self.input_bus
-            .update(&axis, value.clamp(0.0, 1.0), arrival_ts_ms, None);
+        self.bus_write(&axis, value.clamp(0.0, 1.0), arrival_ts_ms, None);
     }
 
     /// Clear every Buttplug-namespaced axis. T-Code / gamepad axes survive.
     pub fn clear_all_buttplug_features(&mut self) {
         self.input_bus.clear_prefix("bp:");
-    }
-
-    /// Get all Buttplug feature values keyed by `{FeatureType}_{index}`
-    /// (legacy shape — drops the `bp:` prefix that lives only on the bus).
-    /// Excludes the LinearCmd / RotateDir control axes; those don't match
-    /// the pre-refactor "feature value" map the frontend consumes.
-    pub fn get_buttplug_features(&self) -> HashMap<String, f64> {
-        self.input_bus
-            .iter()
-            .filter_map(|(k, s)| {
-                let stripped = k.strip_prefix("bp:")?;
-                if stripped.starts_with("LinearCmd_") || stripped.starts_with("RotateDir_") {
-                    return None;
-                }
-                if !s.has_data {
-                    return None;
-                }
-                Some((stripped.to_string(), s.value))
-            })
-            .collect()
     }
 
     /// Set a LinearCmd (PositionWithDuration) sample at a caller-supplied
@@ -1702,7 +1694,7 @@ impl ProcessingState {
         arrival_ts_ms: u64,
     ) {
         let axis = format!("bp:LinearCmd_{}", index);
-        self.input_bus.update(
+        self.bus_write(
             &axis,
             position.clamp(0.0, 1.0),
             arrival_ts_ms,
@@ -1723,7 +1715,7 @@ impl ProcessingState {
     ) {
         let axis = format!("bp:RotateDir_{}", index);
         let v = if clockwise { 1.0 } else { 0.0 };
-        self.input_bus.update(&axis, v, arrival_ts_ms, None);
+        self.bus_write(&axis, v, arrival_ts_ms, None);
     }
 
 }
@@ -2194,23 +2186,20 @@ mod tests {
     #[test]
     fn test_set_buttplug_feature_writes_through_bus_under_bp_namespace() {
         // The pre-refactor `buttplug_features` HashMap is gone — feature
-        // values now flow through `input_bus` under the `bp:` prefix. The
-        // legacy `set_buttplug_feature(key, value, ts)` shim must preserve the
-        // call-site contract while routing through the bus.
+        // values now flow through `input_bus` under the `bp:` prefix.
+        // Sub G.3 retired the `get_buttplug_features` shim along with
+        // the `buttplug-features` Tauri event; the bus is the only
+        // source of truth.
         let mut state = ProcessingState::default();
         state.set_buttplug_feature("Vibrate_0".to_string(), 0.7, 1_000);
 
         // Direct bus read confirms the namespaced axis exists.
         assert_eq!(state.input_bus.value("bp:Vibrate_0"), Some(0.7));
-        // Legacy `get_buttplug_features` strips the prefix before returning,
-        // so the frontend wire format stays identical to pre-refactor.
-        let map = state.get_buttplug_features();
-        assert_eq!(map.get("Vibrate_0"), Some(&0.7));
-        // Other channels untouched.
-        assert!(map.get("Vibrate_1").is_none());
-        // Sentinel: a never-written T-Code axis must not show up in the
-        // buttplug map (prefix filter actually filters).
-        assert!(map.get("L0").is_none());
+        // Sibling axis untouched.
+        assert_eq!(state.input_bus.value("bp:Vibrate_1"), None);
+        // Sentinel: a T-Code axis lives under a non-`bp:` key and the
+        // bus prefix filter is the boundary.
+        assert_eq!(state.input_bus.value("L0"), None);
     }
 
     #[test]
@@ -2229,22 +2218,6 @@ mod tests {
         assert_eq!(state.input_bus.latest_timestamp("bp:Vibrate_0"), Some(1_500));
         assert_eq!(state.input_bus.latest_timestamp("bp:Vibrate_1"), Some(1_500));
         assert_eq!(state.input_bus.latest_timestamp("bp:Vibrate_2"), Some(1_700));
-    }
-
-    #[test]
-    fn test_get_buttplug_features_excludes_control_axes() {
-        // `LinearCmd_<i>` and `RotateDir_<i>` are control axes (new-arrival
-        // signal + direction encoding); they live on the bus under `bp:` but
-        // are NOT part of the legacy "feature value map" the frontend reads.
-        let mut state = ProcessingState::default();
-        state.set_buttplug_feature("Vibrate_0".to_string(), 0.5, 1_000);
-        state.set_buttplug_linear_cmd(0, 0.4, 100, 1_000);
-        state.set_buttplug_rotate_direction(0, false, 1_000);
-
-        let map = state.get_buttplug_features();
-        assert_eq!(map.get("Vibrate_0"), Some(&0.5));
-        assert!(map.get("LinearCmd_0").is_none());
-        assert!(map.get("RotateDir_0").is_none());
     }
 
     #[test]

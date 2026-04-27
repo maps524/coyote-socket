@@ -4,7 +4,6 @@
 /// Handles handshake, device enumeration, and command processing.
 use crate::buttplug::messages::*;
 use crate::buttplug::types::ButtplugFeatureConfig;
-use crate::emit_buttplug_features;
 use crate::processing::{current_time_ms, get_processing_state};
 
 /// Handle incoming Buttplug client message and generate response(s)
@@ -251,7 +250,7 @@ async fn handle_scalar_cmd(
     // or leaves the whole batch for the next.
     let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
-    let features = {
+    {
         let mut state_guard = state.write().await;
         for scalar in &cmd.scalars {
             // Convert global ScalarCmd index to type-specific index using saturating_sub to prevent underflow
@@ -267,11 +266,7 @@ async fn handle_scalar_cmd(
             let value = scalar.scalar.clamp(0.0, 1.0);
             state_guard.set_buttplug_feature(feature_key, value, arrival_ts);
         }
-        state_guard.get_buttplug_features()
-    };
-
-    // Emit to frontend
-    emit_buttplug_features(features);
+    }
 
     vec![ButtplugServerMessage::Ok(ButtplugOk { id: cmd.id })]
 }
@@ -293,7 +288,7 @@ async fn handle_linear_cmd(cmd: LinearCmd) -> Vec<ButtplugServerMessage> {
     // multi-vector LinearCmd batch across two ticks.
     let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
-    let features = {
+    {
         let mut state_guard = state.write().await;
         for vector in &cmd.vectors {
             // Store with duration for PositionWithDuration pipeline processing
@@ -308,11 +303,7 @@ async fn handle_linear_cmd(cmd: LinearCmd) -> Vec<ButtplugServerMessage> {
             let feature_key = format!("PositionWithDuration_{}", vector.index);
             state_guard.set_buttplug_feature(feature_key, vector.position, arrival_ts);
         }
-        state_guard.get_buttplug_features()
-    };
-
-    // Emit to frontend
-    emit_buttplug_features(features);
+    }
 
     vec![ButtplugServerMessage::Ok(ButtplugOk { id: cmd.id })]
 }
@@ -329,18 +320,14 @@ async fn handle_vibrate_cmd(cmd: VibrateCmd) -> Vec<ButtplugServerMessage> {
     // Store feature values in PROCESSING_STATE
     let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
-    let features = {
+    {
         let mut state_guard = state.write().await;
         for speed in &cmd.speeds {
             let feature_key = format!("Vibrate_{}", speed.index);
             let value = speed.speed.clamp(0.0, 1.0);
             state_guard.set_buttplug_feature(feature_key, value, arrival_ts);
         }
-        state_guard.get_buttplug_features()
-    };
-
-    // Emit to frontend
-    emit_buttplug_features(features);
+    }
 
     vec![ButtplugServerMessage::Ok(ButtplugOk { id: cmd.id })]
 }
@@ -361,7 +348,7 @@ async fn handle_rotate_cmd(cmd: RotateCmd) -> Vec<ButtplugServerMessage> {
     // pair last-tick's speed with this-tick's direction.
     let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
-    let features = {
+    {
         let mut state_guard = state.write().await;
         for rotation in &cmd.rotations {
             let feature_key = format!("Rotate_{}", rotation.index);
@@ -374,11 +361,7 @@ async fn handle_rotate_cmd(cmd: RotateCmd) -> Vec<ButtplugServerMessage> {
                 arrival_ts,
             );
         }
-        state_guard.get_buttplug_features()
-    };
-
-    // Emit to frontend
-    emit_buttplug_features(features);
+    }
 
     vec![ButtplugServerMessage::Ok(ButtplugOk { id: cmd.id })]
 }
@@ -392,31 +375,27 @@ async fn handle_stop_device_cmd(cmd: StopDeviceCmd) -> Vec<ButtplugServerMessage
         ))];
     }
 
-    // Clear all Buttplug features for this device
+    // Clear all Buttplug features for this device. Frontend `inputBus`
+    // store keeps last-known values until a new write arrives — sub G.3
+    // dropped the explicit zero-on-stop emit. The protocol-level
+    // `connection-changed` flip resets the InputMonitor's bp: bars
+    // separately.
     let state = get_processing_state().await;
-    let features = {
+    {
         let mut state_guard = state.write().await;
         state_guard.clear_all_buttplug_features();
-        state_guard.get_buttplug_features()
-    };
-
-    // Emit to frontend (empty map)
-    emit_buttplug_features(features);
+    }
 
     vec![ButtplugServerMessage::Ok(ButtplugOk { id: cmd.id })]
 }
 
 async fn handle_stop_all_devices(cmd: StopAllDevices) -> Vec<ButtplugServerMessage> {
-    // Clear all Buttplug features
+    // Clear all Buttplug features (see comment in handle_stop_device_cmd).
     let state = get_processing_state().await;
-    let features = {
+    {
         let mut state_guard = state.write().await;
         state_guard.clear_all_buttplug_features();
-        state_guard.get_buttplug_features()
-    };
-
-    // Emit to frontend (empty map)
-    emit_buttplug_features(features);
+    }
 
     vec![ButtplugServerMessage::Ok(ButtplugOk { id: cmd.id })]
 }

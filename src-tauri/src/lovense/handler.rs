@@ -17,7 +17,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::buttplug::ButtplugFeatureConfig;
-use crate::emit_buttplug_features;
 use crate::lovense::messages::{
     build_get_toy_name_response, build_get_toys_response, CommandEnvelope, FunctionRequest,
     OkReply, PatternRequest, PositionRequest,
@@ -144,7 +143,7 @@ async fn write_actuator(actuator: Actuator, value: f64) {
     // contract and keeps the resolver's watermark reading coherent.
     let arrival_ts = current_time_ms();
     let state = get_processing_state().await;
-    let features = {
+    {
         let mut guard = state.write().await;
         for i in 0..count {
             let key = format!("{}_{}", actuator.feature_prefix(), i);
@@ -156,9 +155,7 @@ async fn write_actuator(actuator: Actuator, value: f64) {
             }
             guard.set_buttplug_feature(key, value, arrival_ts);
         }
-        guard.get_buttplug_features()
-    };
-    emit_buttplug_features(features);
+    }
 }
 
 async fn apply_action(action: &str, raw_strength: f64) {
@@ -175,13 +172,12 @@ async fn zero_actuators(actuators: &[Actuator]) {
 }
 
 async fn stop_all() {
+    // Bus prefix clear (sub G.3 retired the buttplug-features event;
+    // see handle_stop_device_cmd in buttplug/handler.rs for the
+    // last-known-value rationale).
     let state = get_processing_state().await;
-    let features = {
-        let mut guard = state.write().await;
-        guard.clear_all_buttplug_features();
-        guard.get_buttplug_features()
-    };
-    emit_buttplug_features(features);
+    let mut guard = state.write().await;
+    guard.clear_all_buttplug_features();
 }
 
 // ----------------------------------------------------------------------------

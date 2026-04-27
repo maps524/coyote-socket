@@ -27,6 +27,7 @@
   import { channelA, channelB } from './lib/stores/channels.js';
   import { generalSettings } from './lib/stores/generalSettings.js';
   import { startResolvedTracking, stopResolvedTracking } from './lib/stores/resolvedState.js';
+  import { startInputBusTracking, stopInputBusTracking, clearInputBus } from './lib/stores/inputBus.js';
   import {
     startStateSync,
     stopStateSync,
@@ -502,6 +503,9 @@
     // Start resolved-state tracking for range slider indicators (10Hz
     // post-resolver snapshot from backend, RAF-smoothed for display).
     startResolvedTracking();
+    // Start input bus tracking (per-write `bus-update` events for the
+    // input monitor + transforms editor's axis discovery).
+    startInputBusTracking();
 
     // Set initial window size based on T-Code monitor setting
     const initialHeight = $generalSettings.showTCodeMonitor ? WINDOW_HEIGHT_WITH_MONITOR : WINDOW_HEIGHT_COMPACT;
@@ -609,6 +613,10 @@
     coyoteService.destroy();
     // Stop resolved-state tracking
     stopResolvedTracking();
+    // Stop input-bus tracking + drop the in-memory axis map so a fresh
+    // mount doesn't carry stale samples across an HMR reload.
+    stopInputBusTracking();
+    clearInputBus();
     // Stop state sync event listeners
     stopStateSync();
     stopGamepadStatusSync();

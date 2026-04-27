@@ -42,13 +42,21 @@ pub fn get_app_handle() -> Option<&'static AppHandle> {
     APP_HANDLE.get()
 }
 
-/// Payload for axis update events
+/// Payload for `bus-update` events. Fired per-write inside the
+/// `ProcessingState::bus_write` helper, source-tagged by axis name
+/// prefix (T-Code: bare `L0`/`R2`/...; gamepad: `GP_*`; buttplug or
+/// lovense: `bp:*`). Sub G.3 introduced this event and retired the
+/// batched `axis-update` / `buttplug-features` events; the frontend's
+/// `inputBus` store consolidates the per-write stream into a flat
+/// `Map<axis, value>` for the InputMonitor and the transforms editor's
+/// axis discovery dropdown.
 #[derive(Clone, Serialize)]
-pub struct AxisUpdatePayload {
-    pub axes: HashMap<String, f64>,
-    pub channel_a: f64,
-    pub channel_b: f64,
-    pub timestamp: u64,
+pub struct BusUpdatePayload {
+    pub axis: String,
+    pub value: f64,
+    pub timestamp_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u32>,
 }
 
 /// Payload for connection status change events
@@ -64,13 +72,6 @@ pub struct ConnectionChangedPayload {
 #[derive(Clone, Serialize)]
 pub struct OutputPauseChangedPayload {
     pub paused: bool,
-    pub timestamp: u64,
-}
-
-/// Payload for Buttplug feature update events
-#[derive(Clone, Serialize)]
-pub struct ButtplugFeaturesPayload {
-    pub features: HashMap<String, f64>,
     pub timestamp: u64,
 }
 
@@ -118,27 +119,20 @@ pub struct OutputOptionsSnapshot {
     pub peak_fill: String,
 }
 
-/// Emit axis values to the frontend.
-///
-/// Fired from `websocket::handle_tcode_message` per inbound T-Code command, so
-/// the event rate matches the input stream (typically 10-60+ Hz depending on
-/// the sender) rather than the 10Hz device tick. Consumers should treat the
-/// cadence as "whenever input arrives" and not assume a fixed rate.
-pub fn emit_axis_update(axes: HashMap<String, f64>, channel_a: f64, channel_b: f64) {
+/// Emit one bus-axis write to the frontend. Fired per-write inside
+/// `ProcessingState::bus_write` (T-Code, gamepad, buttplug, lovense
+/// all funnel through one helper) so the cadence matches the input
+/// stream rather than the 10Hz device tick. The frontend's `inputBus`
+/// store consolidates the per-write stream into a flat axis map.
+pub fn emit_bus_update(axis: &str, value: f64, timestamp_ms: u64, interval_ms: Option<u32>) {
     if let Some(handle) = get_app_handle() {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        let payload = AxisUpdatePayload {
-            axes,
-            channel_a,
-            channel_b,
-            timestamp,
+        let payload = BusUpdatePayload {
+            axis: axis.to_string(),
+            value,
+            timestamp_ms,
+            interval_ms,
         };
-
-        let _ = handle.emit("axis-update", payload);
+        let _ = handle.emit("bus-update", payload);
     }
 }
 
@@ -215,23 +209,6 @@ pub fn emit_backend_log(level: &str, message: &str) {
     }
 }
 
-
-/// Emit Buttplug feature values to frontend
-pub fn emit_buttplug_features(features: HashMap<String, f64>) {
-    if let Some(handle) = get_app_handle() {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        let payload = ButtplugFeaturesPayload {
-            features,
-            timestamp,
-        };
-
-        let _ = handle.emit("buttplug-features", payload);
-    }
-}
 
 /// Emit per-tick resolver output for both channels. Sub G's
 /// `resolved-update` event — fired at the 10Hz device tick alongside
