@@ -7,6 +7,7 @@
     TRANSFORM_LABELS,
     defaultTransform
   } from '$lib/types/modulation.js';
+  import { knownAxes } from '$lib/stores/inputBus.js';
   import Slider from './Slider.svelte';
 
   /**
@@ -114,6 +115,17 @@
   // with the surrounding popover so the editor doesn't feel grafted on.
   $: variantTone = channel === 'A' ? 'text-primary' : 'text-secondary';
 </script>
+
+<!-- Shared datalist for axis-name autocomplete (sub G.3.2). Pulls from
+     `inputBus.knownAxes`, which is the union of every axis the bus has
+     ever seen this session — `L0`, `R2`, `GP_LX`, `bp:Vibrate_0`, etc.
+     Users still type a name (so an axis the device hasn't reported yet
+     is reachable), but get suggestions for what's currently live. -->
+<datalist id="transforms-axes">
+  {#each $knownAxes as axis (axis)}
+    <option value={axis}></option>
+  {/each}
+</datalist>
 
 <div class="space-y-1.5 pt-2 border-t border-border/50">
   <div class="flex items-center justify-between">
@@ -228,7 +240,7 @@
           <input
             type="text"
             value={t.otherAxis}
-            placeholder="L1"
+            placeholder="L1" list="transforms-axes"
             on:input={(e) => set(i, t, 'otherAxis', e.currentTarget.value)}
             class="w-20 {axisInputClass(t.otherAxis)}"
           />
@@ -254,7 +266,7 @@
           <input
             type="text"
             value={t.speedAxis}
-            placeholder="bp:Vibrate_0"
+            placeholder="bp:Vibrate_0" list="transforms-axes"
             on:input={(e) => set(i, t, 'speedAxis', e.currentTarget.value)}
             class="w-24 {axisInputClass(t.speedAxis)}"
           />
@@ -280,7 +292,7 @@
           <input
             type="text"
             value={t.speedAxis}
-            placeholder="bp:Oscillate_0"
+            placeholder="bp:Oscillate_0" list="transforms-axes"
             on:input={(e) => set(i, t, 'speedAxis', e.currentTarget.value)}
             class="w-24 {axisInputClass(t.speedAxis)}"
           />
@@ -317,7 +329,7 @@
           <input
             type="text"
             value={t.speedAxis}
-            placeholder="bp:Rotate_0"
+            placeholder="bp:Rotate_0" list="transforms-axes"
             on:input={(e) => set(i, t, 'speedAxis', e.currentTarget.value)}
             class="w-24 {axisInputClass(t.speedAxis)}"
           />
@@ -327,7 +339,7 @@
           <input
             type="text"
             value={t.directionAxis}
-            placeholder="bp:RotateDir_0"
+            placeholder="bp:RotateDir_0" list="transforms-axes"
             on:input={(e) => set(i, t, 'directionAxis', e.currentTarget.value)}
             class="w-24 {axisInputClass(t.directionAxis)}"
           />
@@ -364,7 +376,7 @@
           <input
             type="text"
             value={t.amountAxis}
-            placeholder="bp:Constrict_0"
+            placeholder="bp:Constrict_0" list="transforms-axes"
             on:input={(e) => set(i, t, 'amountAxis', e.currentTarget.value)}
             class="w-24 {axisInputClass(t.amountAxis)}"
           />
