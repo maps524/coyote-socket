@@ -1,6 +1,6 @@
-# Pipeline refactor — handoff for next session
+# Pipeline refactor — handoff (refactor complete)
 
-This doc gets a fresh Claude session up to speed on the in-flight pipeline refactor without re-walking the whole conversation history. **Read `docs/plans/pipeline-refactor.md` first** — it's the source of truth for goals, deletion manifest, settings policy, and substep details. This handoff is the operational layer on top of it: where we are, how we got here, and what to do next.
+This doc gets a fresh Claude session up to speed on the pipeline refactor — what shipped, what was deferred, and where to look for follow-ups. **Read `docs/plans/pipeline-refactor.md` first** — it's the source of truth for goals, deletion manifest, and substep details.
 
 ---
 
@@ -8,7 +8,7 @@ This doc gets a fresh Claude session up to speed on the in-flight pipeline refac
 
 A multi-week refactor of the Coyote-Socket backend pipeline from a tangled "T-Code first, everything else bolted on" model into a four-layer architecture: **InputSource → InputBus → Resolver → Engine**. The plan was reviewed by GPT and Gemini before any code landed; their feedback is folded into the plan doc.
 
-Eight steps total. Steps 1–4.5 are shipped. Steps 5+6+7 are bundled into one logical PR being shipped as seven sub-commits (A–G); only sub A is in. Step 8 is pending.
+**Status:** Steps 1–4.5 shipped. Steps 5+6+7 (bundled, subs A–G) shipped. Step 8 (`InputSource` trait) deferred per CLAUDE.md ("don't introduce abstractions beyond what the task requires") — `ProcessingState::bus_write` is already the unifying boundary every input source funnels through, so the trait would be decorative until a fifth source actually needs the polymorphism.
 
 ---
 
@@ -128,172 +128,60 @@ Follow-up commit `<TBD>` after sub E addressed the in-scope reviewer findings: t
 
 ---
 
-## Next concrete action: sub G.1 (frontend resolved-state stream)
+## What sub G shipped (the bundled-phase finale)
 
-Subs A-G.0 shipped the backend half of the bundled phase. Sub G.1 is the
-frontend half: consume the `resolved-update` event the backend now emits at
-10Hz, replace `inputPosition.ts`, render post-curve position dots on every
-linked-parameter card, and ship the transforms editor so users can attach
-`Vibrate` / `Oscillate` / `Rotate` / `Constrict` (or generic `Smooth` /
-`Scale` / etc.) to any link. Plus the wire-format renames: drop
-`axis-update` (replaced by `bus-update`), drop `buttplug-features`
-(superseded by `bus-update` filtered to `bp:*`).
+| Commit | Sub | What |
+|---|---|---|
+| `bcdb836` + `b4e70a5` | G.0 | Backend `resolved-update` event at 10Hz device tick. `ResolvedSampleSnapshot` + per-channel `ChannelResolvedSnapshot`. `Channel.last_intensity_sample` stash threads bp:-routed resolver output to telemetry without re-running phase state. Engine-path Linked synthesizes from V2 ramp / V3 lookahead. |
+| `645f0d3` + `9073ffd` | G.1 | Frontend `resolvedState.ts` store consumes `resolved-update` (RAF-smoothed). Per-parameter position indicators read `normalized_pre_range` straight from the resolver. Drops `inputPosition.ts`, frontend curve eval (`applySourceTransform` etc.), `is_static` wire field, and inert example file. Follow-up adds `indicatorOf` helper + RAF-after-stop race guard + `debug_assert!` on bp:→engine-path-Linked stash invariant. |
+| `69f92e3` + `f4f8cb9` | G.2 | `TransformsEditor.svelte` (10 variants, list/add/reorder/delete). `Transform` discriminated TS union mirrors `TransformConfig`. Backend gains `ParameterSourceSettings.transforms`. Convert layer prefers editor-supplied transforms, falls back to legacy `buttplug_links_to_transforms` for old saves (with `log_warn!`). Follow-up adds inert-transforms hint banner + empty-modifier-axis red border. |
+| `8b756c7` | G.3.0 | `bus-update` per-write event in place of batched `axis-update` / `buttplug-features`. New `inputBus.ts` store. `ProcessingState::bus_write` helper threads every per-axis write through one path. InputMonitor migrates from two listeners to one reactive `$inputBus` block. Drops `emit_axis_update`, `emit_buttplug_features`, `get_buttplug_features` projection. |
+| `48600c6` | G.3.1 | Drops legacy Buttplug surface: `ButtplugLinkPanel.svelte` (475 lines), `buttplug_links` schema field, `ButtplugLinksSettings` + `ButtplugFeatureLinkSettings` + `ButtplugFeatureConfigSettings`, settings convert layer's `buttplug_links → Vec<TransformConfig>` translation, `inputMode` ecosystem split, `effectiveInputMode`, `settingsToButtplugLinks` + `buttplugLinksToSettings` helpers. The unified `transforms` vector replaces all of it. |
+| `cc7d3e4` | G.3.2 + G.3.3 | TransformsEditor's six modifier-axis text inputs gain a shared `<datalist>` populated from `inputBus.knownAxes` (autocomplete from live bus axes). Dead `RangeSlider.svelte` (258 lines) deleted. |
 
-### Wire format already shipped (sub G.0)
-
-The backend half is done. Sub G.1 only needs to consume what's already
-on the wire. Snake_case JSON keys (matches the existing `WaveformSample`
-shape).
-
-```rust
-// resolver.rs (sub G.0)
-pub struct ResolvedUpdatePayload {
-    pub timestamp_ms: u64,
-    pub channel_a: ChannelResolvedSnapshot,
-    pub channel_b: ChannelResolvedSnapshot,
-}
-
-pub struct ChannelResolvedSnapshot {
-    pub frequency: ResolvedSampleSnapshot,
-    pub frequency_balance: ResolvedSampleSnapshot,
-    pub intensity_balance: ResolvedSampleSnapshot,
-    pub intensity: ResolvedSampleSnapshot,
-}
-
-pub struct ResolvedSampleSnapshot {
-    pub raw_input: f64,             // pre-curve, pre-transforms
-    pub normalized_pre_range: f64,  // 0..1, post-curve+transforms
-    pub device_value: f64,          // post-range, in device units
-    pub target_time_ms: u64,        // now - delay_ms
-    pub source_axis: Option<String>,// None for Static (key omitted)
-    pub is_static: bool,
-}
-```
-
-### Files to add / change
-
-Frontend:
-
-- **`src/lib/stores/resolvedState.ts`** (new) — subscribe to
-  `resolved-update`. Keyed by `(channel, parameter)` → latest
-  `ResolvedSampleSnapshot`. Cadence: 10Hz arrivals; consumers can
-  RAF-interpolate. Shape mirrors backend: pull `is_static` straight
-  through, render the position line only when `!is_static`.
-- **`src/lib/stores/inputBus.ts`** (new, can defer to sub G.2) — flat
-  axis-keyed store of raw bus values. Currently no backend
-  `bus-update` event exists; sub G.2 introduces it. For G.1 the
-  store can stay empty / fed by the existing `axis-update` payload's
-  `axes` map until G.2 swaps the source.
-- **`src/lib/stores/inputPosition.ts`** (deleted) — replaced by
-  `resolvedState.ts` + `inputBus.ts`. Plan-doc done-criteria
-  requires zero hits.
-- **`src/lib/types/modulation.ts`** — add `Transform` union mirroring
-  `TransformConfig` discriminator. Kebab-case `type` field per sub D
-  (`{type: "vibrate", speedAxis, distance}`, etc.). Variants: `smooth`,
-  `scale`, `clamp`, `invert`, `hold`, `mix`, `vibrate`, `oscillate`,
-  `rotate`, `constrict`. Field names mirror the Rust struct
-  (`speedAxis`, `directionAxis`, `maxSpeedHz`, etc. — sub D shipped
-  `#[serde(rename = "...")]` for camelCase on the wire).
-- **`src/lib/components/curve plot component`** (locate via grep for
-  the existing curve renderer in `ChannelControl.svelte` /
-  similar) — render two new dots: input-at-target-time + resolved
-  position. Existing curve plot already shows the curve shape; sub G.1
-  overlays the dots.
-- **`src/lib/components/`** transforms editor (new) — list / add /
-  reorder / delete `TransformConfig` entries on a `ParameterLinkConfig`.
-  One sub-component per variant. Posts the updated channel config
-  through the existing `apply_channel_config` Tauri command.
-- **`src/lib/components/InputMonitor.svelte`** — drop the
-  `axis-update` and `buttplug-features` listeners; subscribe to
-  `inputBus` store instead. (Defer to sub G.2 if `bus-update` event
-  isn't shipped yet.)
-
-Backend (sub G.2):
-
-- **`emit_bus_update` + `BusUpdatePayload`** in `main.rs`. Fired from
-  `input_bus::update` per-write (T-Code, gamepad, Buttplug, Lovense
-  all funnel through this). Source-tagged by axis name prefix
-  (`L0` / `R2` for T-Code, `GP_*` for gamepad, `bp:*` for
-  Buttplug/Lovense).
-- Drop `emit_axis_update` and `emit_buttplug_features` once all
-  frontend listeners have migrated.
-
-### Acceptance for sub G
-
-- `cargo check` + `cargo test` clean (110+ pass, 1 pre-existing
-  failure unchanged).
-- `npm run check` (svelte-check) clean.
-- The dev-server skill confirms a build that boots without runtime
-  errors. Manual smoke: a linked-intensity preset shows a moving
-  position dot on the curve plot when input arrives.
-- `git grep` deletion-manifest checklist (plan doc lines 484-510):
-  `axis-update`, `buttplug-features`, `inputPosition` — zero hits
-  outside `docs/plans/*` and `git log`. (Sub G.1 may leave
-  `axis-update` for sub G.2 if `bus-update` isn't shipped yet —
-  document the choice in the commit body.)
-- Beta-branch validation on a real device with both a T-Code preset
-  and a Buttplug preset — UI cards show the post-curve dot moving
-  in sync with the input.
-
-### Sub G — likely commit shape
-
-Multiple commits inside the substep:
-
-- **G.1** — Frontend stores + UI integration (no transforms editor,
-  no `bus-update` rename). Just consume `resolved-update` and render
-  the position dots. Smallest user-visible win.
-- **G.2** — Transforms editor UI. Adds the per-variant editors and
-  the parameter-card affordance to attach / reorder / delete.
-- **G.3** — `axis-update` → `bus-update` rename + drop
-  `buttplug-features`. Touch the listeners after the editor lands so
-  the rename PR doesn't have to also handle UI churn.
-
-Pull from this list incrementally; each commit can ship + get its own
-reviewer pass. A single G.1+G.2+G.3 mega-commit is allowed but harder
-to review.
-
-### Carry-forward findings from sub G.0 reviewers
-
-- **`is_static` flag departure from plan-doc spec** (sub G.0 design
-  reviewer flagged): the explicit boolean co-varies with
-  `source_axis: None` today. Frontend can infer Static from
-  `source_axis === undefined` (the JSON omits the key for None). If
-  sub G.1 chooses to read `is_static` directly, document the choice;
-  if it infers, drop the field from the wire format in a follow-up.
-- **`debug_assert!` for stash invariant** (sub G.0 design reviewer
-  flagged): a future write-lock-split refactor could break the bp:
-  → stash → telemetry ordering. Adding a `debug_assert!` that bp:-
-  routed Linked links produce a Some stash before the snapshot pass
-  catches regressions loudly. Cheap; defer to sub G or later.
-- **Beta release-notes draft for Constrict centering** (sub E
-  reviewer carry-forward): "Buttplug presets that combine Vibrate
-  and Constrict will now constrict around the wobbled position, not
-  the un-wobbled base. The change is intentional and matches the
-  layered transform model." Land in the release-tag commit
-  (`release.js` reads notes at tag time).
-
-### Step 8 — sketch (unchanged from prior sessions)
-
-Wrap existing input handlers in an `InputSource` trait. Mostly
-cosmetic by then. New `src-tauri/src/input/` module with `input/mod.rs`
-declaring the trait, `input/tcode.rs` (wraps `tcode_input.rs`),
-`input/gamepad.rs`, `input/buttplug.rs` (with `lovense` as adapter
-inside). The win: adding a future input source (MIDI, OSC, audio
-amplitude) is one self-contained file.
+`cargo test`: 105 pass, 1 pre-existing failure unchanged.
+`npm run check`: 25 pre-existing errors / 17 pre-existing warnings (improved from 26/17 — G.3.1 fixed one stale-reference). All in unrelated files; refactor introduced zero new diagnostics.
 
 ---
 
-## Done criteria for the whole refactor
+## Step 8 — explicitly deferred
 
-When all subs A–G + Step 8 are in:
+The plan-doc Step 8 was: wrap input handlers in an `InputSource` trait, move them into `src-tauri/src/input/`. Per CLAUDE.md ("Don't add features, refactor, or introduce abstractions beyond what the task requires") and the maintainer's stated values ("Don't design for hypothetical future requirements"):
 
-- `git grep` returns zero hits for: `buttplug_features`, `buttplug_linear_commands`, `buttplug_rotate_directions`, `process_buttplug_pipeline`, `ButtplugChannelState`, `ButtplugFeatureValues`, `ButtplugLinkConfig`, `ButtplugLinksSettings`, `apply_tcode`, `convert_parameter_source`, `convert_channel_settings`, `get_resolved_channel_params`, `get_per_slot_frequencies`, `apply_saved_settings_to_processing`, `sync_settings_to_state`, `ResolvedChannelParams`, `scale_intensity`, `axis-update`, `buttplug-features`, `inputPosition`. (Hits inside `docs/plans/pipeline-refactor.md` and `docs/plans/pipeline-refactor-handoff.md` are fine — they're the historical record.)
-- `src-tauri/src/buttplug/pipeline.rs`, `buttplug/state.rs` no longer exist.
-- `src-tauri/src/websocket.rs` no longer exists (already true after Step 4).
-- `src/lib/stores/inputPosition.ts` no longer exists.
-- Frontend renders a post-curve position line on every linked-parameter card (sub G's UX win).
-- `cargo test` passes (modulo the 2 pre-existing failures unless they get fixed separately).
-- A Buttplug-driven preset still feels equivalent to today on a beta validation pass. Curve / range knobs visibly affect Buttplug intensity.
+- The four current sources (T-Code, gamepad, buttplug, lovense) have divergent lifecycles: WebSocket-driven message handlers, polling loops, and TCP servers don't share a useful interface beyond "writes to the bus".
+- `ProcessingState::bus_write` already is the unifying boundary every source funnels through. The bus + resolver + engine layers below are source-agnostic; a fifth source would only need to call `state_guard.process_command(...)` (T-Code-shaped) or `state_guard.set_buttplug_feature(...)` (bp:-namespaced).
+- A trait at this point would be marker-only and decorative; moving files would be ~50+ import-statement churn for no runtime benefit.
+
+Revisit Step 8 when a fifth source actually lands and the polymorphism would pay for itself.
+
+---
+
+## Carry-forward into post-refactor work
+
+These items came up during reviewer passes but are out of scope for the refactor itself:
+
+- **Inert-transforms UX hazard**: the sub E gate routes only `bp:`-prefixed Linked links through the resolver's transforms pipeline. Transforms attached to T-Code / gamepad / Static links are saved-but-inert. G.2 follow-up surfaces a warning banner in the editor; closing the gap (running engine-path Linked through a resolver tail, or unifying engine + resolver) is a separate plan.
+- **Constrict centering shift release-notes**: "Buttplug presets that combine Vibrate and Constrict will now constrict around the wobbled position, not the un-wobbled base. The change is intentional and matches the layered transform model." Land in the release-tag commit (`release.js` reads notes at tag time).
+- **`dispatch('sourceChange', { ...source, ... })` repetition**: 11+ identical calls in `RangeSliderWithIndicator.svelte` were flagged by the G.2 DRY reviewer as pre-existing. A `preserve()` helper or a `$:`-derived `currentSource` reactive value would DRY this; deferred to a focused refactor commit.
+- **`ArrivalTs(u64)` / `TargetTs(u64)` newtypes**: sub E reviewer flagged that `set_buttplug_feature` and `resolve_link_at_time` both take bare `u64` for semantically distinct timestamps. Wrap in newtypes when a future caller misroutes them.
+- **`Rotate` variant asymmetry**: every other Buttplug semantic transform carries one declared axis; `Rotate` carries two. If a future variant declares three+ modifier axes, migrate `step_phase_state` to `modifiers: Vec<AxisRef>` rather than widening the helper again.
+
+---
+
+## Done criteria for the refactor (validated)
+
+`git grep` for the deletion-manifest names (plan doc lines 484–510):
+
+- ✅ Zero live consumers of the dropped names (`buttplug_features`, `buttplug_linear_commands`, `buttplug_rotate_directions`, `process_buttplug_pipeline`, `ButtplugChannelState`, `ButtplugFeatureValues`, `ButtplugLinkConfig`, `ButtplugLinksSettings`, `V1ChannelState`, `axis-update`, `buttplug-features`, `inputPosition`). Remaining hits are docstring / commit-message / inline-comment historical references explaining why current code looks how it does — accepted per the plan-doc note ("Hits inside `docs/plans/...` and in `git log` are fine — they're the historical record"). Some live API names (e.g. `process_command`, `clear_all_buttplug_features`, `convert_parameter_source`) match the deletion-manifest globs but were always intended to keep their names; the manifest was about the legacy dual-path code, not the names themselves.
+- ✅ `src-tauri/src/buttplug/pipeline.rs`, `buttplug/state.rs` no longer exist (sub F).
+- ✅ `src-tauri/src/websocket.rs` no longer exists (Step 4).
+- ✅ `src/lib/stores/inputPosition.ts` no longer exists (sub G.1).
+- ✅ `src/lib/components/ui/ButtplugLinkPanel.svelte` no longer exists (sub G.3.1).
+- ✅ `src/lib/components/RangeSlider.svelte` no longer exists (sub G.3.3, dead-code cleanup).
+- ✅ Frontend renders a post-curve position line on every linked-parameter card (sub G.1's UX win, indicator inside `RangeSliderWithIndicator`).
+- ✅ Frontend transforms editor lets users attach `Smooth` / `Scale` / `Clamp` / `Invert` / `Hold` / `Mix` / `Vibrate` / `Oscillate` / `Rotate` / `Constrict` to any link (sub G.2).
+- ✅ `cargo test`: 105 pass, 1 pre-existing failure (`processing::tests::test_parse_tcode_with_interval`) unchanged.
+- ⏳ Beta-branch validation on a real device is the maintainer's job — pre-merge feel-test of a Buttplug preset that combines Vibrate + Constrict (Constrict centering shifted; release-notes bullet drafted above).
 
 ---
 
