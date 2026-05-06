@@ -873,6 +873,9 @@ async fn save_shortcuts(
     help: String,
     settings_key: String,
     toggle_output_pause: Option<String>,
+    cycle_preset: Option<String>,
+    cycle_preset_forward: Option<String>,
+    cycle_preset_back: Option<String>,
 ) -> Result<String, String> {
     let shortcuts = KeyboardShortcuts {
         channel_a_freq_up,
@@ -894,6 +897,9 @@ async fn save_shortcuts(
         help,
         settings: settings_key,
         toggle_output_pause: toggle_output_pause.unwrap_or_else(|| " ".to_string()),
+        cycle_preset: cycle_preset.unwrap_or_default(),
+        cycle_preset_forward: cycle_preset_forward.unwrap_or_default(),
+        cycle_preset_back: cycle_preset_back.unwrap_or_default(),
     };
     settings::update_shortcuts(shortcuts).await?;
     Ok("Shortcuts saved".to_string())
@@ -1102,6 +1108,12 @@ async fn rename_preset(old_name: String, new_name: String) -> Result<String, Str
     ))
 }
 
+#[tauri::command]
+async fn reorder_presets(names: Vec<String>) -> Result<String, String> {
+    settings::reorder_presets(names).await?;
+    Ok("Presets reordered".to_string())
+}
+
 // ============================================================================
 // Logging Commands
 // ============================================================================
@@ -1235,6 +1247,7 @@ fn main() {
             save_preset,
             delete_preset,
             rename_preset,
+            reorder_presets,
             // Logging commands
             get_log_path,
             read_logs,

@@ -122,6 +122,9 @@ export interface KeyboardShortcuts {
     help: string;
     settings: string;
     toggleOutputPause: string;
+    cyclePreset: string;
+    cyclePresetForward: string;
+    cyclePresetBack: string;
 }
 
 export interface GeneralSettings {

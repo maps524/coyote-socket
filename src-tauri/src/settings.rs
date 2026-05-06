@@ -399,6 +399,12 @@ pub struct KeyboardShortcuts {
     pub settings: String,
     #[serde(default = "default_toggle_output_pause")]
     pub toggle_output_pause: String,
+    #[serde(default)]
+    pub cycle_preset: String,
+    #[serde(default)]
+    pub cycle_preset_forward: String,
+    #[serde(default)]
+    pub cycle_preset_back: String,
 }
 
 fn default_toggle_output_pause() -> String {
@@ -490,6 +496,9 @@ impl Default for KeyboardShortcuts {
             help: "?".to_string(),
             settings: ",".to_string(),
             toggle_output_pause: " ".to_string(), // Space bar
+            cycle_preset: String::new(),
+            cycle_preset_forward: String::new(),
+            cycle_preset_back: String::new(),
         }
     }
 }
@@ -886,6 +895,40 @@ pub async fn delete_preset(name: &str) -> Result<(), String> {
         return Err(format!("Preset '{}' not found", name));
     }
 
+    save_presets_to_disk(&presets)
+}
+
+/// Reorder presets to match the supplied name list. Names not present in the
+/// list keep their relative order and trail the reordered group, so a partial
+/// reorder (e.g. just one ecosystem) does not lose entries from the other.
+/// Unknown names are ignored.
+pub async fn reorder_presets(names: Vec<String>) -> Result<(), String> {
+    let state = init_presets().await;
+    let mut presets = state.write().await;
+
+    let mut original: Vec<Option<ChannelPreset>> =
+        presets.drain(..).map(Some).collect();
+    let mut reordered: Vec<ChannelPreset> = Vec::with_capacity(original.len());
+
+    for n in names {
+        if let Some(slot) = original
+            .iter_mut()
+            .find(|s| s.as_ref().map(|p| p.name == n).unwrap_or(false))
+        {
+            if let Some(p) = slot.take() {
+                reordered.push(p);
+            }
+        }
+    }
+    // Append any presets not mentioned (preserves their original relative
+    // order — important when the UI only sends one ecosystem).
+    for slot in original {
+        if let Some(p) = slot {
+            reordered.push(p);
+        }
+    }
+
+    *presets = reordered;
     save_presets_to_disk(&presets)
 }
 

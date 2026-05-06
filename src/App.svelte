@@ -41,7 +41,9 @@
   import type { AppSettings, ChannelPreset, ChannelSettings, ChordPart, GamepadBinding, GamepadBindings, PresetEcosystem } from './lib/types/settings';
   import type { NoInputBehavior } from './lib/types/modulation';
   import { coyoteService } from './lib/services/CoyoteService.js';
-  import { Plus, Save, X } from 'lucide-svelte';
+  import { Plus, Save, X, ListOrdered, GripVertical } from 'lucide-svelte';
+  import { dndzone, type DndEvent } from 'svelte-dnd-action';
+  import { flip } from 'svelte/animate';
 
   let settingsOpen = false;
   let helpOpen = false;
@@ -89,7 +91,10 @@
     channelBIntBalDown: 'l',
     help: '?',
     settings: ',',
-    toggleOutputPause: ' '  // Space bar
+    toggleOutputPause: ' ',  // Space bar
+    cyclePreset: '',
+    cyclePresetForward: '',
+    cyclePresetBack: ''
   };
 
   // Gamepad bindings (orthogonal to keyboard shortcuts). Each action may have
@@ -161,6 +166,9 @@
     { action: 'channelBIntBalUp',       label: 'Int Balance Up',   group: 'B' },
     { action: 'channelBIntBalDown',     label: 'Int Balance Down', group: 'B' },
     { action: 'toggleOutputPause',      label: 'Toggle Output Pause', group: 'global' },
+    { action: 'cyclePreset',            label: 'Cycle Preset',     group: 'global' },
+    { action: 'cyclePresetForward',     label: 'Cycle Preset Forward', group: 'global' },
+    { action: 'cyclePresetBack',        label: 'Cycle Preset Back', group: 'global' },
     { action: 'help',                   label: 'Help',             group: 'global' },
     { action: 'settings',               label: 'Settings',         group: 'global' },
   ];
@@ -535,10 +543,12 @@
     // (Skip if already connected - e.g., after HMR refresh)
     if (autoScan && !outputConnected) {
       console.log('Auto-scanning for Bluetooth devices...');
-      // Delay to let the app initialize
+      // Delay to let Tauri + Windows BLE stack settle. 1s wasn't enough
+      // on a cold launch — the first scan would return empty even though
+      // the device was advertising, forcing a manual refresh.
       setTimeout(async () => {
         await scanAndConnect();
-      }, 1000);
+      }, 2000);
     } else if (autoScan && outputConnected) {
       console.log('[HMR] Bluetooth already connected, skipping auto-scan');
     }
@@ -555,21 +565,27 @@
     }, 500);
   });
 
-  // Scan for Bluetooth devices and optionally auto-connect
+  // Scan for Bluetooth devices and optionally auto-connect.
+  // Windows BLE stack often returns an empty scan on the first attempt
+  // right after app launch (radio cold-start, OS hasn't enumerated nearby
+  // peripherals yet). Retry up to 3 times before giving up — this matches
+  // what the user otherwise has to do by hand with the refresh button.
   async function scanAndConnect() {
-    try {
-      console.log('Scanning for Coyote devices on adapter:', selectedInterface);
-      const devices = await invoke<BluetoothDevice[]>('scan_bluetooth_devices', {
-        adapterIndex: Number(selectedInterface) || 0
-      });
+    const adapterIndex = Number(selectedInterface) || 0;
+    const MAX_ATTEMPTS = 3;
 
-      console.log('Found devices:', devices);
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        console.log(`[auto-scan] attempt ${attempt}/${MAX_ATTEMPTS} on adapter ${adapterIndex}`);
+        const devices = await invoke<BluetoothDevice[]>('scan_bluetooth_devices', {
+          adapterIndex
+        });
+        console.log(`[auto-scan] attempt ${attempt} found ${devices.length} device(s):`, devices);
 
-      // Refresh connection state to get the updated discovered devices list from backend
-      await refreshConnectionStatus();
+        // Push the (possibly empty) discovered list to the store so the
+        // panel UI reflects backend state on every attempt.
+        await refreshConnectionStatus();
 
-      if (devices.length > 0) {
-        // Find a Coyote device
         const coyoteDevice = devices.find(d =>
           d.name?.includes('COYOTE') ||
           d.name?.includes('DG-LAB') ||
@@ -578,30 +594,35 @@
 
         if (coyoteDevice) {
           savedSelectedDevice = coyoteDevice.address;
-          console.log('Found Coyote device:', coyoteDevice);
+          console.log('[auto-scan] found Coyote device:', coyoteDevice);
 
-          // Auto-connect if enabled
           if (autoConnect && !outputConnected) {
-            console.log('Auto-connecting to Coyote device...');
+            console.log('[auto-scan] auto-connecting...');
             try {
               const result = await invoke<string>('connect_bluetooth_device', {
-                adapterIndex: Number(selectedInterface) || 0,
+                adapterIndex,
                 address: coyoteDevice.address
               });
-              console.log('Auto-connect result:', result);
-              // Connection state is updated via backend event (connection-changed)
+              console.log('[auto-scan] connect result:', result);
             } catch (connectError) {
-              console.error('Auto-connect failed:', connectError);
+              console.error('[auto-scan] auto-connect failed:', connectError);
             }
           }
-        } else {
-          console.log('No Coyote device found in scan results');
+          return;
         }
-      } else {
-        console.log('No Bluetooth devices found');
+
+        if (attempt < MAX_ATTEMPTS) {
+          console.log('[auto-scan] no Coyote yet — retrying after 1.5s');
+          await new Promise(r => setTimeout(r, 1500));
+        } else {
+          console.log('[auto-scan] gave up after', MAX_ATTEMPTS, 'attempts');
+        }
+      } catch (error) {
+        console.error(`[auto-scan] attempt ${attempt} failed:`, error);
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise(r => setTimeout(r, 1500));
+        }
       }
-    } catch (error) {
-      console.error('Auto-scan failed:', error);
     }
   }
 
@@ -900,7 +921,10 @@
         channelBIntBalDown: shortcuts.channelBIntBalDown,
         help: shortcuts.help,
         settingsKey: shortcuts.settings,
-        toggleOutputPause: shortcuts.toggleOutputPause
+        toggleOutputPause: shortcuts.toggleOutputPause,
+        cyclePreset: shortcuts.cyclePreset,
+        cyclePresetForward: shortcuts.cyclePresetForward,
+        cyclePresetBack: shortcuts.cyclePresetBack
       }).catch((e) => console.error('[Settings] Failed to save shortcuts:', e));
     }, 500);
   }
@@ -991,7 +1015,28 @@
       case 'help':                 helpOpen = true; break;
       case 'settings':             settingsOpen = true; break;
       case 'toggleOutputPause':    toggleOutputPause(); break;
+      case 'cyclePreset':          cyclePresets(1); break;
+      case 'cyclePresetForward':   cyclePresets(1); break;
+      case 'cyclePresetBack':      cyclePresets(-1); break;
     }
+  }
+
+  /** Cycle through presets in the current ecosystem. dir=+1 forward, -1 back.
+   *  Wraps. No-op when the ecosystem has zero presets. With nothing selected,
+   *  forward picks the first / back picks the last. */
+  function cyclePresets(dir: 1 | -1) {
+    if (filteredPresets.length === 0) return;
+    const current = $presetSelectionStore[currentEcosystem];
+    const idx = current
+      ? filteredPresets.findIndex(p => p.name === current)
+      : -1;
+    let next: number;
+    if (idx === -1) {
+      next = dir === 1 ? 0 : filteredPresets.length - 1;
+    } else {
+      next = (idx + dir + filteredPresets.length) % filteredPresets.length;
+    }
+    handlePresetSelect(filteredPresets[next].name);
   }
 
   /** Adjust one bound of the frequency range source. Linked mode only.
@@ -1054,6 +1099,19 @@
     if (k === shortcuts.toggleOutputPause) {
       e.preventDefault(); // Prevent space from scrolling
       dispatchAction('toggleOutputPause');
+      return;
+    }
+    // Preset cycle bindings — empty string means unbound, never matches.
+    if (shortcuts.cyclePresetForward && k === shortcuts.cyclePresetForward) {
+      dispatchAction('cyclePresetForward');
+      return;
+    }
+    if (shortcuts.cyclePresetBack && k === shortcuts.cyclePresetBack) {
+      dispatchAction('cyclePresetBack');
+      return;
+    }
+    if (shortcuts.cyclePreset && k === shortcuts.cyclePreset) {
+      dispatchAction('cyclePreset');
       return;
     }
 
@@ -1380,6 +1438,33 @@
     }
   }
 
+  // Reorder dialog state. Opens a centered modal with a drag-and-drop list
+  // (svelte-dnd-action). Local working copy lets the user reorder freely;
+  // persistence happens on `finalize` via reorder_presets.
+  let reorderOpen = false;
+  let reorderItems: ChannelPreset[] = [];
+  const REORDER_FLIP_MS = 200;
+
+  function openReorderDialog() {
+    reorderItems = [...filteredPresets];
+    reorderOpen = true;
+  }
+
+  function handleReorderConsider(e: CustomEvent<DndEvent<ChannelPreset>>) {
+    reorderItems = e.detail.items;
+  }
+
+  async function handleReorderFinalize(e: CustomEvent<DndEvent<ChannelPreset>>) {
+    reorderItems = e.detail.items;
+    const names = reorderItems.map(p => p.name);
+    try {
+      await invoke('reorder_presets', { names });
+      presets = await invoke<ChannelPreset[]>('get_presets');
+    } catch (err) {
+      console.error('[Presets] Failed to reorder:', err);
+    }
+  }
+
   function startAddingPreset() {
     isAddingPreset = true;
     newPresetName = '';
@@ -1587,6 +1672,13 @@
                   title="Save current settings as new preset"
                 >
                   <Plus class="h-3.5 w-3.5" />
+                </button>
+                <button
+                  on:click={openReorderDialog}
+                  class="w-7 shrink-0 flex items-center justify-center hover:bg-background/50 border-l border-border"
+                  title="Reorder presets"
+                >
+                  <ListOrdered class="h-3.5 w-3.5" />
                 </button>
                 {#if presetDirty && selectedPresetName}
                   <button
@@ -2093,6 +2185,38 @@
           {/each}
         </ul>
       </div>
+    </div>
+  </Dialog>
+
+  <!-- Reorder Presets Modal -->
+  <Dialog bind:open={reorderOpen} title="Reorder Presets ({currentEcosystem})">
+    <div class="text-xs text-muted-foreground mb-2">
+      Drag rows to reorder. Saves automatically.
+    </div>
+    {#if reorderItems.length === 0}
+      <div class="text-xs text-muted-foreground py-4 text-center">
+        No presets in this ecosystem.
+      </div>
+    {:else}
+      <div
+        class="flex flex-col gap-1 overflow-y-auto scrollbar-thin pr-1 max-h-[60vh]"
+        use:dndzone={{ items: reorderItems, flipDurationMs: REORDER_FLIP_MS, dropTargetStyle: {} }}
+        on:consider={handleReorderConsider}
+        on:finalize={handleReorderFinalize}
+      >
+        {#each reorderItems as preset (preset.name)}
+          <div
+            animate:flip={{ duration: REORDER_FLIP_MS }}
+            class="flex items-center gap-2 px-2 py-2 rounded border border-border bg-muted/30 cursor-grab active:cursor-grabbing"
+          >
+            <GripVertical class="h-4 w-4 text-muted-foreground shrink-0" />
+            <span class="text-sm flex-1 truncate">{preset.name}</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
+    <div class="flex justify-end mt-3 pt-3 border-t border-border">
+      <Button on:click={() => (reorderOpen = false)}>Done</Button>
     </div>
   </Dialog>
 
