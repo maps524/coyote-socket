@@ -34,7 +34,18 @@
   let isScanning = false;
   let connectionStatus = '';
   let adaptersLoaded = false;
-  
+
+  // Pick up late `savedDevices` pushes from the parent — App.svelte's
+  // startup scan can finish after this panel mounts (e.g. user opens the
+  // popover before the 5s scan returns). Only fill in when our local list
+  // is empty, so we don't clobber a fresh manual scan from this panel.
+  $: if (savedDevices.length > 0 && bluetoothDevices.length === 0) {
+    bluetoothDevices = savedDevices;
+    if (!selectedDevice && savedSelectedDevice) {
+      selectedDevice = savedSelectedDevice;
+    }
+  }
+
   $: if (isConnected && selectedDevice) {
     const device = bluetoothDevices.find(d => d.address === selectedDevice);
     if (device) {

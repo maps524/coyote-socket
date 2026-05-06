@@ -57,6 +57,13 @@ pub struct BluetoothManager {
     v2_char_waveform_b: Option<Characteristic>, // Control Channel B (corresponding to PWM_A34)
 
     battery_characteristic: Option<Characteristic>,
+
+    // Last successful connect target — kept across handle-loss so the
+    // reconnect task can retry without the user re-clicking. Cleared by
+    // explicit disconnect (which also flips `auto_reconnect`).
+    last_adapter_index: Option<usize>,
+    last_address: Option<String>,
+    pub auto_reconnect: bool,
 }
 impl BluetoothManager {
     pub async fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
@@ -73,6 +80,9 @@ impl BluetoothManager {
             v2_char_intensity: None,
             v2_char_waveform_a: None,
             v2_char_waveform_b: None,
+            last_adapter_index: None,
+            last_address: None,
+            auto_reconnect: false,
         })
     }
 
@@ -252,8 +262,36 @@ impl BluetoothManager {
         self.connected_peripheral = Some(peripheral);
         self.connected_device_address = Some(address.to_string());
 
+        // Remember target for auto-reconnect after a dropped link.
+        self.last_adapter_index = Some(adapter_index);
+        self.last_address = Some(address.to_string());
+        self.auto_reconnect = true;
+
         println!("Successfully connected to device: {}", address);
         Ok(())
+    }
+
+    /// Drop in-memory connection state without calling `peripheral.disconnect()`.
+    /// Use when the OS has already closed the handle (HRESULT 0x80000013 etc.) —
+    /// calling disconnect on a dead handle just errors. Keeps `last_*` and
+    /// `auto_reconnect` so a follow-up reconnect task can retry the same device.
+    pub fn mark_disconnected(&mut self) {
+        self.connected_peripheral = None;
+        self.write_characteristic = None;
+        self.battery_characteristic = None;
+        self.connected_device_address = None;
+        self.device_version = None;
+        self.v2_char_intensity = None;
+        self.v2_char_waveform_a = None;
+        self.v2_char_waveform_b = None;
+    }
+
+    /// Last successful (adapter_index, address) — drives auto-reconnect.
+    pub fn last_connection_target(&self) -> Option<(usize, String)> {
+        match (self.last_adapter_index, self.last_address.as_ref()) {
+            (Some(i), Some(a)) => Some((i, a.clone())),
+            _ => None,
+        }
     }
 
     /// Write a command to the device (B0 or BF command)
@@ -308,8 +346,18 @@ impl BluetoothManager {
     }
 
     pub async fn disconnect_device(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Explicit user disconnect: cancel any pending auto-reconnect by
+        // clearing the target + flag BEFORE awaiting peripheral.disconnect()
+        // — that call can fail on a dead handle, but we still want the
+        // reconnect task to give up.
+        self.auto_reconnect = false;
+        self.last_adapter_index = None;
+        self.last_address = None;
+
         if let Some(peripheral) = self.connected_peripheral.take() {
-            peripheral.disconnect().await?;
+            // Best-effort: a dead handle errors here; we still want to
+            // clear local state so the UI reflects "disconnected".
+            let disc_result = peripheral.disconnect().await;
             self.write_characteristic = None;
             self.battery_characteristic = None;
             self.connected_device_address = None;
@@ -318,6 +366,7 @@ impl BluetoothManager {
             self.v2_char_waveform_a = None;
             self.v2_char_waveform_b = None;
             println!("Disconnected from device");
+            disc_result?;
         }
         Ok(())
     }
@@ -369,6 +418,123 @@ pub async fn get_bluetooth_manager(
             Ok(tokio::sync::Mutex::new(manager))
         })
         .await
+}
+
+/// True if the error indicates the OS closed our BLE handle out from under
+/// us (device dropped, adapter reset, link supervision timeout). Match by
+/// string because btleplug returns a `Box<dyn Error>` here and the
+/// underlying variant is platform-specific (Windows: HRESULT 0x80000013;
+/// CoreBluetooth: "Peripheral is disconnected"; BlueZ: "Not connected").
+pub fn is_handle_dead(err: &(dyn Error + Send + Sync + 'static)) -> bool {
+    let s = err.to_string();
+    s.contains("object has been closed")
+        || s.contains("0x80000013")
+        || s.contains("NotConnected")
+        || s.contains("Not connected")
+        || s.contains("not connected")
+        || s.contains("Peripheral is disconnected")
+        || s.contains("device disconnected")
+        || s.contains("No device connected")
+}
+
+/// Spawn a one-shot reconnect attempt against the last successful target.
+/// Idempotent — a static guard prevents stacking multiple attempts. Honors
+/// `auto_reconnect`: if the user has explicitly disconnected, the task
+/// exits without retrying. Backs off 1s → 2s → 4s → … capped at 30s, with
+/// no overall retry cap (a stim device dropped overnight should still
+/// reconnect when it comes back).
+pub fn spawn_reconnect_attempt() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RECONNECTING: AtomicBool = AtomicBool::new(false);
+
+    if RECONNECTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut delay_ms: u64 = 1000;
+        loop {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+
+            let manager = match get_bluetooth_manager().await {
+                Ok(m) => m,
+                Err(e) => {
+                    println!("[reconnect] cannot get manager: {} — giving up", e);
+                    break;
+                }
+            };
+            let mut guard = manager.lock().await;
+
+            if !guard.auto_reconnect {
+                println!("[reconnect] auto-reconnect disabled — stopping");
+                break;
+            }
+            if guard.is_connected() {
+                // Something else (manual reconnect via UI) already restored it.
+                break;
+            }
+
+            let (adapter_index, address) = match guard.last_connection_target() {
+                Some(t) => t,
+                None => {
+                    println!("[reconnect] no last target — stopping");
+                    break;
+                }
+            };
+
+            println!("[reconnect] attempting reconnect to {}", address);
+
+            // Drop the cached peripheral so connect_device falls into the
+            // adapter-fallback path. Windows otherwise hands back the same
+            // BluetoothLEDevice instance whose radio link is dead — connect()
+            // returns Ok against the cache without actually re-linking, and
+            // every subsequent write errors HRESULT 0x80000013.
+            guard.discovered_peripherals.remove(&address);
+
+            let connect_result = guard.connect_device(adapter_index, &address).await;
+            if let Err(e) = connect_result {
+                drop(guard);
+                delay_ms = delay_ms.saturating_mul(2).min(30_000);
+                println!("[reconnect] connect failed: {} — retry in {}ms", e, delay_ms);
+                continue;
+            }
+
+            // connect_device returns Ok before the GATT link is necessarily
+            // live on Windows. Probe with a real read; if it fails we treat
+            // this whole attempt as failed so we don't flip the UI to
+            // connected and then immediately back. Small settle delay first
+            // gives the radio handshake time to land.
+            drop(guard);
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let manager2 = match get_bluetooth_manager().await {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            let mut guard = manager2.lock().await;
+
+            let battery_level = match guard.read_battery().await {
+                Ok(level) => level,
+                Err(e) => {
+                    println!(
+                        "[reconnect] connect ok but probe read failed: {} — treating as still down",
+                        e
+                    );
+                    guard.mark_disconnected();
+                    drop(guard);
+                    delay_ms = delay_ms.saturating_mul(2).min(30_000);
+                    continue;
+                }
+            };
+
+            drop(guard);
+            crate::device::reset_bf_snapshot().await;
+            crate::emit_connection_changed("bluetooth", true, Some(address.clone()));
+            crate::emit_battery_changed(battery_level);
+            println!("[reconnect] success (battery {}%)", battery_level);
+            break;
+        }
+        RECONNECTING.store(false, Ordering::SeqCst);
+    });
 }
 
 /// Spawn a background task that reads the battery level every 30 seconds

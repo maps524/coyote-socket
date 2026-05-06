@@ -139,18 +139,11 @@ pub async fn start_device_loop() {
                 break;
             }
 
-            // Note: axis updates are now pushed directly from T-Code/Buttplug handlers
-            // when input is received, not tied to 10Hz device loop
-
-            // Check if output is paused
-            let is_paused = crate::settings::get_output_paused().await;
-            if is_paused {
-                // When paused, don't send any commands to device
-                // The zero command was already sent when pausing
-                continue;
-            }
-
-            // Send to device (may fail if not connected)
+            // Always run send_device_update so telemetry events
+            // (`waveform-sample`, `resolved-update`) fire regardless of
+            // pause / connection state — the frontend's resolved-state
+            // indicators read those events. Pause + not-connected are
+            // checked inside; only the BLE writes are gated.
             if let Err(_e) = send_device_update().await {
                 // Silently ignore errors - device may not be connected
                 // The loop will keep trying
@@ -242,37 +235,27 @@ async fn send_device_update() -> Result<(), String> {
         .await
         .map_err(|e| format!("Bluetooth error: {}", e))?;
 
-    let manager_guard = manager.lock().await;
+    let mut manager_guard = manager.lock().await;
     let is_connected = manager_guard.is_connected();
-    let diag_active = crate::diagnostic::is_enabled();
+    let is_paused = crate::settings::get_output_paused().await;
     // Get the current engine settings
     let engine_type = {
         let state = get_processing_state().await.read().await;
         state.options.processing_engine
     };
 
-    // When not connected AND no diagnostic capture is running, take the
-    // cheap path: mark output disconnected and bail without advancing the
-    // engine. While diagnostic is active we run the engine anyway so the
-    // capture mirrors real tick behavior (V2 ramp advancement, V3
-    // lookahead buffer drain, etc.) — we just skip the BLE write at the end.
-    if !is_connected && !diag_active {
-        // Still update output storage to show disconnected state
-        let storage = get_last_output_storage().await;
-        let mut output = storage.write().await;
-        output.is_connected = false;
-        output.timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        if count % 100 == 0 {
-            println!(
-                "[DEBUG] Device loop running but not connected (count: {})",
-                count
-            );
-        }
-        return Err("Not connected".to_string());
+    // Sub G.3.0+ note: this function runs every tick regardless of
+    // connection / pause. Telemetry (`waveform-sample`,
+    // `resolved-update`) and engine advancement (V2 ramp, V3 lookahead,
+    // bp:-stash for the resolver telemetry pass) are unconditional;
+    // the BLE write at the end is the only path gated on
+    // `is_connected && !is_paused`. Frontend indicators stay live
+    // even when no device is hooked up or output is paused.
+    if count % 100 == 0 && !is_connected {
+        println!(
+            "[DEBUG] Device loop running but not connected (count: {})",
+            count
+        );
     }
 
     // Get next waveform data (consumes 4 values from queue per channel).
@@ -410,9 +393,10 @@ async fn send_device_update() -> Result<(), String> {
         freq_b,
     );
 
-    // BLE write path requires an actual connection. When running the engine
-    // purely for diagnostic capture, exit before touching Bluetooth.
-    if !is_connected {
+    // BLE write path requires an actual connection AND output not paused.
+    // Telemetry above (waveform-sample + resolved-update) already fired —
+    // only BLE writes are gated.
+    if !is_connected || is_paused {
         return Ok(());
     }
 
@@ -458,8 +442,22 @@ async fn send_device_update() -> Result<(), String> {
                         *device_state_ref.last_bf_sent.write().await = Some(desired_bf);
                     }
                     Err(e) => {
+                        // Dead-handle = OS closed our BLE link (device dropped /
+                        // adapter reset). Stop the loop hammering a closed
+                        // socket; mark disconnected, kick off reconnect, bail.
+                        if crate::bluetooth::is_handle_dead(&*e) {
+                            crate::log_warn!(
+                                "[V3] BF write hit dead BLE handle: {} — flipping to disconnected, will auto-reconnect",
+                                e
+                            );
+                            manager_guard.mark_disconnected();
+                            drop(manager_guard);
+                            crate::emit_connection_changed("bluetooth", false, None);
+                            crate::bluetooth::spawn_reconnect_attempt();
+                            return Err(format!("BLE handle closed: {}", e));
+                        }
                         println!("[DEBUG] V3 BF Write FAILED: {}", e);
-                        // Don't abort — fall through to B0 so output keeps flowing.
+                        // Transient error — fall through to B0.
                     }
                 }
             }
@@ -484,6 +482,17 @@ async fn send_device_update() -> Result<(), String> {
             match manager_guard.write_command(&command).await {
                 Ok(_) => Ok(()),
                 Err(e) => {
+                    if crate::bluetooth::is_handle_dead(&*e) {
+                        crate::log_warn!(
+                            "[V3] B0 write hit dead BLE handle: {} — flipping to disconnected, will auto-reconnect",
+                            e
+                        );
+                        manager_guard.mark_disconnected();
+                        drop(manager_guard);
+                        crate::emit_connection_changed("bluetooth", false, None);
+                        crate::bluetooth::spawn_reconnect_attempt();
+                        return Err(format!("BLE handle closed: {}", e));
+                    }
                     crate::log_error!("[V3] B0 Write FAILED: {}", e);
                     Err(format!("Write error: {}", e))
                 }
@@ -555,7 +564,20 @@ async fn send_device_update() -> Result<(), String> {
                 .await
             {
                 Ok(_) => Ok(()),
-                Err(e) => Err(format!("Write error: {}", e)),
+                Err(e) => {
+                    if crate::bluetooth::is_handle_dead(&*e) {
+                        crate::log_warn!(
+                            "[V2] write hit dead BLE handle: {} — flipping to disconnected, will auto-reconnect",
+                            e
+                        );
+                        manager_guard.mark_disconnected();
+                        drop(manager_guard);
+                        crate::emit_connection_changed("bluetooth", false, None);
+                        crate::bluetooth::spawn_reconnect_attempt();
+                        return Err(format!("BLE handle closed: {}", e));
+                    }
+                    Err(format!("Write error: {}", e))
+                }
             }
         }
     }
