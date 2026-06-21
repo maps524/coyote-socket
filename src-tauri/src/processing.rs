@@ -1670,7 +1670,15 @@ impl ProcessingState {
                     now_ms,
                     decay_ms,
                 );
-                let device = resolved.device_value.round().clamp(0.0, 200.0) as u8;
+                // Return the post-curve / post-transform value at FULL SCALE
+                // (0..200), pre-range — `device.rs::scale_intensity` maps it
+                // into [range_min, range_max] exactly once downstream, the
+                // same convention as the engine-tail path below. Returning
+                // `resolved.device_value` (already range-mapped by
+                // `resolve_link`) would double-apply the range, so a ranged
+                // Buttplug link output the wrong intensity.
+                let device =
+                    (resolved.normalized_pre_range * 200.0).round().clamp(0.0, 200.0) as u8;
                 ch.last_buttplug_replay_ts = now_ms;
                 // Hand off the resolved sample to sub G's telemetry path.
                 // For non-bp Linked / Static, the field stays at its
@@ -2126,6 +2134,45 @@ mod tests {
             .as_ref()
             .expect("post-transform sample stashed");
         assert!((sample.normalized_pre_range - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_bp_intensity_applies_range_once_not_twice() {
+        // Regression: the bp: branch returns the post-curve PRE-range value
+        // at full scale (normalized × 200), NOT resolve_link's already-ranged
+        // `device_value`. `device.rs::scale_intensity` applies the
+        // [range_min, range_max] mapping exactly once downstream. With range
+        // 0..100 and a full Position input (normalized 1.0):
+        //   correct  : branch → 200, scale_intensity(200, 0, 100) = 100
+        //   old (bug): branch → 100, scale_intensity(100, 0, 100) =  50  (twice)
+        let mut state = ProcessingState::default(); // no_input_behavior defaults to Hold
+        {
+            let ch = state.channel_mut(ChannelId::A);
+            ch.config.intensity.source_type = ParameterSourceType::Linked;
+            ch.config.intensity.source_axis = Some("bp:Position_0".to_string());
+            ch.config.intensity.range_min = 0.0;
+            ch.config.intensity.range_max = 100.0;
+            ch.config.intensity.curve = crate::modulation::CurveType::Linear;
+            ch.link_runtime.intensity =
+                crate::modulation::ParameterLinkRuntime::for_config(&ch.config.intensity);
+        }
+        let now = current_time_ms();
+        state.set_buttplug_feature("Position_0".to_string(), 1.0, now);
+
+        let (wf_a, _wf_b) = state.get_next_waveform_data();
+        assert_eq!(
+            wf_a.intensity, 200,
+            "bp: branch returns full-scale pre-range (normalized 1.0 × 200); \
+             range is applied once later in device.rs, not here"
+        );
+
+        // Telemetry stash stays normalized (pre-range), unaffected by the fix.
+        let sample = state
+            .channel(ChannelId::A)
+            .last_intensity_sample
+            .as_ref()
+            .expect("bp: sample stashed");
+        assert!((sample.normalized_pre_range - 1.0).abs() < 1e-9);
     }
 
     #[test]
