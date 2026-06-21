@@ -2,6 +2,7 @@
   export interface BluetoothDevice {
     address: string;
     name?: string;
+    product?: string;
     rssi?: number;
   }
 
@@ -12,12 +13,13 @@
 </script>
 
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { RefreshCw } from 'lucide-svelte';
   import Button from './ui/Button.svelte';
   import Select from './ui/Select.svelte';
   import Toggle from './ui/Toggle.svelte';
+  import StatusIndicator from './ui/StatusIndicator.svelte';
 
   export let compact = false;
   export let selectedInterface = 0;
@@ -29,47 +31,108 @@
   export let isConnected = false;  // Now a bindable prop from parent
 
   let bluetoothAdapters: string[] = [];
-  let bluetoothDevices: BluetoothDevice[] = savedDevices;
   let selectedDevice = savedSelectedDevice;
-  let isScanning = false;
   let connectionStatus = '';
   let adaptersLoaded = false;
+  let scanActive = false; // backend scan session running for this panel
 
-  // Pick up late `savedDevices` pushes from the parent — App.svelte's
-  // startup scan can finish after this panel mounts (e.g. user opens the
-  // popover before the 5s scan returns). Only fill in when our local list
-  // is empty, so we don't clobber a fresh manual scan from this panel.
-  $: if (savedDevices.length > 0 && bluetoothDevices.length === 0) {
-    bluetoothDevices = savedDevices;
-    if (!selectedDevice && savedSelectedDevice) {
-      selectedDevice = savedSelectedDevice;
-    }
+  // Devices are owned by the backend scan loop now; mirror the live,
+  // store-backed `savedDevices` prop straight through to the dropdown.
+  $: bluetoothDevices = savedDevices;
+
+  // Auto-select the first Coyote once one appears and nothing is chosen yet.
+  $: if (!selectedDevice && bluetoothDevices.length > 0) {
+    const coyote = bluetoothDevices.find(d =>
+      d.name?.includes('COYOTE') || d.name?.includes('DG-LAB') || d.name?.includes('47L')
+    );
+    if (coyote) selectedDevice = coyote.address;
   }
 
   $: if (isConnected && selectedDevice) {
     const device = bluetoothDevices.find(d => d.address === selectedDevice);
     if (device) {
-      connectionStatus = `Connected to ${device.name || 'Unknown Device'} (${device.address})`;
+      connectionStatus = `Connected to ${getDeviceDisplayName(device)}`;
     }
   }
 
+  // A usable adapter is one the OS actually reported (not the placeholder
+  // entry we substitute when btleplug finds nothing).
+  $: hasValidAdapter =
+    adaptersLoaded && bluetoothAdapters.length > 0 && bluetoothAdapters[0] !== 'No adapters found';
+
+  // Placeholder text shown inside the device dropdown while it's empty.
+  $: deviceStatusText = !adaptersLoaded
+    ? 'Waiting for interface…'
+    : !hasValidAdapter
+      ? 'No Bluetooth interface'
+      : scanActive
+        ? 'Scanning…'
+        : 'No devices found';
+
+  // Live activity state for the dot indicator next to the device label. The
+  // dot pulses the whole time the backend scan is active, so it reads as
+  // continuously scanning rather than flickering.
+  $: scanState = !adaptersLoaded
+    ? { label: 'Waiting for interface', state: 'idle' as const }
+    : !hasValidAdapter
+      ? { label: 'No interface', state: 'idle' as const }
+      : isConnected
+        ? { label: 'Connected', state: 'active' as const }
+        : scanActive
+          ? { label: 'Scanning', state: 'scanning' as const }
+          : autoScan
+            ? { label: 'Starting…', state: 'scanning' as const }
+            : { label: 'Auto-scan off', state: 'idle' as const };
+
+  // --- Backend-owned scanning ----------------------------------------------
+  // The backend runs the real scan loop and pushes `devices-discovered`
+  // events (mirrored into the store → `savedDevices`). This panel just turns
+  // that loop on while it's mounted/enabled and off otherwise — no frontend
+  // timer. In compact mode "mounted" means the output popover is open.
+  async function startScan() {
+    if (scanActive || !hasValidAdapter || isConnected) return;
+    scanActive = true; // set synchronously so the reactive can't double-fire
+    const adapterIndex = Number(selectedInterface) || 0;
+    try {
+      await invoke('start_device_scan', { adapterIndex });
+    } catch (error) {
+      scanActive = false;
+      console.error('Failed to start device scan:', error);
+    }
+  }
+
+  async function stopScan() {
+    if (!scanActive) return;
+    scanActive = false;
+    try {
+      await invoke('stop_device_scan');
+    } catch (error) {
+      console.error('Failed to stop device scan:', error);
+    }
+  }
+
+  // Drive the backend scan from live state: scan while enabled + idle, stop
+  // once connected or the user disables auto-scan. This is what makes the
+  // auto-scan toggle visibly do something.
+  $: if (adaptersLoaded) {
+    if (autoScan && hasValidAdapter && !isConnected) {
+      startScan();
+    } else {
+      stopScan();
+    }
+  }
+
+  onDestroy(() => {
+    stopScan();
+  });
+
   onMount(async () => {
-    // Load Bluetooth adapters on mount
+    // Load adapters; the reactive above starts the backend scan once loaded.
     await loadBTAdapters();
-    
-    // Restore saved devices if we have them
-    if (savedDevices.length > 0) {
-      bluetoothDevices = savedDevices;
-      selectedDevice = savedSelectedDevice;
-    }
-    
-    // Auto-scan if enabled and we have a valid adapter selected
-    if (autoScan && !compact && bluetoothAdapters.length > 0 && selectedInterface !== null && selectedInterface !== undefined) {
-      await scanForDevices();
-    }
   });
   
-  // Export current state for parent to save
+  // Export current state for parent to save. Devices are backend-owned, so we
+  // only carry the user's selection here.
   export function getState(): BluetoothPanelState {
     return {
       devices: bluetoothDevices,
@@ -77,14 +140,13 @@
     };
   }
 
-  // Export scan function for parent to trigger
+  // Export scan trigger for parent — ensures adapters are loaded, then kicks
+  // the backend scan loop.
   export async function triggerScan() {
     if (!adaptersLoaded) {
       await loadBTAdapters();
     }
-    if (bluetoothAdapters.length > 0 && bluetoothAdapters[0] !== 'No adapters found') {
-      await scanForDevices();
-    }
+    await startScan();
   }
 
   // Export function to check if adapters are loaded
@@ -111,48 +173,17 @@
     }
   }
   
-  async function scanForDevices() {
-    isScanning = true;
-    connectionStatus = 'Scanning for devices...';
-    
-    // Validate selectedInterface
-    console.log('selectedInterface value:', selectedInterface, 'type:', typeof selectedInterface);
-    const adapterIndex = selectedInterface === null || selectedInterface === undefined ? 0 : Number(selectedInterface);
-    console.log('adapterIndex after conversion:', adapterIndex);
-    
-    if (isNaN(adapterIndex) || adapterIndex < 0) {
-      console.error('Invalid adapter index:', selectedInterface);
-      connectionStatus = 'Please select a Bluetooth adapter';
-      isScanning = false;
-      return;
-    }
-    
+  // Manual refresh: (re)target the backend scan on the current adapter. With
+  // continuous scanning this is rarely needed, but the button stays for
+  // familiarity and to recover if a scan was stopped (e.g. after disconnect).
+  async function refreshScan() {
+    if (isConnected) return;
+    const adapterIndex = Number(selectedInterface) || 0;
     try {
-      bluetoothDevices = await invoke<BluetoothDevice[]>('scan_bluetooth_devices', {
-        adapterIndex: adapterIndex
-      });
-      
-      if (bluetoothDevices.length === 0) {
-        connectionStatus = 'No DG-LAB devices found';
-      } else {
-        connectionStatus = `Found ${bluetoothDevices.length} device${bluetoothDevices.length > 1 ? 's' : ''}`;
-        
-        // Auto-select first Coyote device found
-        const coyoteDevice = bluetoothDevices.find(d => 
-          d.name?.includes('COYOTE') || 
-          d.name?.includes('DG-LAB') || 
-          d.name?.includes('47L')
-        );
-        if (coyoteDevice) {
-          selectedDevice = coyoteDevice.address;
-        }
-      }
+      await invoke('start_device_scan', { adapterIndex });
+      scanActive = true;
     } catch (error) {
-      console.error('Failed to scan for devices:', error);
-      connectionStatus = `Scan failed: ${error}`;
-      bluetoothDevices = [];
-    } finally {
-      isScanning = false;
+      console.error('Failed to refresh scan:', error);
     }
   }
 
@@ -203,8 +234,14 @@
   }
 
   function getDeviceDisplayName(device: BluetoothDevice): string {
-    const name = device.name || 'Unknown Device';
-    return `${name} - ${device.address}`;
+    // Prefer the friendly product label (e.g. "Coyote 3.0"), appending the
+    // raw advertised id when it adds information; fall back to name, then
+    // address when the peripheral advertised nothing useful.
+    if (device.product) {
+      const id = device.name && device.name !== device.product ? ` · ${device.name}` : '';
+      return `${device.product}${id}`;
+    }
+    return device.name || device.address;
   }
 
   async function handleInterfaceChange(event: Event) {
@@ -216,11 +253,17 @@
 
     // Reset device selection when changing interface
     selectedDevice = '';
-    bluetoothDevices = [];
 
-    // Auto-scan on interface change if valid interface is selected
-    if (bluetoothAdapters.length > 0 && selectedInterface >= 0 && selectedInterface < bluetoothAdapters.length) {
-      await scanForDevices();
+    // Retarget the backend scan onto the newly selected adapter (it reads the
+    // target live, so a re-issue is enough — no need to stop first).
+    if (!isConnected && selectedInterface >= 0 && selectedInterface < bluetoothAdapters.length) {
+      const adapterIndex = Number(selectedInterface) || 0;
+      try {
+        await invoke('start_device_scan', { adapterIndex });
+        scanActive = true;
+      } catch (error) {
+        console.error('Failed to retarget scan:', error);
+      }
     }
   }
 </script>
@@ -233,7 +276,7 @@
   <div class="space-y-4">
     <!-- Bluetooth Adapter Selection -->
     <div class="space-y-2">
-      <label class="text-sm font-medium">Available Bluetooth Interfaces:</label>
+      <label class="text-sm font-medium">Available Bluetooth Interfaces</label>
       <div class="flex gap-2">
         <select
           value={selectedInterface}
@@ -249,11 +292,11 @@
             {/each}
           {/if}
         </select>
-        <Button 
-          variant="outline" 
+        <Button
+          variant="outline"
           size="icon"
           on:click={loadBTAdapters}
-          disabled={isScanning}
+          disabled={isConnected}
           class="h-10 w-10"
         >
           <RefreshCw class="h-4 w-4" />
@@ -263,25 +306,28 @@
 
     <!-- Found Devices -->
     <div class="space-y-2">
-      <label class="text-sm font-medium">Bluetooth Devices Found:</label>
+      <div class="flex items-center justify-between">
+        <label class="text-sm font-medium">Bluetooth Devices Found</label>
+        <StatusIndicator label={scanState.label} state={scanState.state} />
+      </div>
       <div class="flex gap-2">
         <Select bind:value={selectedDevice} disabled={bluetoothDevices.length === 0} class="flex-1">
           {#if bluetoothDevices.length === 0}
-            <option value="">No devices found - Click scan</option>
+            <option value="">{deviceStatusText}</option>
           {:else}
             {#each bluetoothDevices as device}
               <option value={device.address}>{getDeviceDisplayName(device)}</option>
             {/each}
           {/if}
         </Select>
-        <Button 
-          variant="outline" 
+        <Button
+          variant="outline"
           size="icon"
-          on:click={scanForDevices}
-          disabled={isScanning}
+          on:click={refreshScan}
+          disabled={isConnected}
           class="h-10 w-10"
         >
-          <RefreshCw class="h-4 w-4" />
+          <RefreshCw class="h-4 w-4 {scanActive ? 'animate-spin' : ''}" />
         </Button>
       </div>
     </div>
@@ -289,12 +335,12 @@
     {#if !compact}
       <!-- Action Buttons -->
       <div class="grid grid-cols-2 gap-2">
-        <Button 
-          on:click={scanForDevices}
-          disabled={isScanning}
+        <Button
+          on:click={refreshScan}
+          disabled={isConnected}
           variant="outline"
         >
-          {isScanning ? 'Scanning...' : 'Scan for Devices'}
+          {scanActive ? 'Scanning…' : 'Scan for Devices'}
         </Button>
         
         <Button 

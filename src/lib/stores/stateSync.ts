@@ -23,6 +23,7 @@ import { invoke } from '@tauri-apps/api/core';
 export interface BluetoothDevice {
   address: string;
   name: string | null;
+  product: string | null;
   rssi: number | null;
 }
 
@@ -69,6 +70,11 @@ interface BatteryChangedPayload {
   timestamp: number;
 }
 
+interface DevicesDiscoveredPayload {
+  devices: BluetoothDevice[];
+  timestamp: number;
+}
+
 // ============================================================================
 // Connection State Store
 // ============================================================================
@@ -88,6 +94,7 @@ export const connectionState = writable<ConnectionStatus>({
 
 let connectionChangedUnlisten: UnlistenFn | null = null;
 let batteryChangedUnlisten: UnlistenFn | null = null;
+let devicesDiscoveredUnlisten: UnlistenFn | null = null;
 let isStateSyncActive = false;
 
 /**
@@ -139,6 +146,18 @@ export async function startStateSync(): Promise<void> {
       }
     );
 
+    // Listen for discovered-device pushes from the backend scan loop. The
+    // backend owns scanning; we just mirror its results into the store.
+    devicesDiscoveredUnlisten = await listen<DevicesDiscoveredPayload>(
+      'devices-discovered',
+      (event) => {
+        connectionState.update(state => ({
+          ...state,
+          discovered_devices: event.payload.devices,
+        }));
+      }
+    );
+
     console.log('[StateSync] Event listeners started');
   } catch (e) {
     console.error('[StateSync] Failed to start event listeners:', e);
@@ -161,6 +180,11 @@ export function stopStateSync(): void {
   if (batteryChangedUnlisten) {
     batteryChangedUnlisten();
     batteryChangedUnlisten = null;
+  }
+
+  if (devicesDiscoveredUnlisten) {
+    devicesDiscoveredUnlisten();
+    devicesDiscoveredUnlisten = null;
   }
 
   console.log('[StateSync] Event listeners stopped');

@@ -6,6 +6,7 @@
   interface BluetoothDevice {
     address: string;
     name?: string;
+    product?: string;
     rssi?: number;
   }
 
