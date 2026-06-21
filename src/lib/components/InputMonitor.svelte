@@ -99,10 +99,11 @@
   }
 
   // Reactive: whenever the bus map changes, recompute the three display
-  // lists. The bus store is per-write so it updates at full input cadence;
-  // Svelte's reactive batching collapses bursty arrivals into one paint per
-  // frame without a manual RAF loop. Sticky keys preserve last-known
-  // entries so a Stop command's bus clear doesn't collapse the section.
+  // lists. `inputBus` rAF-coalesces its writes (see inputBus.ts), so this
+  // block runs at most once per painted frame even when the backend emits
+  // hundreds of `bus-update` events per second — the recompute cost is
+  // per-frame, not per-event. Sticky keys preserve last-known entries so a
+  // Stop command's bus clear doesn't collapse the section.
   $: {
     const networkLive: Record<string, number> = {};
     const gamepadLive: Record<string, number> = {};

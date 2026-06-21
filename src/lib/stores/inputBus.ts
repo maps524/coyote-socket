@@ -12,8 +12,23 @@
  * partitions by prefix; the transforms editor's axis discovery dropdown
  * (G.3.2) lists every observed axis. RAF smoothing isn't applied here —
  * sub G.1's `resolvedState.ts` is the post-curve view that needs
- * smoothing; the bus store is raw and per-write so consumers that want
- * smoothing can RAF-interpolate themselves.
+ * smoothing; the bus store is raw so consumers that want smoothing can
+ * RAF-interpolate themselves.
+ *
+ * **Writes are rAF-coalesced.** `bus-update` fires once per axis write —
+ * tens to hundreds per second at Buttplug/T-Code cadence. Pushing each
+ * one straight into the store made every subscriber (the `knownAxes`
+ * re-sort, the InputMonitor recompute, all 8 `RangeSliderWithIndicator`
+ * axis-group derivations) re-run per event, so the UI got progressively
+ * laggier the longer a session ran (and a refresh "fixed" it by resetting
+ * the in-memory churn). We now buffer incoming writes keyed by axis and
+ * flush the batch into the store at most once per animation frame, so
+ * every consumer updates once per painted frame regardless of input
+ * cadence. The buffer is keyed by axis name, so it's bounded by the axis
+ * count (~20), and a later write to the same axis within a frame simply
+ * overwrites the earlier one — only the freshest value per axis is kept.
+ * Coalescing is purely a render concern; the device output is computed in
+ * the backend and never touches this store.
  */
 import { writable, derived, type Readable } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -36,16 +51,39 @@ const axes = writable<Record<string, AxisValue>>({});
 let unlistenFn: UnlistenFn | null = null;
 let isTracking = false;
 
+// rAF-coalescing buffer: writes accumulate here keyed by axis and flush to
+// the store once per frame. `null` means no writes are pending.
+let pending: Record<string, AxisValue> | null = null;
+let rafId: number | null = null;
+
+function flushPending(): void {
+  rafId = null;
+  if (pending === null) return;
+  const batch = pending;
+  pending = null;
+  axes.update((current) => ({ ...current, ...batch }));
+}
+
+function scheduleFlush(): void {
+  if (rafId !== null) return; // a frame is already queued — coalesce into it
+  if (typeof requestAnimationFrame === 'undefined') {
+    // Non-browser fallback (e.g. test/SSR): apply immediately.
+    flushPending();
+    return;
+  }
+  rafId = requestAnimationFrame(flushPending);
+}
+
 function handleBusUpdate(payload: BusUpdatePayload) {
   if (!isTracking) return;
-  axes.update((current) => ({
-    ...current,
-    [payload.axis]: {
-      value: payload.value,
-      timestamp_ms: payload.timestamp_ms,
-      interval_ms: payload.interval_ms
-    }
-  }));
+  if (pending === null) pending = {};
+  // Last write per axis within the frame wins.
+  pending[payload.axis] = {
+    value: payload.value,
+    timestamp_ms: payload.timestamp_ms,
+    interval_ms: payload.interval_ms
+  };
+  scheduleFlush();
 }
 
 /**
@@ -72,6 +110,13 @@ export function stopInputBusTracking(): void {
     unlistenFn();
     unlistenFn = null;
   }
+  // Drop any queued frame + buffered writes so a stopped listener can't
+  // flush stale data after teardown.
+  if (rafId !== null && typeof cancelAnimationFrame !== 'undefined') {
+    cancelAnimationFrame(rafId);
+  }
+  rafId = null;
+  pending = null;
 }
 
 /**
@@ -80,6 +125,8 @@ export function stopInputBusTracking(): void {
  * session.
  */
 export function clearInputBus(): void {
+  // Drop buffered writes too — a clear supersedes anything queued this frame.
+  pending = null;
   axes.set({});
 }
 
@@ -88,6 +135,12 @@ export function clearInputBus(): void {
  * `InputBus::clear_prefix` for the frontend's last-known-value Map.
  */
 export function clearInputBusPrefix(prefix: string): void {
+  // Also drop matching buffered writes so they don't repopulate after clear.
+  if (pending !== null) {
+    for (const k of Object.keys(pending)) {
+      if (k.startsWith(prefix)) delete pending[k];
+    }
+  }
   axes.update((current) => {
     const next: Record<string, AxisValue> = {};
     for (const [k, v] of Object.entries(current)) {
