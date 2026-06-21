@@ -169,14 +169,24 @@ fn build_channel_snapshot(
     let range_min = ch.config.intensity.range_min as u8;
     let range_max = ch.config.intensity.range_max as u8;
 
-    let freq_sample = resolve_link(
-        &ch.config.frequency,
-        &mut ch.link_runtime.frequency,
-        bus,
-        no_input_behavior,
-        now,
-        decay_ms,
-    );
+    // Frequency: prefer the per-slot pass's stashed sample.
+    // `get_per_slot_frequencies` runs first in the device tick and is the
+    // authoritative advancer of `link_runtime.frequency` (four chronological
+    // sub-slot steps). Re-resolving here would advance a stateful frequency
+    // transform a fifth, out-of-order time and desync the snapshot from the
+    // value the device receives. The in-crate test helper has no per-slot
+    // pass, so fall back to a direct resolve when the stash is empty — same
+    // pattern as `last_intensity_sample` below.
+    let freq_sample = ch.last_frequency_sample.take().unwrap_or_else(|| {
+        resolve_link(
+            &ch.config.frequency,
+            &mut ch.link_runtime.frequency,
+            bus,
+            no_input_behavior,
+            now,
+            decay_ms,
+        )
+    });
     let freq_bal_sample = resolve_link(
         &ch.config.frequency_balance,
         &mut ch.link_runtime.frequency_balance,
@@ -311,7 +321,7 @@ pub async fn get_per_slot_frequencies(window_start: u64) -> ([f64; 4], [f64; 4])
         let mut out = [0.0f64; 4];
         for i in 0..4 {
             let target = window_start + (i as u64) * 25;
-            out[i] = resolve_link_at_time(
+            let sample = resolve_link_at_time(
                 &ch.config.frequency,
                 &mut ch.link_runtime.frequency,
                 bus,
@@ -319,9 +329,16 @@ pub async fn get_per_slot_frequencies(window_start: u64) -> ([f64; 4], [f64; 4])
                 now,
                 decay_ms,
                 target,
-            )
-            .device_value
-            .clamp(1.0, 200.0);
+            );
+            out[i] = sample.device_value.clamp(1.0, 200.0);
+            // The latest sub-slot (closest to `now`) is authoritative for
+            // the telemetry snapshot and the V2 scalar frequency. Stash it
+            // so `build_channel_snapshot` consumes it instead of calling
+            // `resolve_link` again — a second, out-of-order advance of a
+            // stateful frequency transform's state.
+            if i == 3 {
+                ch.last_frequency_sample = Some(sample);
+            }
         }
         out
     };
@@ -556,6 +573,63 @@ mod tests {
         assert!(matches!(
             ch.link_runtime.intensity.transform_state[0],
             crate::transforms::TransformState::Vibrate { last_target: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn snapshot_consumes_frequency_stash_without_readvancing_transform() {
+        // Frequency is uniquely double-resolved per tick:
+        // `get_per_slot_frequencies` advances `link_runtime.frequency` four
+        // times (one per 25ms sub-slot) and stashes its latest sample;
+        // `build_channel_snapshot` must CONSUME that stash, not call
+        // `resolve_link` again. A second, out-of-order resolve at `now`
+        // would advance a stateful Smooth/Vibrate frequency transform a
+        // fifth time and desync the snapshot from the value the device
+        // actually receives. This pins the single-advance contract.
+        let mut freq_cfg =
+            ParameterLinkConfig::linked_source("L0", 1.0, 200.0, CurveType::Linear);
+        freq_cfg.transforms = vec![TransformConfig::Smooth {
+            time_constant_ms: 100.0,
+        }];
+        let mut ch = Channel::new(ChannelId::A);
+        ch.link_runtime.frequency = ParameterLinkRuntime::for_config(&freq_cfg);
+        ch.config.frequency = freq_cfg;
+
+        // Simulate the per-slot pass having stashed its last sample.
+        ch.last_frequency_sample = Some(ResolvedSample {
+            raw_input: 0.6,
+            normalized_pre_range: 0.6,
+            device_value: 120.0,
+            target_time_ms: 1_975,
+            source_axis: Some("L0".into()),
+        });
+
+        // A bus value that would resolve to something very different if a
+        // stray re-resolve ran instead of consuming the stash.
+        let mut bus = InputBus::new();
+        bus.update("L0", 0.9, 2_000, None);
+
+        let (params, snap) = build_channel_snapshot(
+            &mut ch,
+            &bus,
+            &NoInputBehavior::Hold,
+            1000,
+            ProcessingEngineType::V2Balanced,
+            2_000,
+        );
+
+        // Device scalar + telemetry both read the stash, not a fresh resolve.
+        assert!((params.frequency - 120.0).abs() < 1e-9);
+        assert!((snap.frequency.device_value - 120.0).abs() < 1e-9);
+        assert_eq!(snap.frequency.target_time_ms, 1_975);
+        // Stash consumed.
+        assert!(ch.last_frequency_sample.is_none());
+        // The Smooth transform state was NOT advanced — `resolve_link`
+        // never ran for frequency this pass (last_ts would be non-zero if
+        // it had).
+        assert!(matches!(
+            ch.link_runtime.frequency.transform_state[0],
+            crate::transforms::TransformState::Smooth { last_ts: 0, .. }
         ));
     }
 

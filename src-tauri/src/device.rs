@@ -265,16 +265,16 @@ async fn send_device_update() -> Result<(), String> {
     // phase / smoothing state).
     let (waveform_a, waveform_b) = get_next_waveform_data().await;
 
-    // Resolved channel parameters + telemetry snapshots in one pass.
-    // Frequency / balance always run through the resolver; intensity
-    // is sourced from the bp-path stash for `bp:` links and synthesized
-    // from the engine output / static value otherwise.
-    let ((params_a, params_b), (resolved_a, resolved_b)) =
-        get_resolved_channel_params().await;
-
     // Per-slot frequency arrays for V3 B0. Window starts 100ms before now so
     // the 4 slots land at now-100, now-75, now-50, now-25 (matching the axis
     // history timeline). For V2 we keep the scalar `params_a.frequency`.
+    //
+    // This MUST run before `get_resolved_channel_params`: the per-slot pass
+    // is the authoritative advancer of each channel's `link_runtime.frequency`
+    // transform state (four chronological 25ms sub-steps) and stashes its
+    // latest sample on the channel. The telemetry pass below then reads that
+    // stash instead of re-resolving frequency, which would advance a stateful
+    // frequency transform a fifth, out-of-order time per tick.
     let window_start_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -282,6 +282,14 @@ async fn send_device_update() -> Result<(), String> {
         - 100;
     let (freq_slots_a_hz, freq_slots_b_hz) =
         crate::resolver::get_per_slot_frequencies(window_start_ms).await;
+
+    // Resolved channel parameters + telemetry snapshots in one pass.
+    // Frequency is sourced from the per-slot stash above; balance always
+    // runs through the resolver; intensity is sourced from the bp-path stash
+    // for `bp:` links and synthesized from the engine output / static value
+    // otherwise.
+    let ((params_a, params_b), (resolved_a, resolved_b)) =
+        get_resolved_channel_params().await;
 
     // V2 path uses the scalar `params_a/b.frequency` directly via
     // `freq_to_v2_xy`; V3 uses the per-slot arrays computed above. No need

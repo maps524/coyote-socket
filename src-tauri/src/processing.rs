@@ -1244,6 +1244,20 @@ pub struct Channel {
     /// telemetry pass to synthesize from V2/V3 instead of using the
     /// resolver's output.
     pub(crate) last_intensity_sample: Option<crate::modulation::ResolvedSample>,
+
+    /// Frequency resolver output stashed by `get_per_slot_frequencies`
+    /// for the telemetry pass to consume, mirroring
+    /// `last_intensity_sample`. Frequency is uniquely double-resolved
+    /// per tick: the per-slot pass advances `link_runtime.frequency`
+    /// four times (one per 25ms sub-slot, for V3's B0 sweep) and the
+    /// telemetry pass would advance it a fifth time at `now` if it
+    /// re-ran `resolve_link`. For a stateful frequency transform
+    /// (Smooth / Hold / Vibrate / …) that fifth, out-of-order advance
+    /// corrupts the phase/smoothing state and desyncs the snapshot from
+    /// the value the device actually receives. The per-slot pass is
+    /// authoritative — it stashes its last (latest-target) sample here
+    /// and `build_channel_snapshot` reads it instead of re-resolving.
+    pub(crate) last_frequency_sample: Option<crate::modulation::ResolvedSample>,
 }
 
 impl Channel {
@@ -1263,6 +1277,7 @@ impl Channel {
             last_intensity_replay_ts: 0,
             last_buttplug_replay_ts: 0,
             last_intensity_sample: None,
+            last_frequency_sample: None,
         }
     }
 
