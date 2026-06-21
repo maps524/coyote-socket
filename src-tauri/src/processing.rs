@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use crate::input_bus::InputBus;
 use crate::modulation::{
     resolve_link, ChannelConfig, ChannelLinkRuntime, NoInputBehavior, ParameterSourceType,
+    ResolvedSample,
 };
 
 lazy_static::lazy_static! {
@@ -1375,6 +1376,76 @@ impl Channel {
             _ => self.v2.get_value_at(now) as f64 / 200.0,
         }
     }
+
+    /// Run the intensity link's transform chain as a tail on the engine's
+    /// ramped, post-curve master value `base` (normalized 0..1), for
+    /// T-Code / gamepad intensity links that carry transforms.
+    ///
+    /// Ordering mirrors `resolve_link`'s transform stage exactly:
+    /// transforms operate on the post-curve, normalized value and run
+    /// **before** range mapping (range stays in `device.rs::scale_intensity`
+    /// for the engine path, so it is applied once, not twice). Modifier
+    /// axes are pre-fetched from the bus at the link's `now - delay_ms`
+    /// target — a transform never reads the bus directly — and stateful
+    /// transforms thread through `link_runtime.intensity`, advancing once
+    /// per device tick.
+    ///
+    /// Side effect: stashes a post-transform `ResolvedSample` in
+    /// `last_intensity_sample` so the telemetry snapshot — and therefore
+    /// the frontend's post-transform position line — reflects the shaped
+    /// value, the same hand-off the `bp:` path uses. Returns the shaped
+    /// 0..1 value (pre-range).
+    fn apply_intensity_transforms(&mut self, base: f64, bus: &InputBus, now_ms: u64) -> f64 {
+        use crate::transforms::apply_transform;
+
+        let delay = self.config.intensity.delay_ms.unwrap_or(0) as u64;
+        let target = now_ms.saturating_sub(delay);
+
+        // Keep the runtime transform-state vector in lockstep with config —
+        // the same reconciliation `resolve_link_at_time` performs, so a
+        // config swap that hasn't refreshed the runtime yet can't panic.
+        if self.link_runtime.intensity.transform_state.len() != self.config.intensity.transforms.len()
+        {
+            self.link_runtime.intensity.transform_state = self
+                .config
+                .intensity
+                .transforms
+                .iter()
+                .map(|t| t.initial_state())
+                .collect();
+        }
+
+        let mut shaped = base.clamp(0.0, 1.0);
+        for (i, tcfg) in self.config.intensity.transforms.iter().enumerate() {
+            let modifiers: Vec<f64> = tcfg
+                .declared_axes()
+                .iter()
+                .map(|axis| bus.value_at(axis, target).unwrap_or(0.0))
+                .collect();
+            shaped = apply_transform(
+                tcfg,
+                &mut self.link_runtime.intensity.transform_state[i],
+                shaped,
+                &modifiers,
+                target,
+            );
+        }
+        let shaped = shaped.clamp(0.0, 1.0);
+
+        let axis_name = self.config.intensity.source_axis.clone();
+        let raw_input = axis_name
+            .as_deref()
+            .and_then(|a| bus.value_at(a, target))
+            .unwrap_or(base);
+        self.last_intensity_sample = Some(ResolvedSample {
+            raw_input,
+            normalized_pre_range: shaped,
+            device_value: shaped * 200.0,
+            target_time_ms: target,
+            source_axis: axis_name,
+        });
+        shaped
+    }
 }
 
 // ============================================================================
@@ -1534,15 +1605,18 @@ impl ProcessingState {
     ///   streams arrive at irregular cadence and don't need the
     ///   ramp/lookahead engines were built for. Replaces the pre-sub-E
     ///   `process_buttplug_pipeline` short-circuit.
-    /// - **Linked, T-Code / gamepad axis**: keeps the V2/V3 engine path,
-    ///   fed by `replay_pending_intensity_samples`. Any `transforms`
-    ///   attached to a non-`bp:` intensity link are silently ignored
-    ///   here — sub G unifies the engine path with the resolver and
-    ///   either runs transforms inline with engine output or synthesizes
-    ///   a `ResolvedSample` from V2/V3 state for the
-    ///   `resolved-update` event. Until then, attaching a transform to a
-    ///   T-Code intensity link is a no-op so it can't accidentally
-    ///   disable V2 ramping / V3 lookahead.
+    /// - **Linked, T-Code / gamepad axis, no transforms**: keeps the
+    ///   V2/V3 engine path, fed by `replay_pending_intensity_samples`.
+    ///   Pure engine output, range applied in `device.rs`.
+    /// - **Linked, T-Code / gamepad axis, with transforms**: the engine
+    ///   still produces the ramped base value (ramping / lookahead are
+    ///   preserved), then `apply_intensity_transforms` runs the transform
+    ///   chain as a TAIL on the engine's post-curve master. Transforms
+    ///   therefore apply to *every* input type, not just Buttplug. The
+    ///   four per-slot values collapse to the shaped master (one value per
+    ///   tick — same shape the `bp:` path emits — so a stateful transform
+    ///   advances exactly once per tick); sub-slot ramp detail is
+    ///   intentionally dropped once a transform is attached.
     pub fn get_next_waveform_data(&mut self) -> (WaveformData, WaveformData) {
         let now_ms = current_time_ms();
         // Drain pending TCode samples (with optional delay) into engine state
@@ -1572,14 +1646,13 @@ impl ProcessingState {
                 return intensity_to_values(static_val.round().clamp(0.0, 200.0) as u8);
             }
 
-            // Sub E gate: only `bp:`-namespaced intensity links route
-            // through the resolver. T-Code / gamepad links keep the
-            // engine path even if they happen to carry a `transforms`
-            // entry, otherwise a user attaching Smooth or Hold to T-Code
-            // intensity would silently disable the V2/V3 sample
-            // ingestion. Sub G is where the engine and resolver paths
-            // unify; until then, this gate enforces "Buttplug → resolver,
-            // T-Code → engine" without semantic surprises.
+            // `bp:`-namespaced links run the unified resolver wholesale:
+            // Buttplug feature streams arrive at irregular cadence, so the
+            // ramp/lookahead engines add nothing. T-Code / gamepad links
+            // instead keep the engine for the BASE value and run any
+            // transforms as a tail below (see `apply_intensity_transforms`)
+            // — that's how transforms reach every input type without
+            // disabling V2 ramping / V3 lookahead.
             let routes_through_resolver = ch
                 .config
                 .intensity
@@ -1607,11 +1680,30 @@ impl ProcessingState {
                 return intensity_to_values(device);
             }
 
-            // Engine path or static — clear any stale bp-path sample so
-            // the telemetry helper doesn't show a sample from before
-            // the user switched the link source axis.
-            ch.last_intensity_sample = None;
-            ch.next_raw_values(engine, window_start, now_ms, peak_fill)
+            // Engine path (T-Code / gamepad). Advance the engines (V3
+            // buffer consumption / downsampler) and read the ramped
+            // per-slot values regardless of whether transforms are
+            // attached, so engine state stays correct.
+            let slots = ch.next_raw_values(engine, window_start, now_ms, peak_fill);
+
+            if ch.config.intensity.transforms.is_empty() {
+                // No transforms — pure engine output. Clear any stale
+                // bp-path sample so the telemetry helper synthesizes from
+                // engine state instead of showing a sample from before the
+                // user switched the link source axis.
+                ch.last_intensity_sample = None;
+                return slots;
+            }
+
+            // Transforms attached to a T-Code / gamepad intensity link:
+            // run the chain as a tail on the engine's ramped master and
+            // emit it flat across the four slots (matching the bp: path).
+            // `apply_intensity_transforms` also stashes the post-transform
+            // `ResolvedSample` for the telemetry / frontend position line.
+            let base = ch.current_intensity_normalized(engine, now_ms);
+            let shaped = ch.apply_intensity_transforms(base, bus, now_ms);
+            let device = (shaped * 200.0).round().clamp(0.0, 200.0) as u8;
+            intensity_to_values(device)
         });
 
         let mut wf_a = WaveformData::from_values(raw[0]);
@@ -1962,6 +2054,78 @@ mod tests {
 
         // V3 command buffer should have one entry
         assert_eq!(ch.v3.buffer_size(), 1);
+    }
+
+    #[test]
+    fn test_apply_intensity_transforms_scales_and_stashes() {
+        // Transforms on a T-Code intensity link run as a tail on the
+        // engine's post-curve master, BEFORE range mapping. Scale 0.5 on
+        // base 0.8 → 0.4.
+        let mut ch = Channel::new(ChannelId::A);
+        ch.config.intensity.transforms =
+            vec![crate::transforms::TransformConfig::Scale { factor: 0.5 }];
+        let bus = crate::input_bus::InputBus::new();
+
+        let shaped = ch.apply_intensity_transforms(0.8, &bus, 1000);
+        assert!((shaped - 0.4).abs() < 1e-9, "expected 0.4, got {}", shaped);
+
+        // The post-transform sample is stashed for telemetry / the frontend
+        // position line: normalized_pre_range is the shaped (pre-range)
+        // value, device_value is shaped × 200.
+        let sample = ch
+            .last_intensity_sample
+            .as_ref()
+            .expect("post-transform sample stashed");
+        assert!((sample.normalized_pre_range - 0.4).abs() < 1e-9);
+        assert!((sample.device_value - 80.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_apply_intensity_transforms_clamp() {
+        let mut ch = Channel::new(ChannelId::A);
+        ch.config.intensity.transforms =
+            vec![crate::transforms::TransformConfig::Clamp { min: 0.2, max: 0.6 }];
+        let bus = crate::input_bus::InputBus::new();
+
+        assert!((ch.apply_intensity_transforms(0.9, &bus, 1000) - 0.6).abs() < 1e-9);
+        assert!((ch.apply_intensity_transforms(0.1, &bus, 1100) - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_engine_intensity_link_with_transform_shapes_output() {
+        // End-to-end through get_next_waveform_data: a T-Code intensity
+        // link with a Scale 0.5 transform keeps the V2 ramp engine for the
+        // base value (0.8 → 160) and applies the transform as a tail
+        // (→ 80), proving transforms reach non-bp inputs WITHOUT bypassing
+        // the engine.
+        let mut state = ProcessingState::default();
+        {
+            let ch = state.channel_mut(ChannelId::A);
+            ch.config.intensity.source_type = ParameterSourceType::Linked;
+            ch.config.intensity.source_axis = Some("L0".to_string());
+            ch.config.intensity.range_min = 0.0;
+            ch.config.intensity.range_max = 200.0;
+            ch.config.intensity.curve = crate::modulation::CurveType::Linear;
+            ch.config.intensity.transforms =
+                vec![crate::transforms::TransformConfig::Scale { factor: 0.5 }];
+            // Settle the V2 ramp at 0.8 (×200 = 160) via an instant target
+            // in the past so get_value_at(now) returns it deterministically.
+            ch.apply_tcode(0.8, Some(0), 1);
+            assert_eq!(ch.v2.target_value, 160);
+        }
+
+        let (wf_a, _wf_b) = state.get_next_waveform_data();
+        // Without the transform the master would be 160; Scale 0.5 → 80.
+        assert_eq!(wf_a.intensity, 80, "engine base 160 × Scale 0.5 → 80");
+
+        // Telemetry stash carries the post-transform value so the frontend
+        // renders the position line after the transform.
+        let sample = state
+            .channel(ChannelId::A)
+            .last_intensity_sample
+            .as_ref()
+            .expect("post-transform sample stashed");
+        assert!((sample.normalized_pre_range - 0.4).abs() < 1e-9);
     }
 
     #[test]
