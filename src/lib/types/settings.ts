@@ -170,7 +170,8 @@ export function parameterSourceToSettings(source: ParameterSource): ParameterSou
         curveStrength: source.curveStrength ?? 2.0,
         midpoint: source.midpoint,
         delayEnabled: source.delayMs !== undefined,
-        delayMs: source.delayMs ?? 0
+        delayMs: source.delayMs ?? 0,
+        transforms: source.transforms
     };
 }
 
@@ -187,7 +188,8 @@ export function settingsToParameterSource(settings: ParameterSourceSettings): Pa
         curve: settings.curve as CurveType,
         curveStrength: settings.curveStrength,
         midpoint: settings.midpoint,
-        delayMs: settings.delayEnabled ? (settings.delayMs ?? 0) : undefined
+        delayMs: settings.delayEnabled ? (settings.delayMs ?? 0) : undefined,
+        transforms: settings.transforms
     };
 }
 

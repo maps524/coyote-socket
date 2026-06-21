@@ -306,6 +306,7 @@
   $: bluetoothDevicesForComponents = $connectionState.discovered_devices.map(d => ({
     address: d.address,
     name: d.name ?? undefined,
+    product: d.product ?? undefined,
     rssi: d.rssi ?? undefined
   }));
 
@@ -766,46 +767,50 @@
     ch: import('./lib/stores/channels.js').ChannelParams,
     defaultAxis: 'L0' | 'R2'
   ) {
+    // Spread each source first, then backfill defaults for missing fields.
+    // The spread carries every optional field (midpoint, delayMs, transforms,
+    // and anything added later) so the persist payload can't silently drop a
+    // field the source type gains.
     return {
       frequencySource: {
+        ...ch.frequencySource,
         type: ch.frequencySource?.type ?? 'static',
         staticValue: ch.frequencySource?.staticValue ?? ch.frequency,
         sourceAxis: ch.frequencySource?.sourceAxis ?? defaultAxis,
         rangeMin: ch.frequencySource?.rangeMin ?? 1,
         rangeMax: ch.frequencySource?.rangeMax ?? 200,
         curve: ch.frequencySource?.curve ?? 'linear',
-        curveStrength: ch.frequencySource?.curveStrength ?? 2.0,
-        transforms: ch.frequencySource?.transforms
+        curveStrength: ch.frequencySource?.curveStrength ?? 2.0
       },
       frequencyBalanceSource: {
+        ...ch.frequencyBalanceSource,
         type: ch.frequencyBalanceSource?.type ?? 'static',
         staticValue: ch.frequencyBalanceSource?.staticValue ?? ch.frequencyBalance,
         sourceAxis: ch.frequencyBalanceSource?.sourceAxis ?? defaultAxis,
         rangeMin: ch.frequencyBalanceSource?.rangeMin ?? 0,
         rangeMax: ch.frequencyBalanceSource?.rangeMax ?? 255,
         curve: ch.frequencyBalanceSource?.curve ?? 'linear',
-        curveStrength: ch.frequencyBalanceSource?.curveStrength ?? 2.0,
-        transforms: ch.frequencyBalanceSource?.transforms
+        curveStrength: ch.frequencyBalanceSource?.curveStrength ?? 2.0
       },
       intensityBalanceSource: {
+        ...ch.intensityBalanceSource,
         type: ch.intensityBalanceSource?.type ?? 'static',
         staticValue: ch.intensityBalanceSource?.staticValue ?? ch.intensityBalance,
         sourceAxis: ch.intensityBalanceSource?.sourceAxis ?? defaultAxis,
         rangeMin: ch.intensityBalanceSource?.rangeMin ?? 0,
         rangeMax: ch.intensityBalanceSource?.rangeMax ?? 255,
         curve: ch.intensityBalanceSource?.curve ?? 'linear',
-        curveStrength: ch.intensityBalanceSource?.curveStrength ?? 2.0,
-        transforms: ch.intensityBalanceSource?.transforms
+        curveStrength: ch.intensityBalanceSource?.curveStrength ?? 2.0
       },
       intensitySource: {
+        ...ch.intensitySource,
         type: ch.intensitySource?.type ?? 'linked',
         staticValue: ch.intensitySource?.staticValue ?? 100,
         sourceAxis: ch.intensitySource?.sourceAxis ?? defaultAxis,
         rangeMin: ch.intensitySource?.rangeMin ?? ch.rangeMin,
         rangeMax: ch.intensitySource?.rangeMax ?? ch.rangeMax,
         curve: ch.intensitySource?.curve ?? 'linear',
-        curveStrength: ch.intensitySource?.curveStrength ?? 2.0,
-        transforms: ch.intensitySource?.transforms
+        curveStrength: ch.intensitySource?.curveStrength ?? 2.0
       }
     };
   }
@@ -1291,89 +1296,93 @@
 
   // Preset management functions
   function getCurrentChannelSettings(): { channelA: ChannelSettings, channelB: ChannelSettings } {
+    // Spread each source first, then backfill defaults. The spread keeps
+    // every optional field (midpoint, delayMs, transforms, ...) so a saved
+    // preset captures the full link config — matching the runtime persist
+    // path in buildChannelSettingsPayload.
     return {
       channelA: {
         frequencySource: {
+          ...$channelA.frequencySource,
           type: $channelA.frequencySource?.type ?? 'static',
           staticValue: $channelA.frequencySource?.staticValue ?? $channelA.frequency,
           sourceAxis: $channelA.frequencySource?.sourceAxis ?? 'L0',
           rangeMin: $channelA.frequencySource?.rangeMin ?? 1,
           rangeMax: $channelA.frequencySource?.rangeMax ?? 200,
           curve: $channelA.frequencySource?.curve ?? 'linear',
-          curveStrength: $channelA.frequencySource?.curveStrength ?? 2.0,
-          midpoint: $channelA.frequencySource?.midpoint
+          curveStrength: $channelA.frequencySource?.curveStrength ?? 2.0
         },
         frequencyBalanceSource: {
+          ...$channelA.frequencyBalanceSource,
           type: $channelA.frequencyBalanceSource?.type ?? 'static',
           staticValue: $channelA.frequencyBalanceSource?.staticValue ?? $channelA.frequencyBalance,
           sourceAxis: $channelA.frequencyBalanceSource?.sourceAxis ?? 'L0',
           rangeMin: $channelA.frequencyBalanceSource?.rangeMin ?? 0,
           rangeMax: $channelA.frequencyBalanceSource?.rangeMax ?? 255,
           curve: $channelA.frequencyBalanceSource?.curve ?? 'linear',
-          curveStrength: $channelA.frequencyBalanceSource?.curveStrength ?? 2.0,
-          midpoint: $channelA.frequencyBalanceSource?.midpoint
+          curveStrength: $channelA.frequencyBalanceSource?.curveStrength ?? 2.0
         },
         intensityBalanceSource: {
+          ...$channelA.intensityBalanceSource,
           type: $channelA.intensityBalanceSource?.type ?? 'static',
           staticValue: $channelA.intensityBalanceSource?.staticValue ?? $channelA.intensityBalance,
           sourceAxis: $channelA.intensityBalanceSource?.sourceAxis ?? 'L0',
           rangeMin: $channelA.intensityBalanceSource?.rangeMin ?? 0,
           rangeMax: $channelA.intensityBalanceSource?.rangeMax ?? 255,
           curve: $channelA.intensityBalanceSource?.curve ?? 'linear',
-          curveStrength: $channelA.intensityBalanceSource?.curveStrength ?? 2.0,
-          midpoint: $channelA.intensityBalanceSource?.midpoint
+          curveStrength: $channelA.intensityBalanceSource?.curveStrength ?? 2.0
         },
         intensitySource: {
+          ...$channelA.intensitySource,
           type: $channelA.intensitySource?.type ?? 'linked',
           staticValue: $channelA.intensitySource?.staticValue ?? 100,
           sourceAxis: $channelA.intensitySource?.sourceAxis ?? 'L0',
           rangeMin: $channelA.intensitySource?.rangeMin ?? $channelA.rangeMin,
           rangeMax: $channelA.intensitySource?.rangeMax ?? $channelA.rangeMax,
           curve: $channelA.intensitySource?.curve ?? 'linear',
-          curveStrength: $channelA.intensitySource?.curveStrength ?? 2.0,
-          midpoint: $channelA.intensitySource?.midpoint
+          curveStrength: $channelA.intensitySource?.curveStrength ?? 2.0
         }
       },
       channelB: {
         frequencySource: {
+          ...$channelB.frequencySource,
           type: $channelB.frequencySource?.type ?? 'static',
           staticValue: $channelB.frequencySource?.staticValue ?? $channelB.frequency,
           sourceAxis: $channelB.frequencySource?.sourceAxis ?? 'R2',
           rangeMin: $channelB.frequencySource?.rangeMin ?? 1,
           rangeMax: $channelB.frequencySource?.rangeMax ?? 200,
           curve: $channelB.frequencySource?.curve ?? 'linear',
-          curveStrength: $channelB.frequencySource?.curveStrength ?? 2.0,
-          midpoint: $channelB.frequencySource?.midpoint
+          curveStrength: $channelB.frequencySource?.curveStrength ?? 2.0
         },
         frequencyBalanceSource: {
+          ...$channelB.frequencyBalanceSource,
           type: $channelB.frequencyBalanceSource?.type ?? 'static',
           staticValue: $channelB.frequencyBalanceSource?.staticValue ?? $channelB.frequencyBalance,
           sourceAxis: $channelB.frequencyBalanceSource?.sourceAxis ?? 'R2',
           rangeMin: $channelB.frequencyBalanceSource?.rangeMin ?? 0,
           rangeMax: $channelB.frequencyBalanceSource?.rangeMax ?? 255,
           curve: $channelB.frequencyBalanceSource?.curve ?? 'linear',
-          curveStrength: $channelB.frequencyBalanceSource?.curveStrength ?? 2.0,
-          midpoint: $channelB.frequencyBalanceSource?.midpoint
+          curveStrength: $channelB.frequencyBalanceSource?.curveStrength ?? 2.0
         },
         intensityBalanceSource: {
+          ...$channelB.intensityBalanceSource,
           type: $channelB.intensityBalanceSource?.type ?? 'static',
           staticValue: $channelB.intensityBalanceSource?.staticValue ?? $channelB.intensityBalance,
           sourceAxis: $channelB.intensityBalanceSource?.sourceAxis ?? 'R2',
           rangeMin: $channelB.intensityBalanceSource?.rangeMin ?? 0,
           rangeMax: $channelB.intensityBalanceSource?.rangeMax ?? 255,
           curve: $channelB.intensityBalanceSource?.curve ?? 'linear',
-          curveStrength: $channelB.intensityBalanceSource?.curveStrength ?? 2.0,
-          midpoint: $channelB.intensityBalanceSource?.midpoint
+          curveStrength: $channelB.intensityBalanceSource?.curveStrength ?? 2.0
         },
         intensitySource: {
+          ...$channelB.intensitySource,
           type: $channelB.intensitySource?.type ?? 'linked',
           staticValue: $channelB.intensitySource?.staticValue ?? 100,
           sourceAxis: $channelB.intensitySource?.sourceAxis ?? 'R2',
           rangeMin: $channelB.intensitySource?.rangeMin ?? $channelB.rangeMin,
           rangeMax: $channelB.intensitySource?.rangeMax ?? $channelB.rangeMax,
           curve: $channelB.intensitySource?.curve ?? 'linear',
-          curveStrength: $channelB.intensitySource?.curveStrength ?? 2.0,
-          midpoint: $channelB.intensitySource?.midpoint
+          curveStrength: $channelB.intensitySource?.curveStrength ?? 2.0
         }
       }
     };
