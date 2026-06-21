@@ -194,6 +194,30 @@ pub fn emit_battery_changed(level: u8) {
     }
 }
 
+#[derive(Clone, Serialize)]
+pub struct DevicesDiscoveredPayload {
+    pub devices: Vec<BluetoothDevice>,
+    pub timestamp: u64,
+}
+
+/// Emit the current discovered-device list to the frontend. Fired once per
+/// poll by the backend scan loop (`bluetooth::run_scan_loop`) so the output
+/// panel reflects scan results without invoking a command on a timer.
+pub fn emit_devices_discovered(devices: Vec<bluetooth::BluetoothDevice>) {
+    if let Some(handle) = get_app_handle() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let payload = DevicesDiscoveredPayload {
+            devices: devices.into_iter().map(BluetoothDevice::from).collect(),
+            timestamp,
+        };
+        let _ = handle.emit("devices-discovered", payload);
+    }
+}
+
 /// Forward a backend log line to the frontend LogsPanel. Called from the
 /// ring-buffer logger so every `log_info!`/`log_error!` etc. shows up in
 /// the in-app panel, not just the on-disk file. No-ops before the app
@@ -239,7 +263,19 @@ use resolver::get_current_intensities;
 pub struct BluetoothDevice {
     address: String,
     name: Option<String>,
+    product: Option<String>,
     rssi: Option<i16>,
+}
+
+impl From<bluetooth::BluetoothDevice> for BluetoothDevice {
+    fn from(d: bluetooth::BluetoothDevice) -> Self {
+        BluetoothDevice {
+            address: d.address,
+            name: d.name,
+            product: d.product,
+            rssi: d.rssi,
+        }
+    }
 }
 
 #[tauri::command]
@@ -262,14 +298,7 @@ async fn scan_bluetooth_devices(adapter_index: usize) -> Result<Vec<BluetoothDev
         Ok(manager) => {
             let mut manager = manager.lock().await;
             match manager.scan_devices(adapter_index).await {
-                Ok(devices) => Ok(devices
-                    .into_iter()
-                    .map(|d| BluetoothDevice {
-                        address: d.address,
-                        name: d.name,
-                        rssi: d.rssi,
-                    })
-                    .collect()),
+                Ok(devices) => Ok(devices.into_iter().map(BluetoothDevice::from).collect()),
                 Err(e) => Err(format!("Failed to scan devices: {}", e)),
             }
         }
@@ -284,17 +313,25 @@ async fn get_discovered_bluetooth_devices() -> Result<Vec<BluetoothDevice>, Stri
         Ok(manager) => {
             let manager = manager.lock().await;
             let devices = manager.get_discovered_devices();
-            Ok(devices
-                .into_iter()
-                .map(|d| BluetoothDevice {
-                    address: d.address,
-                    name: d.name,
-                    rssi: d.rssi,
-                })
-                .collect())
+            Ok(devices.into_iter().map(BluetoothDevice::from).collect())
         }
         Err(e) => Err(format!("Failed to get Bluetooth manager: {}", e)),
     }
+}
+
+/// Start the backend-owned continuous scan loop. The frontend calls this when
+/// the output panel opens; results arrive via `devices-discovered` events.
+#[tauri::command]
+async fn start_device_scan(adapter_index: usize) -> Result<(), String> {
+    bluetooth::start_device_scan(adapter_index);
+    Ok(())
+}
+
+/// Stop the backend-owned scan loop. Called when the output panel closes.
+#[tauri::command]
+async fn stop_device_scan() -> Result<(), String> {
+    bluetooth::stop_device_scan();
+    Ok(())
 }
 
 #[tauri::command]
@@ -364,6 +401,10 @@ async fn update_output_options(
 
 #[tauri::command]
 async fn connect_bluetooth_device(adapter_index: usize, address: String) -> Result<String, String> {
+    // Stop scanning before we connect — Windows is unhappy scanning alongside
+    // an active GATT link, and we don't need new discoveries once we're linking.
+    bluetooth::stop_device_scan();
+
     match get_bluetooth_manager().await {
         Ok(manager) => {
             let mut manager = manager.lock().await;
@@ -489,11 +530,7 @@ async fn get_connection_status() -> Result<ConnectionStatus, String> {
             let devices = manager
                 .get_discovered_devices()
                 .into_iter()
-                .map(|d| BluetoothDevice {
-                    address: d.address,
-                    name: d.name,
-                    rssi: d.rssi,
-                })
+                .map(BluetoothDevice::from)
                 .collect();
             (connected, address, devices)
         }
@@ -1205,6 +1242,8 @@ fn main() {
             get_bluetooth_adapters,
             scan_bluetooth_devices,
             get_discovered_bluetooth_devices,
+            start_device_scan,
+            stop_device_scan,
             start_websocket_server,
             stop_websocket_server,
             get_websocket_status,

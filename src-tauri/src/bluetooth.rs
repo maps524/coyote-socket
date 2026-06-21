@@ -1,7 +1,7 @@
 use btleplug::api::{
     Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
 };
-use btleplug::platform::{Manager, Peripheral};
+use btleplug::platform::{Adapter, Manager, Peripheral};
 use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
@@ -13,6 +13,37 @@ use uuid::Uuid;
 const INSTRUCTION_CHAR_UUID: Uuid = Uuid::from_u128(0x0000150a_0000_1000_8000_00805f9b34fb);
 // Battery level characteristic
 const BATTERY_CHAR_UUID: Uuid = Uuid::from_u128(0x00001500_0000_1000_8000_00805f9b34fb);
+
+// Advertised primary service UUIDs — used at scan time (before connecting) to
+// map a device to a friendly product label. Coyote 3.0 advertises 0x180C;
+// Coyote 2.0 advertises the vendor base service 955a180b-….
+const V3_SERVICE_UUID: Uuid = Uuid::from_u128(0x0000180c_0000_1000_8000_00805f9b34fb);
+const V2_SERVICE_UUID: Uuid = Uuid::from_u128(0x955a180b_0fe2_f5aa_a094_84b8d4f3e8ad);
+
+/// True if an advertised local_name looks like a DG-LAB / Coyote device.
+fn is_dglab(name: &str) -> bool {
+    name.contains("DG-LAB")
+        || name.contains("COYOTE")
+        || name.contains("47L")
+        || name.contains("ESTIM01")
+}
+
+/// Map a Coyote's advertised name + services to a friendly product label.
+/// The advertised `local_name` for a Coyote 3.0 is a bare numeric serial
+/// (e.g. "47L1210…"), which reads as a meaningless number in the UI — so we
+/// prefer the service UUID (robust) and fall back to name patterns.
+fn coyote_product_name(local_name: &str, services: &[Uuid]) -> Option<String> {
+    let n = local_name.to_uppercase();
+    if services.contains(&V3_SERVICE_UUID) || n.starts_with("47L") {
+        Some("Coyote 3.0".to_string())
+    } else if services.contains(&V2_SERVICE_UUID) || n.contains("ESTIM01") || n.contains("D-LAB") {
+        Some("Coyote 2.0".to_string())
+    } else if n.contains("COYOTE") {
+        Some("Coyote".to_string())
+    } else {
+        None
+    }
+}
 
 // V2 Specific UUIDs (Base: 955Axxxx-0FE2-F5AA-A094-84B8D4F3E8AD)
 const V2_PWM_AB2_UUID: Uuid = Uuid::from_u128(0x955a1504_0fe2_f5aa_a094_84b8d4f3e8ad); // Strength
@@ -37,6 +68,9 @@ pub struct BluetoothAdapter {
 pub struct BluetoothDevice {
     pub address: String,
     pub name: Option<String>,
+    /// Friendly product label derived at scan time (e.g. "Coyote 3.0"); None
+    /// for devices we can't classify. The UI prefers this over `name`.
+    pub product: Option<String>,
     pub rssi: Option<i16>,
 }
 
@@ -130,11 +164,9 @@ impl BluetoothManager {
             if let Some(props) = properties {
                 // Filter for DG-LAB devices
                 if let Some(name) = &props.local_name {
-                    if name.contains("DG-LAB")
-                        || name.contains("COYOTE")
-                        || name.contains("47L")
-                        || name.contains("ESTIM01")
-                    {
+                    if is_dglab(name) {
+                        let product = coyote_product_name(name, &props.services);
+
                         // Store the peripheral for later connection
                         self.discovered_peripherals
                             .insert(address.clone(), peripheral);
@@ -143,6 +175,7 @@ impl BluetoothManager {
                         self.discovered_devices.push(BluetoothDevice {
                             address: address.clone(),
                             name: Some(name.clone()),
+                            product,
                             rssi: props.rssi,
                         });
                     }
@@ -167,6 +200,17 @@ impl BluetoothManager {
         adapter_index: usize,
         address: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Idempotent: if we're already linked to this exact device, treat the
+        // call as success instead of re-running connect(). btleplug's
+        // peripheral.connect() errors when invoked against an already-connected
+        // handle on Windows — which previously surfaced a spurious "Failed to
+        // connect" in the UI whenever two connect paths raced (startup
+        // auto-connect + a manual click, serialized by the manager mutex).
+        if self.is_connected() && self.connected_device_address.as_deref() == Some(address) {
+            println!("Already connected to {} — skipping reconnect", address);
+            return Ok(());
+        }
+
         println!("Attempting to connect to device: {}", address);
         println!(
             "Stored peripherals: {:?}",
@@ -580,4 +624,147 @@ pub fn start_battery_monitor() {
         }
         RUNNING.store(false, Ordering::SeqCst);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Backend-owned device scanning
+// ---------------------------------------------------------------------------
+// The backend owns the scan lifecycle so the frontend stays a thin renderer:
+// it calls start_device_scan when the output panel opens and stop_device_scan
+// when it closes, and otherwise just listens for `devices-discovered` events.
+// The scan runs continuously (adapter stays in scan mode; we re-read the
+// peripheral list every second) rather than the old start→sleep 5s→stop burst,
+// so the list fills in live without the UI driving a timer.
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as ScanOrdering};
+
+static SCAN_WANTED: AtomicBool = AtomicBool::new(false);
+static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
+static SCAN_ADAPTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Begin (or retarget) the continuous scan loop on `adapter_index`. Idempotent:
+/// a static guard prevents stacking multiple loops; changing the adapter while
+/// running is picked up live via `SCAN_ADAPTER`.
+pub fn start_device_scan(adapter_index: usize) {
+    SCAN_ADAPTER.store(adapter_index, ScanOrdering::SeqCst);
+    SCAN_WANTED.store(true, ScanOrdering::SeqCst);
+
+    if SCAN_RUNNING.swap(true, ScanOrdering::SeqCst) {
+        return; // a loop is already running and will honour the new target
+    }
+
+    tokio::spawn(async move {
+        if let Err(e) = run_scan_loop().await {
+            println!("[scan] loop ended with error: {}", e);
+        }
+        SCAN_RUNNING.store(false, ScanOrdering::SeqCst);
+    });
+}
+
+/// Ask the scan loop to stop. The loop stops the adapter scan and exits on its
+/// next tick (≤1s).
+pub fn stop_device_scan() {
+    SCAN_WANTED.store(false, ScanOrdering::SeqCst);
+}
+
+/// Read advertised properties for each peripheral and keep only DG-LAB devices,
+/// tagging each with a friendly product label. Done without holding the manager
+/// lock so connect/disconnect aren't blocked while we await per-device reads.
+async fn collect_devices(peripherals: Vec<Peripheral>) -> Vec<(String, Peripheral, BluetoothDevice)> {
+    let mut out = Vec::new();
+    for peripheral in peripherals {
+        let props = match peripheral.properties().await {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if let Some(props) = props {
+            if let Some(name) = props.local_name.clone() {
+                if is_dglab(&name) {
+                    let address = peripheral.address().to_string();
+                    let product = coyote_product_name(&name, &props.services);
+                    let dev = BluetoothDevice {
+                        address: address.clone(),
+                        name: Some(name),
+                        product,
+                        rssi: props.rssi,
+                    };
+                    out.push((address, peripheral, dev));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Replace the manager's discovered lists with this poll's results and return a
+/// clone for emission.
+async fn store_devices(
+    manager_mutex: &tokio::sync::Mutex<BluetoothManager>,
+    collected: Vec<(String, Peripheral, BluetoothDevice)>,
+) -> Vec<BluetoothDevice> {
+    let mut guard = manager_mutex.lock().await;
+    guard.discovered_peripherals.clear();
+    guard.discovered_devices.clear();
+    for (address, peripheral, dev) in collected {
+        guard.discovered_peripherals.insert(address, peripheral);
+        guard.discovered_devices.push(dev);
+    }
+    guard.discovered_devices.clone()
+}
+
+async fn run_scan_loop() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let manager_mutex = get_bluetooth_manager().await?;
+    let mut active_adapter: Option<usize> = None;
+    let mut adapter: Option<Adapter> = None;
+
+    while SCAN_WANTED.load(ScanOrdering::SeqCst) {
+        let want_idx = SCAN_ADAPTER.load(ScanOrdering::SeqCst);
+
+        // (Re)acquire the adapter and (re)start scanning if the target changed.
+        if active_adapter != Some(want_idx) {
+            if let Some(a) = adapter.take() {
+                let _ = a.stop_scan().await;
+            }
+            let next = {
+                let guard = manager_mutex.lock().await;
+                guard.manager.adapters().await?.into_iter().nth(want_idx)
+            };
+            match next {
+                Some(a) => {
+                    a.start_scan(ScanFilter::default()).await?;
+                    adapter = Some(a);
+                    active_adapter = Some(want_idx);
+                    println!("[scan] started on adapter {}", want_idx);
+                }
+                None => {
+                    println!("[scan] invalid adapter index {} — stopping", want_idx);
+                    break;
+                }
+            }
+        }
+
+        // Don't poll while a device is connected: Windows dislikes scanning
+        // alongside an active GATT link, and there's nothing to discover then.
+        let connected = { manager_mutex.lock().await.is_connected() };
+        if !connected {
+            if let Some(a) = &adapter {
+                match a.peripherals().await {
+                    Ok(peripherals) => {
+                        let collected = collect_devices(peripherals).await;
+                        let devices = store_devices(manager_mutex, collected).await;
+                        crate::emit_devices_discovered(devices);
+                    }
+                    Err(e) => println!("[scan] peripherals() failed: {}", e),
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+    }
+
+    if let Some(a) = adapter.take() {
+        let _ = a.stop_scan().await;
+    }
+    println!("[scan] stopped");
+    Ok(())
 }
