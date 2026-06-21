@@ -28,24 +28,8 @@
 
   export let channel: 'A' | 'B';
   export let transforms: Transform[] = [];
-  /**
-   * Source axis of the parameter link this editor is editing. Used to
-   * surface the inert-transforms hint: the resolver only routes
-   * `bp:`-prefixed Linked links through the transforms pipeline today
-   * (sub E gate), so transforms attached to T-Code / gamepad / Static
-   * links are silently ignored. Pass `undefined` for Static.
-   */
-  export let sourceAxis: string | undefined = undefined;
 
   const dispatch = createEventDispatcher<{ change: Transform[] }>();
-
-  // Inert transforms: the sub E resolver only routes `bp:`-prefixed
-  // Linked links through the transforms pipeline. Anything else (Static,
-  // T-Code, gamepad) bypasses transforms entirely. Surface a hint so
-  // the user knows their attached transforms aren't running. Sub G open
-  // issue tracks unifying engine-path Linked into the resolver tail.
-  $: transformsActive = sourceAxis?.startsWith('bp:') ?? false;
-  $: showInertHint = transforms.length > 0 && !transformsActive;
 
   // Empty-axis hint: backend transforms with empty modifier-axis names
   // silently `unwrap_or(0.0)` the modifier value at runtime. Mark
@@ -132,16 +116,6 @@
     <span class="text-[10px] uppercase tracking-wide text-muted-foreground">Transforms</span>
     <span class="text-[10px] font-mono text-muted-foreground">{transforms.length}</span>
   </div>
-
-  {#if showInertHint}
-    <!-- Sub E gate: only bp:-prefixed Linked links route through the
-         transforms pipeline. Until the engine path runs through a
-         resolver tail (open sub G follow-up), transforms attached here
-         are saved but inert. -->
-    <div class="px-1.5 py-1 text-[10px] text-muted-foreground border border-destructive/40 bg-destructive/5 rounded">
-      Transforms attached to T-Code / gamepad / Static links are saved but currently inert; only bp:* links route through transforms today.
-    </div>
-  {/if}
 
   {#each transforms as t, i (i)}
     <div class="rounded border border-border/50 bg-muted/30 px-1.5 py-1 space-y-1">

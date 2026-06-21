@@ -595,13 +595,13 @@
           />
         </label>
 
-        <!-- Transforms list. `sourceAxis` drives the inert-transforms
-             hint inside the editor — only `bp:`-prefixed Linked links
-             route through the resolver's transforms pipeline today. -->
+        <!-- Transforms list. Transforms now apply to every link type
+             (intensity runs through the engine-tail resolver; frequency /
+             balance run through the resolver directly), so there's no
+             inert-state hint to surface. -->
         <TransformsEditor
           {channel}
           transforms={source.transforms ?? []}
-          sourceAxis={source.type === 'linked' ? source.sourceAxis : undefined}
           on:change={handleTransformsChange}
         />
       </Popover>
