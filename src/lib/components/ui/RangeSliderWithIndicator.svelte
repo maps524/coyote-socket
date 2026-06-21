@@ -6,6 +6,7 @@
   import Slider from './Slider.svelte';
   import Popover from './Popover.svelte';
   import TransformsEditor from './TransformsEditor.svelte';
+  import { knownAxes } from '$lib/stores/inputBus.js';
 
   // Props
   export let channel: 'A' | 'B';
@@ -36,6 +37,37 @@
     ['GP_LX', 'GP_LY', 'GP_LT'],
     ['GP_RX', 'GP_RY', 'GP_RT']
   ];
+
+  // Per the maintainer's direction: the picker shows only axis groups that are
+  // actually active. We drive group visibility off the live `inputBus`
+  // (`knownAxes` = union of every axis the bus has seen this session) —
+  // no input-mode toggle, no separation. T-Code → bare names, gamepad →
+  // `GP_*`, Buttplug → `bp:*`. The `bp:` control axes (`LinearCmd_<i>` /
+  // `RotateDir_<i>`) are watermark/direction signals, not user-pickable
+  // sources, so they're filtered out (same rule as InputMonitor).
+  function isBpDisplayAxis(axis: string): boolean {
+    if (!axis.startsWith('bp:')) return false;
+    const stripped = axis.slice(3);
+    return !stripped.startsWith('LinearCmd_') && !stripped.startsWith('RotateDir_');
+  }
+
+  // A saved preset can reference an axis that isn't live yet (e.g. a
+  // `bp:Vibrate_0` link loaded before the Buttplug client connects). Keep
+  // the currently-selected axis visible regardless so the chip still
+  // renders and can be deselected.
+  $: selectedBp = isLinked && selectedSource.startsWith('bp:') ? selectedSource : null;
+  $: selectedIsTcode = isLinked && !selectedSource.startsWith('GP_') && !selectedSource.startsWith('bp:');
+  $: selectedIsGamepad = isLinked && selectedSource.startsWith('GP_');
+
+  $: hasTcodeAxes = selectedIsTcode
+    || $knownAxes.some((a) => !a.startsWith('GP_') && !a.startsWith('bp:'));
+  $: hasGamepadAxes = selectedIsGamepad || $knownAxes.some((a) => a.startsWith('GP_'));
+  $: buttplugAxes = Array.from(
+    new Set([
+      ...$knownAxes.filter(isBpDisplayAxis),
+      ...(selectedBp ? [selectedBp] : [])
+    ])
+  ).sort((a, b) => a.localeCompare(b));
 
   // Curve options for dropdown
   const curveOptions: { value: CurveType; label: string }[] = [
@@ -436,6 +468,8 @@
             {#if selectedSource.startsWith('GP_')}
               <Gamepad2 class="h-3 w-3" />
               <span class="leading-none">{selectedSource.replace('GP_', '')}</span>
+            {:else if selectedSource.startsWith('bp:')}
+              <span class="leading-none">{selectedSource.slice(3)}</span>
             {:else}
               <span class="leading-none">{selectedSource}</span>
             {/if}
@@ -445,40 +479,78 @@
         </button>
 
         <div class="space-y-1 mb-2">
-          {#each axisRows as row, ri (ri)}
-            <div class="flex gap-1">
-              {#each row as axis (axis)}
-                <button
-                  type="button"
-                  class="flex-1 px-2 py-1 text-xs font-mono rounded transition-colors
-                         {selectedSource === axis
-                           ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
-                           : 'bg-muted/50 hover:bg-muted text-foreground'}"
-                  on:click={() => handleAxisClick(axis)}
-                >
-                  {axis}
-                </button>
-              {/each}
-            </div>
-          {/each}
+          <!-- Axis groups render only when their source is active (per the
+               unified-bus model: no input-mode toggle, the bus presence
+               drives visibility). T-Code shows the full canonical grid
+               when any bare axis is live; gamepad + Buttplug likewise. -->
+          {#if hasTcodeAxes}
+            {#each axisRows as row, ri (ri)}
+              <div class="flex gap-1">
+                {#each row as axis (axis)}
+                  <button
+                    type="button"
+                    class="flex-1 px-2 py-1 text-xs font-mono rounded transition-colors
+                           {selectedSource === axis
+                             ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
+                             : 'bg-muted/50 hover:bg-muted text-foreground'}"
+                    on:click={() => handleAxisClick(axis)}
+                  >
+                    {axis}
+                  </button>
+                {/each}
+              </div>
+            {/each}
+          {/if}
+
           <!-- Gamepad axis rows -->
-          <div class="pt-1 border-t border-border/50 text-[10px] text-muted-foreground">Gamepad</div>
-          {#each gamepadAxisRows as row, ri (ri)}
-            <div class="flex gap-1">
-              {#each row as axis (axis)}
+          {#if hasGamepadAxes}
+            <div class="pt-1 border-t border-border/50 text-[10px] text-muted-foreground">Gamepad</div>
+            {#each gamepadAxisRows as row, ri (ri)}
+              <div class="flex gap-1">
+                {#each row as axis (axis)}
+                  <button
+                    type="button"
+                    class="flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors
+                           {selectedSource === axis
+                             ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
+                             : 'bg-muted/50 hover:bg-muted text-foreground'}"
+                    on:click={() => handleAxisClick(axis)}
+                  >
+                    {axis.replace('GP_', '')}
+                  </button>
+                {/each}
+              </div>
+            {/each}
+          {/if}
+
+          <!-- Buttplug feature axes (`bp:*`). Dynamic — one button per live
+               feature, two per row. The full `bp:`-prefixed name is the
+               source axis (what the resolver gate matches); the button
+               label drops the prefix for readability. -->
+          {#if buttplugAxes.length > 0}
+            <div class="pt-1 border-t border-border/50 text-[10px] text-muted-foreground">Buttplug</div>
+            <div class="grid grid-cols-2 gap-1">
+              {#each buttplugAxes as axis (axis)}
                 <button
                   type="button"
-                  class="flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors
+                  class="px-2 py-1 text-[10px] font-mono rounded transition-colors truncate
                          {selectedSource === axis
                            ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
                            : 'bg-muted/50 hover:bg-muted text-foreground'}"
+                  title={axis}
                   on:click={() => handleAxisClick(axis)}
                 >
-                  {axis.replace('GP_', '')}
+                  {axis.slice(3)}
                 </button>
               {/each}
             </div>
-          {/each}
+          {/if}
+
+          {#if !hasTcodeAxes && !hasGamepadAxes && buttplugAxes.length === 0}
+            <div class="py-2 text-[10px] text-muted-foreground text-center">
+              No input connected — link options appear when a source is active.
+            </div>
+          {/if}
         </div>
 
         <!-- Curve selector dropdown -->
