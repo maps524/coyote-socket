@@ -1,7 +1,5 @@
 <script lang="ts">
-  import { run } from 'svelte/legacy';
-
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { Activity, Radio, Zap, MapPin, RotateCw, MoveHorizontal, Minimize2 } from 'lucide-svelte';
   import { currentInputSource, updateButtplugFeatures } from '$lib/stores/inputSource';
@@ -97,12 +95,12 @@
 
   // Clear sticky key sets when the relevant protocol drops, so an old session's
   // keys don't carry over after a disconnect/reconnect to a different sender.
-  run(() => {
+  $effect(() => {
     if (inputSource !== 'tcode') {
       knownNetworkAxisKeys = [];
     }
   });
-  run(() => {
+  $effect(() => {
     if (inputSource !== 'buttplug' && inputSource !== 'lovense') {
       knownButtplugFeatureKeys = [];
     }
@@ -114,11 +112,15 @@
   // hundreds of `bus-update` events per second — the recompute cost is
   // per-frame, not per-event. Sticky keys preserve last-known entries so a
   // Stop command's bus clear doesn't collapse the section.
-  run(() => {
+  $effect(() => {
+    const bus = $inputBus; // sole reactive dependency
+    // Sticky-key accumulation reads AND writes known* keys; untrack so those
+    // self-writes don't retrigger this effect (was legacy_recursive_reactive_block).
+    untrack(() => {
     const networkLive: Record<string, number> = {};
     const gamepadLive: Record<string, number> = {};
     const buttplugLive: Record<string, number> = {};
-    for (const [axis, sample] of Object.entries($inputBus)) {
+    for (const [axis, sample] of Object.entries(bus)) {
       if (isGamepadKey(axis)) {
         gamepadLive[axis] = sample.value;
       } else if (isButtplugKey(axis)) {
@@ -164,6 +166,7 @@
     if (buttplugFeatures.some((f) => f.value > 0)) {
       isInputConnected = true;
     }
+    });
   });
 
   onMount(async () => {

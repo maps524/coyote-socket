@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { run, createBubbler, stopPropagation } from 'svelte/legacy';
+  import { createBubbler, stopPropagation } from 'svelte/legacy';
 
   const bubble = createBubbler();
   import { onMount, onDestroy, tick } from 'svelte';
@@ -66,13 +66,13 @@
 
   // Update timers for backend state (50ms debounce) — per-channel timers live in
   // channelATimers/channelBTimers below, alongside scheduleChannelSync.
-  let outputUpdateTimer: ReturnType<typeof setTimeout> | null = $state(null);
+  let outputUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Save timers for file persistence (500ms debounce)
-  let connectionSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
-  let bluetoothSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
-  let outputSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
-  let shortcutsSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
+  let connectionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let bluetoothSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let outputSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let shortcutsSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Keyboard shortcuts configuration
   let shortcuts = $state({
@@ -103,7 +103,7 @@
   // Gamepad bindings (orthogonal to keyboard shortcuts). Each action may have
   // at most one gamepad binding. Loaded from backend on mount, saved on change.
   let gamepadBindings: GamepadBindings = $state({});
-  let gamepadBindingsSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
+  let gamepadBindingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let gamepadEngine: 'off' | 'gilrs' | 'xinput' = $state('xinput');
   let gamepadStickSensitivity = $state(1.0);
   let sensitivitySaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -689,7 +689,7 @@
   }
 
   // Watch for T-Code monitor toggle changes
-  run(() => {
+  $effect(() => {
     if (lastTCodeMonitorState !== null && lastTCodeMonitorState !== $generalSettings.showTCodeMonitor) {
       resizeWindowForMonitor($generalSettings.showTCodeMonitor);
     }
@@ -697,7 +697,7 @@
   });
 
   // Debounced save for connection settings
-  run(() => {
+  $effect(() => {
     if (settingsLoaded && !hmrReloading) {
       const _trackConnectionChanges = [websocketPort, autoOpen];
       if (connectionSaveTimer) clearTimeout(connectionSaveTimer);
@@ -712,8 +712,8 @@
   });
 
   // Debounced save for general settings
-  let generalSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
-  run(() => {
+  let generalSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
     if (settingsLoaded && !hmrReloading && $generalSettings) {
       if (generalSaveTimer) clearTimeout(generalSaveTimer);
       generalSaveTimer = setTimeout(() => {
@@ -731,7 +731,7 @@
   });
 
   // Debounced save for bluetooth settings (user preferences only, not discovered devices)
-  run(() => {
+  $effect(() => {
     if (settingsLoaded && !hmrReloading) {
       const _trackBluetoothChanges = [selectedInterface, autoScan, autoConnect, savedSelectedDevice];
       if (bluetoothSaveTimer) clearTimeout(bluetoothSaveTimer);
@@ -750,7 +750,7 @@
   });
 
   // Sync output options to backend (50ms) and save to file (500ms).
-  run(() => {
+  $effect(() => {
     if ($generalSettings && settingsLoaded && !hmrReloading) {
       if (outputUpdateTimer) clearTimeout(outputUpdateTimer);
       outputUpdateTimer = setTimeout(() => {
@@ -905,19 +905,19 @@
     save: { current: null as ReturnType<typeof setTimeout> | null }
   };
 
-  run(() => {
+  $effect(() => {
     if ($channelA && settingsLoaded && !hmrReloading) {
       scheduleChannelSync('A', $channelA, 'L0', channelATimers.update, channelATimers.save);
     }
   });
-  run(() => {
+  $effect(() => {
     if ($channelB && settingsLoaded && !hmrReloading) {
       scheduleChannelSync('B', $channelB, 'R2', channelBTimers.update, channelBTimers.save);
     }
   });
 
   // Save shortcuts when they change
-  run(() => {
+  $effect(() => {
     if (settingsLoaded && !hmrReloading && shortcuts) {
       if (shortcutsSaveTimer) clearTimeout(shortcutsSaveTimer);
       shortcutsSaveTimer = setTimeout(() => {
@@ -950,7 +950,7 @@
   });
 
   // Save gamepad bindings when they change
-  run(() => {
+  $effect(() => {
     if (settingsLoaded && !hmrReloading && gamepadBindings) {
       if (gamepadBindingsSaveTimer) clearTimeout(gamepadBindingsSaveTimer);
       gamepadBindingsSaveTimer = setTimeout(() => {
@@ -1500,7 +1500,7 @@
 
   // Abandon an in-progress preset-combo capture if the modal closes, so it
   // doesn't linger and hijack the next gamepad press elsewhere.
-  run(() => {
+  $effect(() => {
     if (!reorderOpen && rebindCapture?.action.startsWith('selectPreset:')) {
       cancelRebind();
     }
@@ -1616,7 +1616,7 @@
 
   // Watch for channel changes to update dirty state
   // Include channel stores as dependencies so this re-runs when they change
-  run(() => {
+  $effect(() => {
     if (settingsLoaded && selectedPresetName && lastSavedPresetState && $channelA && $channelB) {
       presetDirty = checkPresetDirty();
     }

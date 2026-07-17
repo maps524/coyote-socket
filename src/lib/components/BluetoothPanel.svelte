@@ -13,9 +13,7 @@
 </script>
 
 <script lang="ts">
-  import { run } from 'svelte/legacy';
-
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { RefreshCw } from 'lucide-svelte';
   import Button from './ui/Button.svelte';
@@ -233,15 +231,17 @@
   // store-backed `savedDevices` prop straight through to the dropdown.
   let bluetoothDevices = $derived(savedDevices);
   // Auto-select the first Coyote once one appears and nothing is chosen yet.
-  run(() => {
-    if (!selectedDevice && bluetoothDevices.length > 0) {
+  $effect(() => {
+    // Depend on bluetoothDevices only; untrack the selectedDevice self-read so
+    // writing it below doesn't retrigger (was legacy_recursive_reactive_block).
+    if (!untrack(() => selectedDevice) && bluetoothDevices.length > 0) {
       const coyote = bluetoothDevices.find(d =>
         d.name?.includes('COYOTE') || d.name?.includes('DG-LAB') || d.name?.includes('47L')
       );
       if (coyote) selectedDevice = coyote.address;
     }
   });
-  run(() => {
+  $effect(() => {
     if (isConnected && selectedDevice) {
       const device = bluetoothDevices.find(d => d.address === selectedDevice);
       if (device) {
@@ -278,7 +278,7 @@
   // Drive the backend scan from live state: scan while enabled + idle, stop
   // once connected or the user disables auto-scan. This is what makes the
   // auto-scan toggle visibly do something.
-  run(() => {
+  $effect(() => {
     if (adaptersLoaded) {
       if (autoScan && hasValidAdapter && !isConnected) {
         startScan();

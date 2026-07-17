@@ -1,6 +1,4 @@
 <script lang="ts">
-  import { run } from 'svelte/legacy';
-
   import { onMount, onDestroy, tick } from 'svelte';
   import { fade } from 'svelte/transition';
 
@@ -150,7 +148,7 @@
     handleMouseLeave();
   }
 
-  run(() => {
+  $effect(() => {
     if (isOpen) {
       updatePosition();
     }

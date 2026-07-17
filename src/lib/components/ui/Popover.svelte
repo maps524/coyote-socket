@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { run, stopPropagation } from 'svelte/legacy';
+  import { stopPropagation } from 'svelte/legacy';
 
   import { createEventDispatcher, tick, onMount, onDestroy } from 'svelte';
   import { scale } from 'svelte/transition';
@@ -138,7 +138,7 @@
     popoverStyle = `top: ${top}px; left: ${left}px;`;
   }
 
-  run(() => {
+  $effect(() => {
     if (open) {
       updatePosition();
     }

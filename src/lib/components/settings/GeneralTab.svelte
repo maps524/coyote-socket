@@ -1,6 +1,4 @@
 <script lang="ts">
-  import { run } from 'svelte/legacy';
-
   import { generalSettings } from '$lib/stores/generalSettings';
   import { channelA, channelB } from '$lib/stores/channels';
   import Select from '$lib/components/ui/Select.svelte';
@@ -18,7 +16,7 @@
   let showTCodeMonitor = $state($generalSettings.showTCodeMonitor);
 
   // Update store when local state changes (processingEngine is controlled from main UI)
-  run(() => {
+  $effect(() => {
     generalSettings.update(s => ({
       ...s,
       noInputBehavior,

@@ -1,6 +1,4 @@
 <script lang="ts">
-  import { run } from 'svelte/legacy';
-
   import { createEventDispatcher, onDestroy, untrack } from 'svelte';
   import type { ParameterSource, CurveType, Transform } from '$lib/types/modulation.js';
   import { Info, Link, Gamepad2 } from 'lucide-svelte';
@@ -415,7 +413,7 @@
   let isLinked = $derived(source.type === 'linked');
   // Update local values when source prop changes
   // Always sync all values from source to preserve them when switching modes
-  run(() => {
+  $effect(() => {
     minValue = source.rangeMin ?? min;
     maxValue = source.rangeMax ?? max;
     staticValue = source.staticValue ?? untrack(() => staticValue); // Keep current if not in source (untrack: avoid self-dependency recursion)
