@@ -317,7 +317,12 @@ export function lerp(min: number, max: number, t: number): number {
 /**
  * Default Buttplug feature configuration values
  */
-export const defaultButtplugConfig: Required<ButtplugFeatureConfig> = {
+// NOTE (svelte-5-upgrade): the original annotation `Required<ButtplugFeatureConfig>`
+// referenced a type whose shape doesn't match this literal (no rotateScale /
+// oscillateMaxSpeed / constrict* fields exist on any ButtplugFeatureConfig).
+// This export is currently unused. Dropped the annotation to let it infer so
+// `svelte-check` is green — the maintainer to define the intended transform-config type.
+export const defaultButtplugConfig = {
   distance: 0.2,
   rotateScale: 0.5,
   rotateMaxSpeed: 5.0,
