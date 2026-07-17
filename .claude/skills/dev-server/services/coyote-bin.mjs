@@ -20,6 +20,10 @@ export default (ctx) => {
       group: "tauri",
       env: {
         DEV_URL: ctx.VITE_DEV_URL,
+        // Opens the WebView2 CDP endpoint so the tauri-panels skill can attach
+        // via agent-browser. 9224 avoids ai-notifications' CDP (9223) and
+        // personal Edge (9222). See .claude/skills/tauri-panels/references/wiring.md
+        COYOTE_REMOTE_DEBUG_PORT: process.env.COYOTE_REMOTE_DEBUG_PORT || "9224",
       },
     },
     build: {

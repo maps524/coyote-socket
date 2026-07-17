@@ -53,3 +53,6 @@ scripts/setup-local.js
 
 # Claude Code per-user settings (committed: .claude/settings.json)
 .claude/settings.local.json
+
+# tauri-panels skill screenshot scratch output
+.claude/tmp/

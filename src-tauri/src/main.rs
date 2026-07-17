@@ -1237,6 +1237,21 @@ async fn close_splashscreen(window: tauri::Window) -> Result<(), String> {
 }
 
 fn main() {
+    // When the dev-server skill sets COYOTE_REMOTE_DEBUG_PORT, enable the
+    // WebView2 Chrome DevTools Protocol endpoint on that port so the
+    // tauri-panels skill can attach via agent-browser and drive/inspect the
+    // live UI. Must be set before the webview is created (before Builder runs).
+    // Production builds never set the env var, so CDP stays off in shipped
+    // binaries. Mirrors the DEV_URL gating pattern used below.
+    if let Ok(port) = std::env::var("COYOTE_REMOTE_DEBUG_PORT") {
+        if !port.trim().is_empty() {
+            std::env::set_var(
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                format!("--remote-debugging-port={}", port.trim()),
+            );
+        }
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_bluetooth_adapters,
