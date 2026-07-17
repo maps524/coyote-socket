@@ -47,6 +47,6 @@
     value={port}
     on:input={handleInput}
     {disabled}
-    class="flex-1 h-full bg-transparent py-2 pr-3 text-sm font-mono outline-none disabled:cursor-not-allowed"
+    class="flex-1 h-full bg-transparent py-2 pr-3 text-sm font-mono outline-hidden disabled:cursor-not-allowed"
   />
 </div>

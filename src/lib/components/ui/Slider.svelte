@@ -74,7 +74,7 @@
     {value}
     {disabled}
     on:input={handleInput}
-    class="slider-enhanced relative h-3 w-full cursor-pointer appearance-none rounded-full outline-none disabled:cursor-not-allowed disabled:opacity-50"
+    class="slider-enhanced relative h-3 w-full cursor-pointer appearance-none rounded-full outline-hidden disabled:cursor-not-allowed disabled:opacity-50"
     style="background: linear-gradient(to right, hsl(var(--{variant})) 0%, hsl(var(--{variant})) {percentage}%, hsl(var(--muted)) {percentage}%, hsl(var(--muted)) 100%)"
   />
 </div>

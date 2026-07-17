@@ -201,7 +201,7 @@
   <div
     use:portal
     bind:this={contentEl}
-    class="popover-content fixed rounded-lg border border-border bg-popover text-popover-foreground shadow-xl outline-none pointer-events-auto overflow-hidden w-[320px] max-w-[calc(100vw-32px)]
+    class="popover-content fixed rounded-lg border border-border bg-popover text-popover-foreground shadow-xl outline-hidden pointer-events-auto overflow-hidden w-[320px] max-w-[calc(100vw-32px)]
            {align === 'center' ? '-translate-x-1/2' : align === 'end' ? '-translate-x-full' : ''}
            {contentClass}"
     style="{popoverStyle}"

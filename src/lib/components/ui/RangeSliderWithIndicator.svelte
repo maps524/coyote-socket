@@ -456,7 +456,7 @@
            and `bp:*` axes show up there as the user-typed name in the
            transforms editor (sub G.3.2 will replace the typed-name
            inputs with a discovery dropdown driven by the bus store). -->
-      <Popover bind:open={popoverOpen} compact={true} contentClass="!w-[160px] min-w-0">
+      <Popover bind:open={popoverOpen} compact={true} contentClass="w-[160px]! min-w-0">
         <button
           slot="trigger"
           type="button"
@@ -659,7 +659,7 @@
       ></div>
       <!-- Middle glow -->
       <div
-        class="absolute -translate-x-1/2 -translate-y-1/2 w-2 h-5 rounded-full blur-sm opacity-60"
+        class="absolute -translate-x-1/2 -translate-y-1/2 w-2 h-5 rounded-full blur-xs opacity-60"
         style="background: var(--slider-color)"
       ></div>
       <!-- Core line (bright center) -->

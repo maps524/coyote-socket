@@ -22,7 +22,7 @@
 
 {#if open}
   <div
-    class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm"
+    class="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs"
     transition:fade={{ duration: 150 }}
     on:click={handleClose}
     on:keydown={handleKeydown}
@@ -38,11 +38,11 @@
     tabindex="-1"
   >
     {#if title}
-      <div class="flex items-center justify-between flex-shrink-0 mb-4">
+      <div class="flex items-center justify-between shrink-0 mb-4">
         <h2 class="text-lg font-semibold">{title}</h2>
         <button
           on:click={handleClose}
-          class="rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+          class="rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2"
         >
           <X class="h-4 w-4" />
           <span class="sr-only">Close</span>

@@ -1602,12 +1602,12 @@
 
 <main class="h-screen w-full bg-background text-foreground overflow-hidden flex flex-col">
   <!-- Compact Header -->
-  <header class="border-b border-border bg-card/50 backdrop-blur w-full">
+  <header class="border-b border-border bg-card/50 backdrop-blur-sm w-full">
     <div class="w-full px-4 py-3 max-w-[1920px] mx-auto">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-3">
           <Zap class="h-6 w-6 text-primary" />
-          <h1 class="text-xl font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
+          <h1 class="text-xl font-bold bg-linear-to-r from-primary to-secondary bg-clip-text text-transparent">
             CoyoteSocket
           </h1>
         </div>
@@ -1693,7 +1693,7 @@
                   type="text"
                   bind:value={newPresetName}
                   placeholder="Preset name"
-                  class="flex-1 py-1 px-2 text-xs bg-transparent border-none outline-none min-w-0 text-foreground placeholder:text-muted-foreground"
+                  class="flex-1 py-1 px-2 text-xs bg-transparent border-none outline-hidden min-w-0 text-foreground placeholder:text-muted-foreground"
                   on:keydown={(e) => e.key === 'Enter' && saveNewPreset()}
                 />
                 <button
@@ -1713,7 +1713,7 @@
                 </button>
               {:else}
                 <select
-                  class="preset-select flex-1 py-1 pl-2 pr-1 mr-1 text-xs bg-transparent border-none outline-none min-w-0 cursor-pointer"
+                  class="preset-select flex-1 py-1 pl-2 pr-1 mr-1 text-xs bg-transparent border-none outline-hidden min-w-0 cursor-pointer"
                   value={selectedPresetName}
                   on:change={(e) => handlePresetSelect(e.currentTarget.value)}
                 >
@@ -1758,14 +1758,14 @@
                 Engine
               </span>
               <select
-                class="preset-select py-1 pl-2 pr-1 mr-1 text-xs bg-transparent border-none outline-none cursor-pointer"
+                class="preset-select py-1 pl-2 pr-1 mr-1 text-xs bg-transparent border-none outline-hidden cursor-pointer"
                 bind:value={$generalSettings.processingEngine}
               >
                 {#each PROCESSING_ENGINES as engine}
                   <option value={engine.value}>{engine.label}</option>
                 {/each}
               </select>
-              <Popover bind:open={engineInfoOpen} compact={true} contentClass="!w-[260px] min-w-0">
+              <Popover bind:open={engineInfoOpen} compact={true} contentClass="w-[260px]! min-w-0">
                 <button
                   slot="trigger"
                   type="button"
@@ -1795,7 +1795,7 @@
                   </span>
                 </Tooltip>
                 <select
-                  class="preset-select py-1 pl-2 pr-2 text-xs bg-transparent border-none outline-none cursor-pointer"
+                  class="preset-select py-1 pl-2 pr-2 text-xs bg-transparent border-none outline-hidden cursor-pointer"
                   bind:value={$generalSettings.peakFill}
                 >
                   {#each PEAK_FILL_STRATEGIES as strat}
@@ -2178,7 +2178,7 @@
       {/if}
     </TabsClassic>
 
-    <div class="flex justify-end gap-2 pt-3 border-t flex-shrink-0">
+    <div class="flex justify-end gap-2 pt-3 border-t shrink-0">
       <Button variant="outline" size="sm" on:click={() => settingsOpen = false}>
         Cancel
       </Button>
@@ -2288,7 +2288,7 @@
               on:pointerdown|stopPropagation
               role="presentation"
             >
-              <Popover bind:open={deleteConfirmOpen[preset.id]} align="end" compact={true} contentClass="!w-[220px] min-w-0">
+              <Popover bind:open={deleteConfirmOpen[preset.id]} align="end" compact={true} contentClass="w-[220px]! min-w-0">
                 <button
                   slot="trigger"
                   type="button"

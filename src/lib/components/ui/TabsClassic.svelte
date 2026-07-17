@@ -13,7 +13,7 @@
 </script>
 
 <div class="w-full flex-1 min-h-0 flex flex-col">
-  <div class="flex border-b border-border flex-shrink-0">
+  <div class="flex border-b border-border shrink-0">
     {#each tabs as tab}
       <button
         class="px-4 py-2 text-sm font-medium transition-colors hover:text-primary relative {value === tab.value ? 'text-primary' : 'text-muted-foreground'}"
