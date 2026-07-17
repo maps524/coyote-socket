@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
   
   interface Props {
     value?: string;
@@ -9,11 +8,9 @@
 
   let { value = $bindable(''), tabs = [], children }: Props = $props();
   
-  const dispatch = createEventDispatcher();
   
   function selectTab(tabValue: string) {
     value = tabValue;
-    dispatch('change', tabValue);
   }
 </script>
 

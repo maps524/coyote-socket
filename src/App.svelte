@@ -328,7 +328,7 @@
 
       // Apply connection settings
       websocketPort = settings.connection.websocketPort ?? 12346;
-      autoOpen = settings.connection.autoOpen;
+      autoOpen = settings.connection.autoOpen ?? true;
 
       // Apply general settings (including showTCodeMonitor from connection settings for backwards compatibility)
       $generalSettings = {
@@ -336,7 +336,7 @@
         noInputDecayMs: settings.general?.noInputDecayMs ?? 1000,
         updateRateMs: settings.general?.updateRateMs ?? 50,
         saveRateMs: settings.general?.saveRateMs ?? 500,
-        showTCodeMonitor: settings.connection.showTcodeMonitor,
+        showTCodeMonitor: settings.connection.showTcodeMonitor ?? false,
         processingEngine: (settings.output.processingEngine as ProcessingEngine) ?? 'v2-balanced',
         peakFill: (settings.output.peakFill as PeakFillStrategy) ?? 'forward',
         channelAMaxIntensity: settings.general?.channelAMaxIntensity ?? 200,
@@ -344,9 +344,9 @@
       };
 
       // Apply bluetooth settings (discovered devices come from backend, not settings)
-      selectedInterface = settings.bluetooth.selectedInterface;
-      autoScan = settings.bluetooth.autoScan;
-      autoConnect = settings.bluetooth.autoConnect;
+      selectedInterface = settings.bluetooth.selectedInterface ?? 0;
+      autoScan = settings.bluetooth.autoScan ?? true;
+      autoConnect = settings.bluetooth.autoConnect ?? true;
       savedSelectedDevice = settings.bluetooth.lastDevice || '';
 
       // Apply output settings
@@ -696,7 +696,11 @@
   // Debounced save for connection settings
   $effect(() => {
     if (settingsLoaded && !hmrReloading) {
-      const _trackConnectionChanges = [websocketPort, autoOpen];
+      // showTCodeMonitor must be tracked synchronously: a $effect only depends on
+      // signals read during its sync run, not ones read later inside the timeout
+      // callback. Without it here, toggling the monitor never re-saved the
+      // connection block (the field it loads from), so the pref didn't persist.
+      const _trackConnectionChanges = [websocketPort, autoOpen, $generalSettings.showTCodeMonitor];
       if (connectionSaveTimer) clearTimeout(connectionSaveTimer);
       connectionSaveTimer = setTimeout(() => {
         invoke('save_connection_settings', {

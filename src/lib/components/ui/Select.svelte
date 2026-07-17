@@ -1,6 +1,5 @@
 <script lang="ts">
   import { cn } from '$lib/utils/cn.js';
-  import type { HTMLSelectAttributes } from 'svelte/elements';
 
   
 

@@ -1,6 +1,6 @@
 <script lang="ts">
 
-  import { createEventDispatcher, tick, onMount, onDestroy } from 'svelte';
+  import { tick, onMount, onDestroy } from 'svelte';
   import { scale } from 'svelte/transition';
 
   interface Props {
@@ -28,7 +28,6 @@
     children
   }: Props = $props();
 
-  const dispatch = createEventDispatcher();
 
   // Unique ID for this popover instance
   const popoverId = `popover-${Math.random().toString(36).substr(2, 9)}`;
@@ -62,7 +61,6 @@
   function handleOtherPopoverOpen(event: CustomEvent<string>) {
     if (event.detail !== popoverId && open) {
       open = false;
-      dispatch('close');
     }
   }
 
@@ -152,7 +150,6 @@
     // Only close if clicking the backdrop itself, not bubbled events
     if (event.target === event.currentTarget) {
       open = false;
-      dispatch('close');
     }
   }
 
@@ -165,7 +162,6 @@
     if (event.key === 'Escape' && open) {
       event.preventDefault();
       open = false;
-      dispatch('close');
     }
   }
 
@@ -196,7 +192,6 @@
 
     // Click was outside, close the popover
     open = false;
-    dispatch('close');
   }
 </script>
 

@@ -1,6 +1,5 @@
 <script lang="ts">
   import { cn } from '$lib/utils/cn.js';
-  import type { HTMLButtonAttributes } from 'svelte/elements';
 
   
 

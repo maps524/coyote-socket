@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
   import { fade, scale } from 'svelte/transition';
   import { X } from 'lucide-svelte';
   
@@ -11,11 +10,9 @@
 
   let { open = $bindable(false), title = '', children }: Props = $props();
   
-  const dispatch = createEventDispatcher();
   
   function handleClose() {
     open = false;
-    dispatch('close');
   }
   
   function handleKeydown(e: KeyboardEvent) {
