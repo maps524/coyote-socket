@@ -88,7 +88,7 @@
 
     <!-- Reset Button -->
     <div class="flex justify-end pt-2">
-      <Button variant="outline" size="sm" on:click={resetButtplugSettings}>
+      <Button variant="outline" size="sm" onclick={resetButtplugSettings}>
         Reset to Defaults
       </Button>
     </div>

@@ -135,7 +135,7 @@
 
       <!-- Connection Button for compact mode -->
       <Button
-        on:click={toggleConnection}
+        onclick={toggleConnection}
         variant={isConnected ? 'destructive' : 'default'}
         size="sm"
         class="w-full"
@@ -147,7 +147,7 @@
     {#if !compact && !autoOpen}
       <!-- Connection Button -->
       <Button
-        on:click={toggleConnection}
+        onclick={toggleConnection}
         variant={isConnected ? 'destructive' : 'default'}
         class="w-full"
       >

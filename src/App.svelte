@@ -1,7 +1,4 @@
 <script lang="ts">
-  import { createBubbler, stopPropagation } from 'svelte/legacy';
-
-  const bubble = createBubbler();
   import { onMount, onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -1685,7 +1682,7 @@
           <Button
             variant="ghost"
             size="icon"
-            on:click={() => settingsOpen = true}
+            onclick={() => settingsOpen = true}
             class="h-8 w-8"
           >
             <Settings class="h-4 w-4" />
@@ -1694,7 +1691,7 @@
           <Button
             variant="ghost"
             size="icon"
-            on:click={() => helpOpen = true}
+            onclick={() => helpOpen = true}
             class="h-8 w-8"
           >
             <HelpCircle class="h-4 w-4" />
@@ -2207,13 +2204,13 @@
     </TabsClassic>
 
     <div class="flex justify-end gap-2 pt-3 border-t shrink-0">
-      <Button variant="outline" size="sm" on:click={() => settingsOpen = false}>
+      <Button variant="outline" size="sm" onclick={() => settingsOpen = false}>
         Cancel
       </Button>
       <Button
         size="sm"
         class="save-button"
-        on:click={() => {
+        onclick={() => {
           saveSettings();
           settingsOpen = false;
         }}
@@ -2288,9 +2285,9 @@
                  stopPropagation wrapper so interacting never starts a drag. -->
             <div
               class="shrink-0 flex items-center gap-1"
-              onmousedown={stopPropagation(bubble('mousedown'))}
-              ontouchstart={stopPropagation(bubble('touchstart'))}
-              onpointerdown={stopPropagation(bubble('pointerdown'))}
+              onmousedown={(e) => e.stopPropagation()}
+              ontouchstart={(e) => e.stopPropagation()}
+              onpointerdown={(e) => e.stopPropagation()}
               role="presentation"
             >
               <GamepadBindControl
@@ -2311,9 +2308,9 @@
             {#if !capture}
             <div
               class="shrink-0"
-              onmousedown={stopPropagation(bubble('mousedown'))}
-              ontouchstart={stopPropagation(bubble('touchstart'))}
-              onpointerdown={stopPropagation(bubble('pointerdown'))}
+              onmousedown={(e) => e.stopPropagation()}
+              ontouchstart={(e) => e.stopPropagation()}
+              onpointerdown={(e) => e.stopPropagation()}
               role="presentation"
             >
               <Popover bind:open={deleteConfirmOpen[preset.id]} align="end" compact={true} contentClass="w-[220px]! min-w-0">
@@ -2335,14 +2332,14 @@
                     <Button
                       variant="ghost"
                       class="h-7 px-2 text-xs"
-                      on:click={() => (deleteConfirmOpen[preset.id] = false)}
+                      onclick={() => (deleteConfirmOpen[preset.id] = false)}
                     >
                       Cancel
                     </Button>
                     <Button
                       variant="destructive"
                       class="h-7 px-2 text-xs"
-                      on:click={() => deletePresetFromReorder(preset)}
+                      onclick={() => deletePresetFromReorder(preset)}
                     >
                       Delete
                     </Button>
@@ -2356,7 +2353,7 @@
       </div>
     {/if}
     <div class="flex justify-end mt-3 pt-3 border-t border-border">
-      <Button on:click={() => (reorderOpen = false)}>Done</Button>
+      <Button onclick={() => (reorderOpen = false)}>Done</Button>
     </div>
   </Dialog>
 

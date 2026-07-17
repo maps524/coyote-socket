@@ -1,7 +1,4 @@
 <script lang="ts">
-  import { createBubbler } from 'svelte/legacy';
-
-  const bubble = createBubbler();
   import { cn } from '$lib/utils/cn.js';
   import type { HTMLInputAttributes } from 'svelte/elements';
 
@@ -24,10 +21,4 @@
   )}
   bind:value
   {...rest}
-  oninput={bubble('input')}
-  onchange={bubble('change')}
-  onkeydown={bubble('keydown')}
-  onkeyup={bubble('keyup')}
-  onfocus={bubble('focus')}
-  onblur={bubble('blur')}
 />

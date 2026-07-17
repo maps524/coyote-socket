@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { stopPropagation } from 'svelte/legacy';
 
   import { createEventDispatcher, tick, onMount, onDestroy } from 'svelte';
   import { scale } from 'svelte/transition';
@@ -205,7 +204,7 @@
   <div
     bind:this={triggerEl}
     class="popover-trigger"
-    onclick={stopPropagation(handleTriggerClick)}
+    onclick={(e) => { e.stopPropagation(); handleTriggerClick(); }}
     onkeydown={handleTriggerKeydown}
     role="button"
     tabindex="0"

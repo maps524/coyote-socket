@@ -51,8 +51,8 @@
       {:else}
         <GamepadIcon binding={captureToBinding(captureParts)} />
       {/if}
-      <Button variant="default" size="sm" class="h-6 px-2 text-[11px]" on:click={() => dispatch('save')}>Save</Button>
-      <Button variant="ghost" size="sm" class="h-6 px-2 text-[11px]" on:click={() => dispatch('cancel')}>Cancel</Button>
+      <Button variant="default" size="sm" class="h-6 px-2 text-[11px]" onclick={() => dispatch('save')}>Save</Button>
+      <Button variant="ghost" size="sm" class="h-6 px-2 text-[11px]" onclick={() => dispatch('cancel')}>Cancel</Button>
     {:else if binding}
       <button
         type="button"
@@ -94,14 +94,14 @@
     {/if}
   </span>
   {#if capturing}
-    <Button variant="default" size="sm" on:click={() => dispatch('save')}>Save</Button>
-    <Button variant="ghost" size="sm" on:click={() => dispatch('cancel')}>Cancel</Button>
+    <Button variant="default" size="sm" onclick={() => dispatch('save')}>Save</Button>
+    <Button variant="ghost" size="sm" onclick={() => dispatch('cancel')}>Cancel</Button>
   {:else}
-    <Button variant="outline" size="sm" on:click={() => dispatch('start')}>
+    <Button variant="outline" size="sm" onclick={() => dispatch('start')}>
       {binding ? 'Rebind' : 'Bind'}
     </Button>
     {#if binding}
-      <Button variant="ghost" size="sm" on:click={() => dispatch('clear')}>✕</Button>
+      <Button variant="ghost" size="sm" onclick={() => dispatch('clear')}>✕</Button>
     {/if}
   {/if}
 {/if}

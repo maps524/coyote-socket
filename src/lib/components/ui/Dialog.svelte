@@ -1,7 +1,4 @@
 <script lang="ts">
-  import { createBubbler, stopPropagation } from 'svelte/legacy';
-
-  const bubble = createBubbler();
   import { createEventDispatcher } from 'svelte';
   import { fade, scale } from 'svelte/transition';
   import { X } from 'lucide-svelte';
@@ -40,7 +37,7 @@
   <div
     class="fixed left-[50%] top-[50%] z-50 flex flex-col w-full max-w-lg max-h-[90vh] translate-x-[-50%] translate-y-[-50%] border bg-background p-6 shadow-lg sm:rounded-lg"
     transition:scale={{ duration: 150 }}
-    onclick={stopPropagation(bubble('click'))}
+    onclick={(e) => e.stopPropagation()}
     onkeydown={handleKeydown}
     role="dialog"
     tabindex="-1"

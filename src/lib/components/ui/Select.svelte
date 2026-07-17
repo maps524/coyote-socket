@@ -1,7 +1,4 @@
 <script lang="ts">
-  import { createBubbler } from 'svelte/legacy';
-
-  const bubble = createBubbler();
   import { cn } from '$lib/utils/cn.js';
   import type { HTMLSelectAttributes } from 'svelte/elements';
 
@@ -25,7 +22,6 @@
   )}
   bind:value
   {...rest}
-  onchange={bubble('change')}
 >
   {@render children?.()}
 </select>

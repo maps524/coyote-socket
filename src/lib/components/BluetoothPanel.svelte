@@ -316,7 +316,7 @@
         <Button
           variant="outline"
           size="icon"
-          on:click={loadBTAdapters}
+          onclick={loadBTAdapters}
           disabled={isConnected}
           class="h-10 w-10"
         >
@@ -344,7 +344,7 @@
         <Button
           variant="outline"
           size="icon"
-          on:click={refreshScan}
+          onclick={refreshScan}
           disabled={isConnected}
           class="h-10 w-10"
         >
@@ -357,7 +357,7 @@
       <!-- Action Buttons -->
       <div class="grid grid-cols-2 gap-2">
         <Button
-          on:click={refreshScan}
+          onclick={refreshScan}
           disabled={isConnected}
           variant="outline"
         >
@@ -365,7 +365,7 @@
         </Button>
         
         <Button 
-          on:click={connectDevice}
+          onclick={connectDevice}
           disabled={!selectedDevice}
           variant={isConnected ? 'destructive' : 'default'}
         >
@@ -389,7 +389,7 @@
 
       <!-- Connection Button for compact mode -->
       <Button
-        on:click={connectDevice}
+        onclick={connectDevice}
         disabled={!selectedDevice}
         variant={isConnected ? 'destructive' : 'default'}
         size="sm"

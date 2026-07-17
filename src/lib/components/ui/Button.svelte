@@ -1,7 +1,4 @@
 <script lang="ts">
-  import { createBubbler } from 'svelte/legacy';
-
-  const bubble = createBubbler();
   import { cn } from '$lib/utils/cn.js';
   import type { HTMLButtonAttributes } from 'svelte/elements';
 
@@ -49,7 +46,6 @@
     className
   )}
   {...rest}
-  onclick={bubble('click')}
 >
   {@render children?.()}
 </button>
