@@ -11,7 +11,10 @@
   import Slider from './Slider.svelte';
   import ScalarInputControl from './ScalarInputControl.svelte';
 
-  /**
+  
+
+  interface Props {
+    /**
    * Per-parameter transforms editor (sub G.2).
    *
    * Edits a `ParameterSource.transforms` vector in place: list / add /
@@ -26,9 +29,11 @@
    * `TransformRowVibrate.svelte` etc. and route through the
    * `dispatchUpdate` pattern.
    */
+    channel: 'A' | 'B';
+    transforms?: Transform[];
+  }
 
-  export let channel: 'A' | 'B';
-  export let transforms: Transform[] = [];
+  let { channel, transforms = [] }: Props = $props();
 
   const dispatch = createEventDispatcher<{ change: Transform[] }>();
 
@@ -47,7 +52,7 @@
 
   // Variant picker for the "+ Add" dropdown. Defaults to the first
   // variant; users pick any variant from `TRANSFORM_TYPES`.
-  let pendingType: Transform['type'] = 'smooth';
+  let pendingType: Transform['type'] = $state('smooth');
 
   function emit(next: Transform[]) {
     dispatch('change', next);
@@ -98,7 +103,7 @@
 
   // Tailwind class palette — keep label / button styling consistent
   // with the surrounding popover so the editor doesn't feel grafted on.
-  $: variantTone = channel === 'A' ? 'text-primary' : 'text-secondary';
+  let variantTone = $derived(channel === 'A' ? 'text-primary' : 'text-secondary');
 </script>
 
 <!-- Shared datalist for axis-name autocomplete (sub G.3.2). Pulls from
@@ -127,7 +132,7 @@
           class="p-0.5 text-muted-foreground hover:text-foreground disabled:opacity-30"
           disabled={i === 0}
           aria-label="Move up"
-          on:click={() => moveUp(i)}
+          onclick={() => moveUp(i)}
         >
           <ArrowUp class="h-3 w-3" />
         </button>
@@ -136,7 +141,7 @@
           class="p-0.5 text-muted-foreground hover:text-foreground disabled:opacity-30"
           disabled={i === transforms.length - 1}
           aria-label="Move down"
-          on:click={() => moveDown(i)}
+          onclick={() => moveDown(i)}
         >
           <ArrowDown class="h-3 w-3" />
         </button>
@@ -145,7 +150,7 @@
           type="button"
           class="ml-auto p-0.5 text-muted-foreground hover:text-destructive"
           aria-label="Delete transform"
-          on:click={() => deleteAt(i)}
+          onclick={() => deleteAt(i)}
         >
           <X class="h-3 w-3" />
         </button>
@@ -161,7 +166,7 @@
             min="1"
             step="10"
             value={t.time_constant_ms}
-            on:input={(e) => set(i, t, 'time_constant_ms', num(e.currentTarget.value, t.time_constant_ms))}
+            oninput={(e) => set(i, t, 'time_constant_ms', num(e.currentTarget.value, t.time_constant_ms))}
             class="w-16 px-1 py-0.5 text-xs rounded border border-border bg-background text-foreground"
           />
         </label>
@@ -172,7 +177,7 @@
             type="number"
             step="0.1"
             value={t.factor}
-            on:input={(e) => set(i, t, 'factor', num(e.currentTarget.value, t.factor))}
+            oninput={(e) => set(i, t, 'factor', num(e.currentTarget.value, t.factor))}
             class="w-16 px-1 py-0.5 text-xs rounded border border-border bg-background text-foreground"
           />
         </label>
@@ -183,7 +188,7 @@
             type="number"
             step="0.05"
             value={t.min}
-            on:input={(e) => set(i, t, 'min', num(e.currentTarget.value, t.min))}
+            oninput={(e) => set(i, t, 'min', num(e.currentTarget.value, t.min))}
             class="w-14 px-1 py-0.5 text-xs rounded border border-border bg-background text-foreground"
           />
           <span>Max</span>
@@ -191,7 +196,7 @@
             type="number"
             step="0.05"
             value={t.max}
-            on:input={(e) => set(i, t, 'max', num(e.currentTarget.value, t.max))}
+            oninput={(e) => set(i, t, 'max', num(e.currentTarget.value, t.max))}
             class="w-14 px-1 py-0.5 text-xs rounded border border-border bg-background text-foreground"
           />
         </div>
@@ -205,7 +210,7 @@
             min="1"
             step="10"
             value={t.duration_ms}
-            on:input={(e) => set(i, t, 'duration_ms', num(e.currentTarget.value, t.duration_ms))}
+            oninput={(e) => set(i, t, 'duration_ms', num(e.currentTarget.value, t.duration_ms))}
             class="w-16 px-1 py-0.5 text-xs rounded border border-border bg-background text-foreground"
           />
         </label>
@@ -216,7 +221,7 @@
             type="text"
             value={t.otherAxis}
             placeholder="L1" list="transforms-axes"
-            on:input={(e) => set(i, t, 'otherAxis', e.currentTarget.value)}
+            oninput={(e) => set(i, t, 'otherAxis', e.currentTarget.value)}
             class="w-20 {axisInputClass(t.otherAxis)}"
           />
         </label>
@@ -288,7 +293,7 @@
             step="0.5"
             min="0.1"
             value={t.maxSpeedHz}
-            on:input={(e) => set(i, t, 'maxSpeedHz', num(e.currentTarget.value, t.maxSpeedHz))}
+            oninput={(e) => set(i, t, 'maxSpeedHz', num(e.currentTarget.value, t.maxSpeedHz))}
             class="w-14 px-1 py-0.5 text-xs rounded border border-border bg-background text-foreground"
           />
         </label>
@@ -331,7 +336,7 @@
             step="0.5"
             min="0.1"
             value={t.maxSpeedHz}
-            on:input={(e) => set(i, t, 'maxSpeedHz', num(e.currentTarget.value, t.maxSpeedHz))}
+            oninput={(e) => set(i, t, 'maxSpeedHz', num(e.currentTarget.value, t.maxSpeedHz))}
             class="w-14 px-1 py-0.5 text-xs rounded border border-border bg-background text-foreground"
           />
         </label>
@@ -363,7 +368,7 @@
           <span>Method</span>
           <select
             value={t.method}
-            on:change={(e) => set(i, t, 'method', e.currentTarget.value === 'Clamp' ? 'Clamp' : 'Downsample')}
+            onchange={(e) => set(i, t, 'method', e.currentTarget.value === 'Clamp' ? 'Clamp' : 'Downsample')}
             class="px-1 py-0.5 text-xs rounded border border-border bg-background text-foreground"
           >
             <option value="Downsample">Downsample</option>
@@ -375,7 +380,7 @@
           <input
             type="checkbox"
             checked={t.useMidpoint}
-            on:change={(e) => set(i, t, 'useMidpoint', e.currentTarget.checked)}
+            onchange={(e) => set(i, t, 'useMidpoint', e.currentTarget.checked)}
             class="w-3.5 h-3.5 rounded border-border bg-background text-primary focus:ring-primary focus:ring-offset-0"
           />
         </label>
@@ -396,7 +401,7 @@
     <button
       type="button"
       class="inline-flex items-center gap-0.5 px-2 py-1 text-xs rounded bg-muted hover:bg-muted/70 text-foreground"
-      on:click={addTransform}
+      onclick={addTransform}
     >
       <Plus class="h-3 w-3" />
       Add

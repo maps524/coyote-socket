@@ -1,8 +1,13 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   
-  export let value = '';
-  export let tabs: Array<{ value: string; label: string }> = [];
+  interface Props {
+    value?: string;
+    tabs?: Array<{ value: string; label: string }>;
+    children?: import('svelte').Snippet;
+  }
+
+  let { value = $bindable(''), tabs = [], children }: Props = $props();
   
   const dispatch = createEventDispatcher();
   
@@ -17,18 +22,18 @@
     {#each tabs as tab}
       <button
         class="px-4 py-2 text-sm font-medium transition-colors hover:text-primary relative {value === tab.value ? 'text-primary' : 'text-muted-foreground'}"
-        on:click={() => selectTab(tab.value)}
+        onclick={() => selectTab(tab.value)}
       >
         {tab.label}
         {#if value === tab.value}
-          <div class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
+          <div class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"></div>
         {/if}
       </button>
     {/each}
   </div>
 
   <div class="py-4 flex-1 min-h-0 overflow-y-auto scrollbar-thin">
-    <slot />
+    {@render children?.()}
   </div>
 </div>
 

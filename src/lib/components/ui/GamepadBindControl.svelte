@@ -13,12 +13,23 @@
   import GamepadIcon from './GamepadIcon.svelte';
   import type { ChordPart, GamepadBinding } from '../../types/settings';
 
-  export let binding: GamepadBinding | undefined = undefined;
-  export let capturing = false;
-  export let captureParts: ChordPart[] = [];
-  export let compact = false;
-  // Label used in the icon-button titles (compact mode), e.g. the preset name.
-  export let label = '';
+  
+  interface Props {
+    binding?: GamepadBinding | undefined;
+    capturing?: boolean;
+    captureParts?: ChordPart[];
+    compact?: boolean;
+    // Label used in the icon-button titles (compact mode), e.g. the preset name.
+    label?: string;
+  }
+
+  let {
+    binding = undefined,
+    capturing = false,
+    captureParts = [],
+    compact = false,
+    label = ''
+  }: Props = $props();
 
   const dispatch = createEventDispatcher<{
     start: void; save: void; cancel: void; clear: void;
@@ -29,7 +40,7 @@
     return { kind: 'combo', parts };
   }
 
-  $: bindTitle = label ? `Bind a gamepad combo to ${label}` : 'Bind a gamepad combo';
+  let bindTitle = $derived(label ? `Bind a gamepad combo to ${label}` : 'Bind a gamepad combo');
 </script>
 
 {#if compact}
@@ -47,7 +58,7 @@
         type="button"
         class="flex items-center rounded px-1 py-0.5 hover:bg-background/50 cursor-pointer"
         title="Rebind gamepad combo"
-        on:click={() => dispatch('start')}
+        onclick={() => dispatch('start')}
       >
         <GamepadIcon {binding} />
       </button>
@@ -55,7 +66,7 @@
         type="button"
         class="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 cursor-pointer"
         title="Clear gamepad combo"
-        on:click={() => dispatch('clear')}
+        onclick={() => dispatch('clear')}
       >
         <X class="h-3.5 w-3.5" />
       </button>
@@ -64,7 +75,7 @@
         type="button"
         class="w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-background/50 cursor-pointer"
         title={bindTitle}
-        on:click={() => dispatch('start')}
+        onclick={() => dispatch('start')}
       >
         <Gamepad2 class="h-4 w-4" />
       </button>

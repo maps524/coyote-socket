@@ -17,7 +17,7 @@
   type FeatureKey = typeof featureTypes[number]['key'];
 
   // Calculate total features directly from store
-  $: totalFeatures = getTotalFeatureCount($buttplugSettings);
+  let totalFeatures = $derived(getTotalFeatureCount($buttplugSettings));
 
   function addFeature(key: FeatureKey) {
     buttplugSettings.update(s => ({
@@ -46,7 +46,7 @@
       {#each featureTypes as type}
         <div class="flex items-center justify-between py-2 border-b border-border last:border-0">
           <div class="flex items-center gap-2">
-            <svelte:component this={type.icon} class="h-4 w-4 text-primary" />
+            <type.icon class="h-4 w-4 text-primary" />
             <span class="text-sm text-foreground min-w-[120px]">{type.name}</span>
           </div>
 
@@ -54,7 +54,7 @@
             <!-- Feature count buttons -->
             {#each Array($buttplugSettings[type.key]) as _, index}
               <button
-                on:click={() => removeFeature(type.key)}
+                onclick={() => removeFeature(type.key)}
                 class="flex items-center justify-center h-6 w-6 rounded border border-border bg-muted hover:bg-muted/70 transition-colors text-xs font-medium text-foreground relative group"
                 title="Remove {type.name} {index + 1}"
               >
@@ -69,7 +69,7 @@
 
             <!-- Add button -->
             <button
-              on:click={() => addFeature(type.key)}
+              onclick={() => addFeature(type.key)}
               class="flex items-center justify-center h-6 w-6 rounded border border-border bg-primary/10 hover:bg-primary/20 transition-colors"
               title="Add {type.name}"
             >

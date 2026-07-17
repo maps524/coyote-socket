@@ -1,15 +1,20 @@
 <script lang="ts">
+  import { createBubbler } from 'svelte/legacy';
+
+  const bubble = createBubbler();
   import { cn } from '$lib/utils/cn.js';
   import type { HTMLInputAttributes } from 'svelte/elements';
 
-  interface $$Props extends HTMLInputAttributes {
+  
+
+  
+  interface Props {
     class?: string;
     value?: string;
+    [key: string]: any
   }
 
-  let className: $$Props['class'] = undefined;
-  export { className as class };
-  export let value: string = '';
+  let { class: className = undefined, value = $bindable(''), ...rest }: Props = $props();
 </script>
 
 <input
@@ -18,11 +23,11 @@
     className
   )}
   bind:value
-  {...$$restProps}
-  on:input
-  on:change
-  on:keydown
-  on:keyup
-  on:focus
-  on:blur
+  {...rest}
+  oninput={bubble('input')}
+  onchange={bubble('change')}
+  onkeydown={bubble('keydown')}
+  onkeyup={bubble('keyup')}
+  onfocus={bubble('focus')}
+  onblur={bubble('blur')}
 />

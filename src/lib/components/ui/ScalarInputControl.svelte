@@ -3,7 +3,13 @@
   import { type ScalarInput, isAxisInput } from '$lib/types/modulation.js';
   import Slider from './Slider.svelte';
 
-  /**
+  
+
+  
+  
+  
+  interface Props {
+    /**
    * Editor for a transform's `ScalarInput` modifier (speed / direction /
    * amount). Toggles between a **constant** (the default — a slider, or a
    * CW/CCW pair when `control === 'toggle'`) and a **linked bus axis**
@@ -14,32 +20,44 @@
    * Emits `change` with the new `ScalarInput` (a `number` for constant, a
    * `string` for axis). The parent merges it back into the transform.
    */
+    value: ScalarInput;
+    label: string;
+    channel: 'A' | 'B';
+    /** 'slider' = 0..1 magnitude; 'toggle' = directional CW/CCW pair. */
+    control?: 'slider' | 'toggle';
+    min?: number;
+    max?: number;
+    step?: number;
+    /** Value to seed when the user switches from axis → constant. */
+    constFallback?: number;
+    /** Known bus axes for the dropdown (from `inputBus.knownAxes`). */
+    axes?: readonly string[];
+  }
 
-  export let value: ScalarInput;
-  export let label: string;
-  export let channel: 'A' | 'B';
-  /** 'slider' = 0..1 magnitude; 'toggle' = directional CW/CCW pair. */
-  export let control: 'slider' | 'toggle' = 'slider';
-  export let min = 0;
-  export let max = 1;
-  export let step = 0.05;
-  /** Value to seed when the user switches from axis → constant. */
-  export let constFallback = 0.5;
-  /** Known bus axes for the dropdown (from `inputBus.knownAxes`). */
-  export let axes: readonly string[] = [];
+  let {
+    value,
+    label,
+    channel,
+    control = 'slider',
+    min = 0,
+    max = 1,
+    step = 0.05,
+    constFallback = 0.5,
+    axes = []
+  }: Props = $props();
 
   const dispatch = createEventDispatcher<{ change: ScalarInput }>();
 
-  $: linked = isAxisInput(value);
-  $: constValue = linked ? constFallback : (value as number);
-  $: axisValue = linked ? (value as string) : '';
-  $: variant = (channel === 'A' ? 'primary' : 'secondary') as 'primary' | 'secondary';
+  let linked = $derived(isAxisInput(value));
+  let constValue = $derived(linked ? constFallback : (value as number));
+  let axisValue = $derived(linked ? (value as string) : '');
+  let variant = $derived((channel === 'A' ? 'primary' : 'secondary') as 'primary' | 'secondary');
 
   // Include the current axis in the option list even if the bus hasn't
   // reported it yet this session, so a saved-but-currently-silent axis
   // (e.g. a Buttplug feature not connected right now) still shows.
-  $: options =
-    axisValue && !axes.includes(axisValue) ? [axisValue, ...axes] : [...axes];
+  let options =
+    $derived(axisValue && !axes.includes(axisValue) ? [axisValue, ...axes] : [...axes]);
 
   function useConst() {
     if (!linked) return;
@@ -67,7 +85,7 @@
           class="px-1.5 py-0.5 text-[10px] {!linked
             ? 'bg-muted text-foreground'
             : 'text-muted-foreground hover:text-foreground'}"
-          on:click={useConst}
+          onclick={useConst}
         >
           Value
         </button>
@@ -76,7 +94,7 @@
           class="px-1.5 py-0.5 text-[10px] border-l border-border {linked
             ? 'bg-muted text-foreground'
             : 'text-muted-foreground hover:text-foreground'}"
-          on:click={useAxis}
+          onclick={useAxis}
         >
           Axis
         </button>
@@ -87,7 +105,7 @@
   {#if linked}
     <select
       value={axisValue}
-      on:change={(e) => dispatch('change', e.currentTarget.value)}
+      onchange={(e) => dispatch('change', e.currentTarget.value)}
       class="w-full px-1 py-0.5 text-xs font-mono rounded border border-border bg-background text-foreground"
     >
       {#if options.length === 0}
@@ -108,7 +126,7 @@
         class="px-2 py-0.5 {constValue >= 0.5
           ? 'bg-muted text-foreground'
           : 'text-muted-foreground hover:text-foreground'}"
-        on:click={() => dispatch('change', 1)}
+        onclick={() => dispatch('change', 1)}
       >
         ↻ CW
       </button>
@@ -117,7 +135,7 @@
         class="px-2 py-0.5 border-l border-border {constValue < 0.5
           ? 'bg-muted text-foreground'
           : 'text-muted-foreground hover:text-foreground'}"
-        on:click={() => dispatch('change', 0)}
+        onclick={() => dispatch('change', 0)}
       >
         ↺ CCW
       </button>

@@ -1,4 +1,4 @@
-<script lang="ts" context="module">
+<script lang="ts" module>
   export interface BluetoothDevice {
     address: string;
     name?: string;
@@ -13,6 +13,8 @@
 </script>
 
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { RefreshCw } from 'lucide-svelte';
@@ -21,68 +23,39 @@
   import Toggle from './ui/Toggle.svelte';
   import StatusIndicator from './ui/StatusIndicator.svelte';
 
-  export let compact = false;
-  export let selectedInterface = 0;
-  export let autoScan = true;
-  export let autoConnect = true;  // Auto-connect when device found
-  export let onConnectionChange = (connected: boolean) => {};
-  export let savedDevices: BluetoothDevice[] = [];
-  export let savedSelectedDevice = '';
-  export let isConnected = false;  // Now a bindable prop from parent
-
-  let bluetoothAdapters: string[] = [];
-  let selectedDevice = savedSelectedDevice;
-  let connectionStatus = '';
-  let adaptersLoaded = false;
-  let scanActive = false; // backend scan session running for this panel
-
-  // Devices are owned by the backend scan loop now; mirror the live,
-  // store-backed `savedDevices` prop straight through to the dropdown.
-  $: bluetoothDevices = savedDevices;
-
-  // Auto-select the first Coyote once one appears and nothing is chosen yet.
-  $: if (!selectedDevice && bluetoothDevices.length > 0) {
-    const coyote = bluetoothDevices.find(d =>
-      d.name?.includes('COYOTE') || d.name?.includes('DG-LAB') || d.name?.includes('47L')
-    );
-    if (coyote) selectedDevice = coyote.address;
+  interface Props {
+    compact?: boolean;
+    selectedInterface?: number;
+    autoScan?: boolean;
+    autoConnect?: boolean; // Auto-connect when device found
+    onConnectionChange?: any;
+    savedDevices?: BluetoothDevice[];
+    savedSelectedDevice?: string;
+    isConnected?: boolean; // Now a bindable prop from parent
   }
 
-  $: if (isConnected && selectedDevice) {
-    const device = bluetoothDevices.find(d => d.address === selectedDevice);
-    if (device) {
-      connectionStatus = `Connected to ${getDeviceDisplayName(device)}`;
-    }
-  }
+  let {
+    compact = false,
+    selectedInterface = $bindable(0),
+    autoScan = $bindable(true),
+    autoConnect = $bindable(true),
+    onConnectionChange = (connected: boolean) => {},
+    savedDevices = [],
+    savedSelectedDevice = '',
+    isConnected = $bindable(false)
+  }: Props = $props();
 
-  // A usable adapter is one the OS actually reported (not the placeholder
-  // entry we substitute when btleplug finds nothing).
-  $: hasValidAdapter =
-    adaptersLoaded && bluetoothAdapters.length > 0 && bluetoothAdapters[0] !== 'No adapters found';
+  let bluetoothAdapters: string[] = $state([]);
+  let selectedDevice = $state(savedSelectedDevice);
+  let connectionStatus = $state('');
+  let adaptersLoaded = $state(false);
+  let scanActive = $state(false); // backend scan session running for this panel
 
-  // Placeholder text shown inside the device dropdown while it's empty.
-  $: deviceStatusText = !adaptersLoaded
-    ? 'Waiting for interface…'
-    : !hasValidAdapter
-      ? 'No Bluetooth interface'
-      : scanActive
-        ? 'Scanning…'
-        : 'No devices found';
 
-  // Live activity state for the dot indicator next to the device label. The
-  // dot pulses the whole time the backend scan is active, so it reads as
-  // continuously scanning rather than flickering.
-  $: scanState = !adaptersLoaded
-    ? { label: 'Waiting for interface', state: 'idle' as const }
-    : !hasValidAdapter
-      ? { label: 'No interface', state: 'idle' as const }
-      : isConnected
-        ? { label: 'Connected', state: 'active' as const }
-        : scanActive
-          ? { label: 'Scanning', state: 'scanning' as const }
-          : autoScan
-            ? { label: 'Starting…', state: 'scanning' as const }
-            : { label: 'Auto-scan off', state: 'idle' as const };
+
+
+
+
 
   // --- Backend-owned scanning ----------------------------------------------
   // The backend runs the real scan loop and pushes `devices-discovered`
@@ -111,16 +84,6 @@
     }
   }
 
-  // Drive the backend scan from live state: scan while enabled + idle, stop
-  // once connected or the user disables auto-scan. This is what makes the
-  // auto-scan toggle visibly do something.
-  $: if (adaptersLoaded) {
-    if (autoScan && hasValidAdapter && !isConnected) {
-      startScan();
-    } else {
-      stopScan();
-    }
-  }
 
   onDestroy(() => {
     stopScan();
@@ -266,6 +229,64 @@
       }
     }
   }
+  // Devices are owned by the backend scan loop now; mirror the live,
+  // store-backed `savedDevices` prop straight through to the dropdown.
+  let bluetoothDevices = $derived(savedDevices);
+  // Auto-select the first Coyote once one appears and nothing is chosen yet.
+  run(() => {
+    if (!selectedDevice && bluetoothDevices.length > 0) {
+      const coyote = bluetoothDevices.find(d =>
+        d.name?.includes('COYOTE') || d.name?.includes('DG-LAB') || d.name?.includes('47L')
+      );
+      if (coyote) selectedDevice = coyote.address;
+    }
+  });
+  run(() => {
+    if (isConnected && selectedDevice) {
+      const device = bluetoothDevices.find(d => d.address === selectedDevice);
+      if (device) {
+        connectionStatus = `Connected to ${getDeviceDisplayName(device)}`;
+      }
+    }
+  });
+  // A usable adapter is one the OS actually reported (not the placeholder
+  // entry we substitute when btleplug finds nothing).
+  let hasValidAdapter =
+    $derived(adaptersLoaded && bluetoothAdapters.length > 0 && bluetoothAdapters[0] !== 'No adapters found');
+  // Placeholder text shown inside the device dropdown while it's empty.
+  let deviceStatusText = $derived(!adaptersLoaded
+    ? 'Waiting for interface…'
+    : !hasValidAdapter
+      ? 'No Bluetooth interface'
+      : scanActive
+        ? 'Scanning…'
+        : 'No devices found');
+  // Live activity state for the dot indicator next to the device label. The
+  // dot pulses the whole time the backend scan is active, so it reads as
+  // continuously scanning rather than flickering.
+  let scanState = $derived(!adaptersLoaded
+    ? { label: 'Waiting for interface', state: 'idle' as const }
+    : !hasValidAdapter
+      ? { label: 'No interface', state: 'idle' as const }
+      : isConnected
+        ? { label: 'Connected', state: 'active' as const }
+        : scanActive
+          ? { label: 'Scanning', state: 'scanning' as const }
+          : autoScan
+            ? { label: 'Starting…', state: 'scanning' as const }
+            : { label: 'Auto-scan off', state: 'idle' as const });
+  // Drive the backend scan from live state: scan while enabled + idle, stop
+  // once connected or the user disables auto-scan. This is what makes the
+  // auto-scan toggle visibly do something.
+  run(() => {
+    if (adaptersLoaded) {
+      if (autoScan && hasValidAdapter && !isConnected) {
+        startScan();
+      } else {
+        stopScan();
+      }
+    }
+  });
 </script>
 
 <div class="{compact ? '' : 'bg-card border rounded-lg p-4'}">
@@ -280,7 +301,7 @@
       <div class="flex gap-2">
         <select
           value={selectedInterface}
-          on:change={handleInterfaceChange}
+          onchange={handleInterfaceChange}
           class="flex h-10 w-full rounded-md border border-input bg-background text-foreground pl-3 pr-10 py-2 text-sm ring-offset-background appearance-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 flex-1"
           style="background-image: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M10.293 3.293L6 7.586 1.707 3.293A1 1 0 00.293 4.707l5 5a1 1 0 001.414 0l5-5a1 1 0 10-1.414-1.414z'/%3E%3C/svg%3E&quot;); background-repeat: no-repeat; background-position: right 0.7rem center; background-size: 12px;"
         >

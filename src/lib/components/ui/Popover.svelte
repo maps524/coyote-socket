@@ -1,23 +1,39 @@
 <script lang="ts">
+  import { run, stopPropagation } from 'svelte/legacy';
+
   import { createEventDispatcher, tick, onMount, onDestroy } from 'svelte';
   import { scale } from 'svelte/transition';
 
-  export let open = false;
-  export let align: 'start' | 'center' | 'end' = 'start';
-  export let sideOffset = 8;
-  export let contentClass = ''; // Additional classes for content area
-  export let compact = false; // Use smaller padding
+  interface Props {
+    open?: boolean;
+    align?: 'start' | 'center' | 'end';
+    sideOffset?: number;
+    contentClass?: string; // Additional classes for content area
+    compact?: boolean; // Use smaller padding
+    trigger?: import('svelte').Snippet;
+    children?: import('svelte').Snippet;
+  }
+
+  let {
+    open = $bindable(false),
+    align = 'start',
+    sideOffset = 8,
+    contentClass = '',
+    compact = false,
+    trigger,
+    children
+  }: Props = $props();
 
   const dispatch = createEventDispatcher();
 
   // Unique ID for this popover instance
   const popoverId = `popover-${Math.random().toString(36).substr(2, 9)}`;
 
-  let triggerEl: HTMLElement | null = null;
-  let contentEl: HTMLElement | null = null;
-  let portalContainer: HTMLElement | null = null;
-  let popoverStyle = '';
-  let mounted = false;
+  let triggerEl: HTMLElement | null = $state(null);
+  let contentEl: HTMLElement | null = $state(null);
+  let portalContainer: HTMLElement | null = $state(null);
+  let popoverStyle = $state('');
+  let mounted = $state(false);
 
   // Create a portal container at the body level to escape stacking contexts
   onMount(() => {
@@ -122,9 +138,11 @@
     popoverStyle = `top: ${top}px; left: ${left}px;`;
   }
 
-  $: if (open) {
-    updatePosition();
-  }
+  run(() => {
+    if (open) {
+      updatePosition();
+    }
+  });
 
   function handleBackdropClick(event: MouseEvent) {
     // Only close if clicking the backdrop itself, not bubbled events
@@ -178,21 +196,21 @@
   }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-<svelte:document on:click={handleDocumentClick} />
+<svelte:window onkeydown={handleKeydown} />
+<svelte:document onclick={handleDocumentClick} />
 
 <div class="relative inline-block">
   <!-- Trigger -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     bind:this={triggerEl}
     class="popover-trigger"
-    on:click|stopPropagation={handleTriggerClick}
-    on:keydown={handleTriggerKeydown}
+    onclick={stopPropagation(handleTriggerClick)}
+    onkeydown={handleTriggerKeydown}
     role="button"
     tabindex="0"
   >
-    <slot name="trigger" />
+    {@render trigger?.()}
   </div>
 </div>
 
@@ -206,12 +224,12 @@
            {contentClass}"
     style="{popoverStyle}"
     transition:scale={{ duration: 150, start: 0.95, opacity: 0 }}
-    on:click={handleContentClick}
+    onclick={handleContentClick}
     role="dialog"
     aria-modal="true"
   >
     <div class={compact ? 'p-2' : 'p-4'}>
-      <slot />
+      {@render children?.()}
     </div>
   </div>
 {/if}

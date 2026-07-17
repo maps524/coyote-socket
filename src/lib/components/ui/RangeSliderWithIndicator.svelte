@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { run } from 'svelte/legacy';
+
+  import { createEventDispatcher, onDestroy, untrack } from 'svelte';
   import type { ParameterSource, CurveType, Transform } from '$lib/types/modulation.js';
   import { Info, Link, Gamepad2 } from 'lucide-svelte';
   import Tooltip from './Tooltip.svelte';
@@ -8,20 +10,39 @@
   import TransformsEditor from './TransformsEditor.svelte';
   import { knownAxes } from '$lib/stores/inputBus.js';
 
-  // Props
-  export let channel: 'A' | 'B';
-  export let parameterName: string = 'Parameter';
-  export let source: ParameterSource;
-  export let indicatorValue: number = 0; // 0-1 normalized input position
-  export let min: number = 0;
-  export let max: number = 200;
-  export let step: number = 2;
-  export let compact: boolean = false;
-  export let showLabels: boolean = true;
-  export let showWrapper: boolean = true;
-  export let tooltip: string = ''; // Optional tooltip text
-  export let isIntensity: boolean = false; // Special handling for intensity display
-  export let wheelStep: ((currentValue: number, direction: 'up' | 'down') => number) | undefined = undefined;
+  
+  interface Props {
+    // Props
+    channel: 'A' | 'B';
+    parameterName?: string;
+    source: ParameterSource;
+    indicatorValue?: number; // 0-1 normalized input position
+    min?: number;
+    max?: number;
+    step?: number;
+    compact?: boolean;
+    showLabels?: boolean;
+    showWrapper?: boolean;
+    tooltip?: string; // Optional tooltip text
+    isIntensity?: boolean; // Special handling for intensity display
+    wheelStep?: ((currentValue: number, direction: 'up' | 'down') => number) | undefined;
+  }
+
+  let {
+    channel,
+    parameterName = 'Parameter',
+    source,
+    indicatorValue = 0,
+    min = 0,
+    max = 200,
+    step = 2,
+    compact = false,
+    showLabels = true,
+    showWrapper = true,
+    tooltip = '',
+    isIntensity = false,
+    wheelStep = undefined
+  }: Props = $props();
 
   const dispatch = createEventDispatcher<{
     sourceChange: ParameterSource;
@@ -51,23 +72,7 @@
     return !stripped.startsWith('LinearCmd_') && !stripped.startsWith('RotateDir_');
   }
 
-  // A saved preset can reference an axis that isn't live yet (e.g. a
-  // `bp:Vibrate_0` link loaded before the Buttplug client connects). Keep
-  // the currently-selected axis visible regardless so the chip still
-  // renders and can be deselected.
-  $: selectedBp = isLinked && selectedSource.startsWith('bp:') ? selectedSource : null;
-  $: selectedIsTcode = isLinked && !selectedSource.startsWith('GP_') && !selectedSource.startsWith('bp:');
-  $: selectedIsGamepad = isLinked && selectedSource.startsWith('GP_');
 
-  $: hasTcodeAxes = selectedIsTcode
-    || $knownAxes.some((a) => !a.startsWith('GP_') && !a.startsWith('bp:'));
-  $: hasGamepadAxes = selectedIsGamepad || $knownAxes.some((a) => a.startsWith('GP_'));
-  $: buttplugAxes = Array.from(
-    new Set([
-      ...$knownAxes.filter(isBpDisplayAxis),
-      ...(selectedBp ? [selectedBp] : [])
-    ])
-  ).sort((a, b) => a.localeCompare(b));
 
   // Curve options for dropdown
   const curveOptions: { value: CurveType; label: string }[] = [
@@ -80,50 +85,23 @@
 
   // Local values for range handles
   // Always read from source to preserve both staticValue AND rangeMin/Max when switching modes
-  let minValue = source.rangeMin ?? min;
-  let maxValue = source.rangeMax ?? max;
-  let staticValue = source.staticValue ?? 100;
+  let minValue = $state(source.rangeMin ?? min);
+  let maxValue = $state(source.rangeMax ?? max);
+  let staticValue = $state(source.staticValue ?? 100);
 
   // Source selection
-  let selectedSource = source.type === 'static' ? 'static' : (source.sourceAxis ?? 'L0');
-  let selectedCurve: CurveType = source.curve ?? 'linear';
-  let curveStrength: number = source.curveStrength ?? 2.0;
-  let midpointEnabled: boolean = source.midpoint ?? false;
+  let selectedSource = $state(source.type === 'static' ? 'static' : (source.sourceAxis ?? 'L0'));
+  let selectedCurve: CurveType = $state(source.curve ?? 'linear');
+  let curveStrength: number = $state(source.curveStrength ?? 2.0);
+  let midpointEnabled: boolean = $state(source.midpoint ?? false);
 
-  // Does the selected curve support strength adjustment?
-  $: curveSupportsStrength = selectedCurve === 'exponential' || selectedCurve === 'logarithmic';
 
   // Popover state
-  let popoverOpen = false;
+  let popoverOpen = $state(false);
 
-  // Update local values when source prop changes
-  // Always sync all values from source to preserve them when switching modes
-  $: {
-    minValue = source.rangeMin ?? min;
-    maxValue = source.rangeMax ?? max;
-    staticValue = source.staticValue ?? staticValue; // Keep current if not in source
-    selectedCurve = source.curve ?? 'linear';
-    curveStrength = source.curveStrength ?? 2.0;
-    midpointEnabled = source.midpoint ?? false;
 
-    if (source.type === 'linked') {
-      selectedSource = source.sourceAxis ?? 'L0';
-    } else {
-      selectedSource = 'static';
-    }
-  }
 
-  // Calculate percentage positions for range handles
-  $: minPercent = (minValue / max) * 100;
-  $: maxPercent = (maxValue / max) * 100;
 
-  // Calculate indicator position within the min-max range
-  $: indicatorPercent = minPercent + (indicatorValue * (maxPercent - minPercent));
-
-  // Sub G.3 unified the editor — Linked iff source_type is 'linked'.
-  // The previous Buttplug-mode branch (hasButtplugLinks) is gone with
-  // the legacy ButtplugLinkPanel.
-  $: isLinked = source.type === 'linked';
 
   // Format value for display
   function formatValue(value: number): string {
@@ -367,8 +345,8 @@
   }
 
   // Range area drag implementation
-  let rangeTrackEl: HTMLDivElement;
-  let draggingMode: 'min' | 'max' | 'range' | null = null;
+  let rangeTrackEl: HTMLDivElement = $state()!;
+  let draggingMode: 'min' | 'max' | 'range' | null = $state(null);
   let dragStartX = 0;
   let dragStartMin = 0;
   let dragStartMax = 0;
@@ -431,6 +409,49 @@
     document.removeEventListener('mousemove', handleRangeMouseMove);
     document.removeEventListener('mouseup', handleRangeMouseUp);
   });
+  // Sub G.3 unified the editor — Linked iff source_type is 'linked'.
+  // The previous Buttplug-mode branch (hasButtplugLinks) is gone with
+  // the legacy ButtplugLinkPanel.
+  let isLinked = $derived(source.type === 'linked');
+  // Update local values when source prop changes
+  // Always sync all values from source to preserve them when switching modes
+  run(() => {
+    minValue = source.rangeMin ?? min;
+    maxValue = source.rangeMax ?? max;
+    staticValue = source.staticValue ?? untrack(() => staticValue); // Keep current if not in source (untrack: avoid self-dependency recursion)
+    selectedCurve = source.curve ?? 'linear';
+    curveStrength = source.curveStrength ?? 2.0;
+    midpointEnabled = source.midpoint ?? false;
+
+    if (source.type === 'linked') {
+      selectedSource = source.sourceAxis ?? 'L0';
+    } else {
+      selectedSource = 'static';
+    }
+  });
+  // A saved preset can reference an axis that isn't live yet (e.g. a
+  // `bp:Vibrate_0` link loaded before the Buttplug client connects). Keep
+  // the currently-selected axis visible regardless so the chip still
+  // renders and can be deselected.
+  let selectedBp = $derived(isLinked && selectedSource.startsWith('bp:') ? selectedSource : null);
+  let selectedIsTcode = $derived(isLinked && !selectedSource.startsWith('GP_') && !selectedSource.startsWith('bp:'));
+  let selectedIsGamepad = $derived(isLinked && selectedSource.startsWith('GP_'));
+  let hasTcodeAxes = $derived(selectedIsTcode
+    || $knownAxes.some((a) => !a.startsWith('GP_') && !a.startsWith('bp:')));
+  let hasGamepadAxes = $derived(selectedIsGamepad || $knownAxes.some((a) => a.startsWith('GP_')));
+  let buttplugAxes = $derived(Array.from(
+    new Set([
+      ...$knownAxes.filter(isBpDisplayAxis),
+      ...(selectedBp ? [selectedBp] : [])
+    ])
+  ).sort((a, b) => a.localeCompare(b)));
+  // Does the selected curve support strength adjustment?
+  let curveSupportsStrength = $derived(selectedCurve === 'exponential' || selectedCurve === 'logarithmic');
+  // Calculate percentage positions for range handles
+  let minPercent = $derived((minValue / max) * 100);
+  let maxPercent = $derived((maxValue / max) * 100);
+  // Calculate indicator position within the min-max range
+  let indicatorPercent = $derived(minPercent + (indicatorValue * (maxPercent - minPercent)));
 </script>
 
 <div class="{showWrapper ? (compact ? 'space-y-1' : 'bg-card border rounded-lg p-4') : 'space-y-1'}">
@@ -457,26 +478,28 @@
            transforms editor (sub G.3.2 will replace the typed-name
            inputs with a discovery dropdown driven by the bus store). -->
       <Popover bind:open={popoverOpen} compact={true} contentClass="w-[160px]! min-w-0">
-        <button
-          slot="trigger"
-          type="button"
-          class="inline-flex items-center justify-center gap-0.5 px-1.5 h-5 rounded text-xs font-mono
-                 bg-muted/50 hover:bg-muted border border-border/50 transition-colors min-w-[28px]
-                 {isLinked ? (channel === 'A' ? 'text-primary' : 'text-secondary') : 'text-muted-foreground'}"
-        >
-          {#if isLinked}
-            {#if selectedSource.startsWith('GP_')}
-              <Gamepad2 class="h-3 w-3" />
-              <span class="leading-none">{selectedSource.replace('GP_', '')}</span>
-            {:else if selectedSource.startsWith('bp:')}
-              <span class="leading-none">{selectedSource.slice(3)}</span>
+        {#snippet trigger()}
+                    <button
+            
+            type="button"
+            class="inline-flex items-center justify-center gap-0.5 px-1.5 h-5 rounded text-xs font-mono
+                   bg-muted/50 hover:bg-muted border border-border/50 transition-colors min-w-[28px]
+                   {isLinked ? (channel === 'A' ? 'text-primary' : 'text-secondary') : 'text-muted-foreground'}"
+          >
+            {#if isLinked}
+              {#if selectedSource.startsWith('GP_')}
+                <Gamepad2 class="h-3 w-3" />
+                <span class="leading-none">{selectedSource.replace('GP_', '')}</span>
+              {:else if selectedSource.startsWith('bp:')}
+                <span class="leading-none">{selectedSource.slice(3)}</span>
+              {:else}
+                <span class="leading-none">{selectedSource}</span>
+              {/if}
             {:else}
-              <span class="leading-none">{selectedSource}</span>
+              <Link class="h-3.5 w-3.5 opacity-80" />
             {/if}
-          {:else}
-            <Link class="h-3.5 w-3.5 opacity-80" />
-          {/if}
-        </button>
+          </button>
+                  {/snippet}
 
         <div class="space-y-1 mb-2">
           <!-- Axis groups render only when their source is active (per the
@@ -493,7 +516,7 @@
                            {selectedSource === axis
                              ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
                              : 'bg-muted/50 hover:bg-muted text-foreground'}"
-                    on:click={() => handleAxisClick(axis)}
+                    onclick={() => handleAxisClick(axis)}
                   >
                     {axis}
                   </button>
@@ -514,7 +537,7 @@
                            {selectedSource === axis
                              ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
                              : 'bg-muted/50 hover:bg-muted text-foreground'}"
-                    on:click={() => handleAxisClick(axis)}
+                    onclick={() => handleAxisClick(axis)}
                   >
                     {axis.replace('GP_', '')}
                   </button>
@@ -538,7 +561,7 @@
                            ? (channel === 'A' ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground')
                            : 'bg-muted/50 hover:bg-muted text-foreground'}"
                   title={axis}
-                  on:click={() => handleAxisClick(axis)}
+                  onclick={() => handleAxisClick(axis)}
                 >
                   {axis.slice(3)}
                 </button>
@@ -558,7 +581,7 @@
           class="w-full px-2 py-1 pr-6 text-xs rounded border border-border bg-background text-foreground cursor-pointer appearance-none bg-no-repeat bg-right"
           style="background-image: url('data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%23888%22 stroke-width=%222%22%3E%3Cpath d=%22m6 9 6 6 6-6%22/%3E%3C/svg%3E'); background-position: right 6px center;"
           value={selectedCurve}
-          on:change={handleCurveChange}
+          onchange={handleCurveChange}
         >
           {#each curveOptions as option (option.value)}
             <option value={option.value}>{option.label}</option>
@@ -590,7 +613,7 @@
           <input
             type="checkbox"
             checked={midpointEnabled}
-            on:change={handleMidpointChange}
+            onchange={handleMidpointChange}
             class="w-4 h-4 rounded border-border bg-background text-primary focus:ring-primary focus:ring-offset-0 cursor-pointer"
           />
         </label>
@@ -624,13 +647,13 @@
 
   {#if isLinked}
   <!-- Linked Mode: Range Slider with Position Indicator -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     bind:this={rangeTrackEl}
     class="range-slider-container relative w-full h-6"
     style="--min-percent: {minPercent}%; --max-percent: {maxPercent}%; --slider-color: hsl(var(--{channel === 'A' ? 'primary' : 'secondary'})); --slider-shadow-1: hsl(var(--{channel === 'A' ? 'primary' : 'secondary'}) / 0.2); --slider-shadow-2: hsl(var(--{channel === 'A' ? 'primary' : 'secondary'}) / 0.6); --slider-shadow-3: hsl(var(--{channel === 'A' ? 'primary' : 'secondary'}) / 0.8)"
-    on:wheel={handleRangeWheel}
-    on:mousedown={handleRangeAreaMouseDown}
+    onwheel={handleRangeWheel}
+    onmousedown={handleRangeAreaMouseDown}
   >
     <!-- Track background -->
     <div class="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-3 bg-muted rounded-full pointer-events-none"></div>
@@ -679,7 +702,7 @@
       {max}
       {step}
       value={minValue}
-      on:input={handleMinInput}
+      oninput={handleMinInput}
       class="range-input range-input-min range-thumb absolute top-1/2 -translate-y-1/2 w-full h-3 appearance-none bg-transparent cursor-pointer"
     />
 
@@ -690,16 +713,16 @@
       {max}
       {step}
       value={maxValue}
-      on:input={handleMaxInput}
+      oninput={handleMaxInput}
       class="range-input range-input-max range-thumb absolute top-1/2 -translate-y-1/2 w-full h-3 appearance-none bg-transparent cursor-pointer"
     />
   </div>
   {:else}
   <!-- Static Mode: Single Value Slider -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="relative w-full h-6"
-    on:wheel={handleStaticWheel}
+    onwheel={handleStaticWheel}
   >
     <!-- Track background -->
     <div class="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-3 bg-muted rounded-full"></div>
@@ -717,7 +740,7 @@
       {max}
       {step}
       value={staticValue}
-      on:input={handleStaticInput}
+      oninput={handleStaticInput}
       class="static-input absolute top-1/2 -translate-y-1/2 w-full h-3 appearance-none bg-transparent cursor-pointer"
       style="--slider-color: hsl(var(--{channel === 'A' ? 'primary' : 'secondary'})); --slider-shadow-1: hsl(var(--{channel === 'A' ? 'primary' : 'secondary'}) / 0.2); --slider-shadow-2: hsl(var(--{channel === 'A' ? 'primary' : 'secondary'}) / 0.6); --slider-shadow-3: hsl(var(--{channel === 'A' ? 'primary' : 'secondary'}) / 0.8)"
     />

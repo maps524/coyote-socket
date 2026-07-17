@@ -1,25 +1,40 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onMount, onDestroy, tick } from 'svelte';
   import { fade } from 'svelte/transition';
 
-  export let content = '';
-  export let side: 'top' | 'bottom' | 'left' | 'right' = 'top';
-  export let placement: 'top' | 'bottom' | 'left' | 'right' | undefined = undefined; // Alias for backwards compat
-  export let sideOffset = 6;
-  export let delayDuration = 400;
-  export let skipDelayDuration = 300;
+  interface Props {
+    content?: string;
+    side?: 'top' | 'bottom' | 'left' | 'right';
+    placement?: 'top' | 'bottom' | 'left' | 'right' | undefined; // Alias for backwards compat
+    sideOffset?: number;
+    delayDuration?: number;
+    skipDelayDuration?: number;
+    children?: import('svelte').Snippet;
+  }
+
+  let {
+    content = '',
+    side = 'top',
+    placement = undefined,
+    sideOffset = 6,
+    delayDuration = 400,
+    skipDelayDuration = 300,
+    children
+  }: Props = $props();
 
   // Use placement as fallback for side (backwards compatibility)
-  $: effectiveSide = placement || side;
+  let effectiveSide = $derived(placement || side);
 
-  let triggerEl: HTMLElement;
-  let tooltipEl: HTMLElement;
-  let portalContainer: HTMLElement | null = null;
-  let isVisible = false;
-  let isOpen = false;
+  let triggerEl: HTMLElement = $state()!;
+  let tooltipEl: HTMLElement = $state()!;
+  let portalContainer: HTMLElement | null = $state(null);
+  let isVisible = $state(false);
+  let isOpen = $state(false);
   let openTimeout: ReturnType<typeof setTimeout> | null = null;
   let closeTimeout: ReturnType<typeof setTimeout> | null = null;
-  let tooltipStyle = '';
+  let tooltipStyle = $state('');
 
   // Track if user recently closed a tooltip (for skip delay behavior)
   let lastCloseTime = 0;
@@ -135,21 +150,23 @@
     handleMouseLeave();
   }
 
-  $: if (isOpen) {
-    updatePosition();
-  }
+  run(() => {
+    if (isOpen) {
+      updatePosition();
+    }
+  });
 </script>
 
-<!-- svelte-ignore a11y-no-static-element-interactions -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   bind:this={triggerEl}
   class="inline-flex"
-  on:mouseenter={handleMouseEnter}
-  on:mouseleave={handleMouseLeave}
-  on:focus={handleFocus}
-  on:blur={handleBlur}
+  onmouseenter={handleMouseEnter}
+  onmouseleave={handleMouseLeave}
+  onfocus={handleFocus}
+  onblur={handleBlur}
 >
-  <slot />
+  {@render children?.()}
 </div>
 
 {#if isVisible && content && portalContainer}

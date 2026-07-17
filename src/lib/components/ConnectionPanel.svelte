@@ -6,15 +6,25 @@
   import Toggle from './ui/Toggle.svelte';
   import { generalSettings } from '$lib/stores/generalSettings.js';
 
-  export let compact = false;
-  export let autoOpen = true;
-  export let showTCodeMonitor = true;
-  export let onConnectionChange = (connected: boolean) => {};
-  export let isConnected = false;
+  interface Props {
+    compact?: boolean;
+    autoOpen?: boolean;
+    showTCodeMonitor?: boolean;
+    onConnectionChange?: any;
+    isConnected?: boolean;
+  }
 
-  let connectionStatus = '';
-  let port = 12346;
-  let isLoading = true;
+  let {
+    compact = false,
+    autoOpen = $bindable(true),
+    showTCodeMonitor = $bindable(true),
+    onConnectionChange = (connected: boolean) => {},
+    isConnected = $bindable(false)
+  }: Props = $props();
+
+  let connectionStatus = $state('');
+  let port = $state(12346);
+  let isLoading = $state(true);
 
   // Load port from backend settings on mount
   onMount(async () => {

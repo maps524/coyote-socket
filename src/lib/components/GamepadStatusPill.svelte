@@ -4,9 +4,9 @@
   import Popover from './ui/Popover.svelte';
   import { gamepadStatus } from '$lib/stores/gamepadStatus';
 
-  let popoverOpen = false;
+  let popoverOpen = $state(false);
 
-  $: status = $gamepadStatus;
+  let status = $derived($gamepadStatus);
 
   type Engine = 'off' | 'gilrs' | 'xinput';
   const engines: { value: Engine; label: string }[] = [
@@ -15,7 +15,7 @@
     { value: 'xinput', label: 'XInput' },
   ];
 
-  let switching = false;
+  let switching = $state(false);
   async function switchEngine(engine: Engine) {
     if (switching || status.engine === engine) return;
     switching = true;
@@ -28,7 +28,7 @@
     }
   }
 
-  let selecting = false;
+  let selecting = $state(false);
   async function pickController(id: string) {
     if (selecting || status.selected_id === id) return;
     selecting = true;
@@ -43,16 +43,18 @@
 </script>
 
 <Popover bind:open={popoverOpen} align="start">
-  <button
-    slot="trigger"
-    class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-all
-           {status.connected
-             ? 'bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500/30'
-             : 'bg-muted/50 text-muted-foreground border border-border hover:bg-muted'}"
-  >
-    <Gamepad2 class="h-4 w-4" />
-    <span class="w-1.5 h-1.5 rounded-full {status.connected ? 'bg-green-400' : 'bg-muted-foreground/50'}"></span>
-  </button>
+  {#snippet trigger()}
+    <button
+      
+      class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-all
+             {status.connected
+               ? 'bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500/30'
+               : 'bg-muted/50 text-muted-foreground border border-border hover:bg-muted'}"
+    >
+      <Gamepad2 class="h-4 w-4" />
+      <span class="w-1.5 h-1.5 rounded-full {status.connected ? 'bg-green-400' : 'bg-muted-foreground/50'}"></span>
+    </button>
+  {/snippet}
 
   <div class="space-y-3 min-w-[200px]">
     <div class="flex items-center justify-between">
@@ -73,7 +75,7 @@
                      ? 'bg-primary text-primary-foreground border-primary'
                      : 'bg-muted/30 text-muted-foreground border-border hover:bg-muted'}"
             disabled={switching}
-            on:click={() => switchEngine(opt.value)}
+            onclick={() => switchEngine(opt.value)}
           >
             {opt.label}
           </button>
@@ -103,7 +105,7 @@
                        ? 'bg-primary/15 text-foreground border-primary/50'
                        : 'bg-muted/30 text-muted-foreground border-border hover:bg-muted'}"
               disabled={selecting}
-              on:click={() => pickController(ctrl.id)}
+              onclick={() => pickController(ctrl.id)}
             >
               <span class="truncate">{ctrl.name}</span>
               {#if ctrl.selected}

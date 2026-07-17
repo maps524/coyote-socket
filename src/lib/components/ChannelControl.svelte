@@ -6,9 +6,10 @@
   import { resolvedChannelA, resolvedChannelB, indicatorOf } from '$lib/stores/resolvedState.js';
   import { type ParameterSource } from '$lib/types/modulation.js';
 
-  export let channel: 'A' | 'B';
-  export let compact = false;
-  export let shortcuts: {
+  interface Props {
+    channel: 'A' | 'B';
+    compact?: boolean;
+    shortcuts?: {
     freqUp: string;
     freqDown: string;
     intUp: string;
@@ -17,22 +18,25 @@
     freqBalDown: string;
     intBalUp: string;
     intBalDown: string;
-  } | undefined = undefined;
+  } | undefined;
+  }
+
+  let { channel, compact = false, shortcuts = undefined }: Props = $props();
 
   // Get reactive store for this channel
-  $: store = channel === 'A' ? channelA : channelB;
+  let store = $derived(channel === 'A' ? channelA : channelB);
   // Resolver-side snapshot for this channel — feeds the per-parameter
   // position indicators with post-curve, post-transforms values from the
   // backend `resolved-update` event (10Hz, RAF-smoothed).
-  $: resolved = channel === 'A' ? resolvedChannelA : resolvedChannelB;
+  let resolved = $derived(channel === 'A' ? resolvedChannelA : resolvedChannelB);
 
   // Channel parameters matching the original Python implementation
-  $: frequency = $store.frequency;
-  $: frequencyBalance = $store.frequencyBalance;
-  $: intensityBalance = $store.intensityBalance;
+  let frequency = $derived($store.frequency);
+  let frequencyBalance = $derived($store.frequencyBalance);
+  let intensityBalance = $derived($store.intensityBalance);
 
   // Parameter sources - sync staticValue with store value for hotkey support
-  $: frequencySource = (() => {
+  let frequencySource = $derived((() => {
     const stored = $store.frequencySource;
     if (stored) {
       // If stored source is static, sync staticValue with store.frequency
@@ -48,9 +52,9 @@
       rangeMax: 200,
       curve: 'linear' as const
     };
-  })();
+  })());
 
-  $: frequencyBalanceSource = (() => {
+  let frequencyBalanceSource = $derived((() => {
     const stored = $store.frequencyBalanceSource;
     if (stored) {
       if (stored.type === 'static') {
@@ -65,9 +69,9 @@
       rangeMax: 255,
       curve: 'linear' as const
     };
-  })();
+  })());
 
-  $: intensityBalanceSource = (() => {
+  let intensityBalanceSource = $derived((() => {
     const stored = $store.intensityBalanceSource;
     if (stored) {
       if (stored.type === 'static') {
@@ -82,15 +86,15 @@
       rangeMax: 255,
       curve: 'linear' as const
     };
-  })();
+  })());
 
-  $: intensitySource = $store.intensitySource ?? {
+  let intensitySource = $derived($store.intensitySource ?? {
     type: 'linked' as const,
     sourceAxis: channel === 'A' ? 'L0' : 'R2',
     rangeMin: $store.rangeMin,
     rangeMax: $store.rangeMax,
     curve: 'linear' as const
-  };
+  });
 
   // Indicator values come straight from the resolver. `indicatorOf`
   // returns `normalized_pre_range` (0..1, post-delay+curve+transforms)
@@ -108,16 +112,16 @@
   // this UX hazard is a sub G follow-up: either route engine-path
   // intensity through a transform tail or surface a "transforms
   // inactive on this engine" hint here.
-  $: freqIndicator = indicatorOf($resolved.frequency);
-  $: freqBalIndicator = indicatorOf($resolved.frequency_balance);
-  $: intBalIndicator = indicatorOf($resolved.intensity_balance);
-  $: intensityIndicator = indicatorOf($resolved.intensity);
+  let freqIndicator = $derived(indicatorOf($resolved.frequency));
+  let freqBalIndicator = $derived(indicatorOf($resolved.frequency_balance));
+  let intBalIndicator = $derived(indicatorOf($resolved.intensity_balance));
+  let intensityIndicator = $derived(indicatorOf($resolved.intensity));
 
   // Build tooltip strings
-  $: freqTooltip = `Controls the pulse frequency (1-200 Hz)${shortcuts ? ` <code>${shortcuts.freqDown}/${shortcuts.freqUp}</code>` : ''}`;
-  $: freqBalTooltip = `Controls waveform pulse width (0-255)${shortcuts ? ` <code>${shortcuts.freqBalDown}/${shortcuts.freqBalUp}</code>` : ''}`;
-  $: intBalTooltip = `Adjusts high/low frequency feeling (0-255)${shortcuts ? ` <code>${shortcuts.intBalDown}/${shortcuts.intBalUp}</code>` : ''}`;
-  $: intensityTooltip = `Min/max output levels${shortcuts ? ` <code>${shortcuts.intDown}/${shortcuts.intUp}</code>` : ''}`;
+  let freqTooltip = $derived(`Controls the pulse frequency (1-200 Hz)${shortcuts ? ` <code>${shortcuts.freqDown}/${shortcuts.freqUp}</code>` : ''}`);
+  let freqBalTooltip = $derived(`Controls waveform pulse width (0-255)${shortcuts ? ` <code>${shortcuts.freqBalDown}/${shortcuts.freqBalUp}</code>` : ''}`);
+  let intBalTooltip = $derived(`Adjusts high/low frequency feeling (0-255)${shortcuts ? ` <code>${shortcuts.intBalDown}/${shortcuts.intBalUp}</code>` : ''}`);
+  let intensityTooltip = $derived(`Min/max output levels${shortcuts ? ` <code>${shortcuts.intDown}/${shortcuts.intUp}</code>` : ''}`);
 
   // Snap frequency to valid period-based value
   function snapFrequency(value: number): number {

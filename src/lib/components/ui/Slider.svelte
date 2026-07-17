@@ -2,7 +2,9 @@
   import { cn } from '$lib/utils/cn.js';
   import { createEventDispatcher } from 'svelte';
 
-  interface $$Props {
+  
+
+  interface Props {
     id?: string;
     value?: number;
     min?: number;
@@ -14,18 +16,20 @@
     wheelStep?: (currentValue: number, direction: 'up' | 'down') => number;
   }
 
-  export let id: $$Props['id'] = undefined;
-  export let value: number = 0;
-  export let min: number = 0;
-  export let max: number = 100;
-  export let step: number = 1;
-  export let disabled: boolean = false;
-  export let variant: 'primary' | 'secondary' = 'primary';
-  export let wheelStep: $$Props['wheelStep'] = undefined;
-  let className: $$Props['class'] = undefined;
-  export { className as class };
+  let {
+    id = undefined,
+    value = $bindable(0),
+    min = 0,
+    max = 100,
+    step = 1,
+    disabled = false,
+    class: className = undefined,
+    variant = 'primary',
+    wheelStep = undefined
+  }: Props = $props();
+  
 
-  $: percentage = ((value - min) / (max - min)) * 100;
+  let percentage = $derived(((value - min) / (max - min)) * 100);
 
   const dispatch = createEventDispatcher<{ change: number }>();
 
@@ -62,7 +66,7 @@
 
 <div 
   class={cn('relative flex w-full touch-none select-none items-center', className)} 
-  on:wheel={handleWheel}
+  onwheel={handleWheel}
   style="--slider-color: hsl(var(--{variant})); --slider-shadow-1: hsl(var(--{variant}) / 0.2); --slider-shadow-2: hsl(var(--{variant}) / 0.6); --slider-shadow-3: hsl(var(--{variant}) / 0.8)"
 >
   <input
@@ -73,7 +77,7 @@
     {step}
     {value}
     {disabled}
-    on:input={handleInput}
+    oninput={handleInput}
     class="slider-enhanced relative h-3 w-full cursor-pointer appearance-none rounded-full outline-hidden disabled:cursor-not-allowed disabled:opacity-50"
     style="background: linear-gradient(to right, hsl(var(--{variant})) 0%, hsl(var(--{variant})) {percentage}%, hsl(var(--muted)) {percentage}%, hsl(var(--muted)) 100%)"
   />

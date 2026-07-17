@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { Activity, Radio, Zap, MapPin, RotateCw, MoveHorizontal, Minimize2 } from 'lucide-svelte';
@@ -44,15 +46,15 @@
 
   // Display lists derived from $inputBus, partitioned by axis-name prefix
   // (sub G.3): bare names → T-Code, `GP_*` → gamepad, `bp:*` → buttplug.
-  let networkAxes: TCodeAxisValue[] = [];
-  let gamepadAxes: TCodeAxisValue[] = [];
+  let networkAxes: TCodeAxisValue[] = $state([]);
+  let gamepadAxes: TCodeAxisValue[] = $state([]);
 
   // Sticky key sets — the union of every key we've seen for each source while
   // the current protocol session has been alive. Used so that an explicit Stop
   // (which empties the live map) still renders bars at 0 instead of collapsing
   // the section to a placeholder. Reset when the protocol disconnects.
-  let knownNetworkAxisKeys: string[] = [];
-  let knownButtplugFeatureKeys: string[] = [];
+  let knownNetworkAxisKeys: string[] = $state([]);
+  let knownButtplugFeatureKeys: string[] = $state([]);
 
   function isGamepadKey(k: string): boolean {
     return k.startsWith('GP_');
@@ -70,33 +72,41 @@
   }
 
   // Buttplug features - populated dynamically from backend
-  let buttplugFeatures: ButtplugFeatureDisplay[] = [];
+  let buttplugFeatures: ButtplugFeatureDisplay[] = $state([]);
 
-  let isInputConnected = false;
+  let isInputConnected = $state(false);
 
   // Output state (Device)
   let deviceOutput: DeviceOutput | null = null;
-  let isOutputConnected = false;
+  let isOutputConnected = $state(false);
 
   // Waveform chart settings
-  let waveformBufferMs = 2000;
-  let chartType: 'synth' | 'envelope' = 'synth';
+  let waveformBufferMs = $state(2000);
+  let chartType: 'synth' | 'envelope' = $state('synth');
 
   let statusPollInterval: ReturnType<typeof setInterval> | null = null;
 
-  export let compact = true;
+  interface Props {
+    compact?: boolean;
+  }
+
+  let { compact = true }: Props = $props();
 
   // Subscribe to input source to detect changes
-  $: inputSource = $currentInputSource;
+  let inputSource = $derived($currentInputSource);
 
   // Clear sticky key sets when the relevant protocol drops, so an old session's
   // keys don't carry over after a disconnect/reconnect to a different sender.
-  $: if (inputSource !== 'tcode') {
-    knownNetworkAxisKeys = [];
-  }
-  $: if (inputSource !== 'buttplug' && inputSource !== 'lovense') {
-    knownButtplugFeatureKeys = [];
-  }
+  run(() => {
+    if (inputSource !== 'tcode') {
+      knownNetworkAxisKeys = [];
+    }
+  });
+  run(() => {
+    if (inputSource !== 'buttplug' && inputSource !== 'lovense') {
+      knownButtplugFeatureKeys = [];
+    }
+  });
 
   // Reactive: whenever the bus map changes, recompute the three display
   // lists. `inputBus` rAF-coalesces its writes (see inputBus.ts), so this
@@ -104,7 +114,7 @@
   // hundreds of `bus-update` events per second — the recompute cost is
   // per-frame, not per-event. Sticky keys preserve last-known entries so a
   // Stop command's bus clear doesn't collapse the section.
-  $: {
+  run(() => {
     const networkLive: Record<string, number> = {};
     const gamepadLive: Record<string, number> = {};
     const buttplugLive: Record<string, number> = {};
@@ -154,7 +164,7 @@
     if (buttplugFeatures.some((f) => f.value > 0)) {
       isInputConnected = true;
     }
-  }
+  });
 
   onMount(async () => {
     // Poll less frequently for connection status, logs, and device output (1Hz)
@@ -249,7 +259,7 @@
                 <div
                   class="absolute inset-y-0 left-0 bg-emerald-500/40"
                   style="width: {getProgressPercent(axis.value)}%"
-                />
+></div>
                 <div class="absolute inset-0 flex items-center justify-between px-1.5">
                   <span class="font-medium text-foreground">{axis.axis.replace('GP_', '')}</span>
                   <span class="text-foreground/80">{Math.round(axis.value * 100)}</span>
@@ -272,7 +282,7 @@
                 <div
                   class="absolute inset-y-0 left-0 bg-primary/50"
                   style="width: {getProgressPercent(axis.value)}%"
-                />
+></div>
                 <div class="absolute inset-0 flex items-center justify-between px-1.5">
                   <span class="font-medium text-foreground">{axis.axis}</span>
                   <span class="text-foreground/80">{Math.round(axis.value * 100)}</span>
@@ -294,14 +304,15 @@
           </div>
           <div class="grid grid-cols-2 gap-1 font-mono text-[10px]">
             {#each buttplugFeatures as feature (feature.key)}
+              {@const SvelteComponent = getFeatureIcon(feature.featureType)}
               <div class="relative h-4 bg-muted rounded-sm overflow-hidden">
                 <div
                   class="absolute inset-y-0 left-0 bg-primary/50"
                   style="width: {getProgressPercent(feature.value)}%"
-                />
+></div>
                 <div class="absolute inset-0 flex items-center justify-between px-1.5">
                   <span class="flex items-center gap-0.5 font-medium text-foreground">
-                    <svelte:component this={getFeatureIcon(feature.featureType)} class="h-2.5 w-2.5" />
+                    <SvelteComponent class="h-2.5 w-2.5" />
                     <span class="text-[9px]">{feature.index + 1}</span>
                   </span>
                   <span class="text-foreground/80">{Math.round(feature.value * 100)}</span>

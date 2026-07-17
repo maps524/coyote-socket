@@ -9,8 +9,8 @@
   // becomes a countdown / stop control. Auto-stop is enforced by the
   // backend; the UI just polls status to refresh the countdown + final
   // file path.
-  let captureActive = false;
-  let captureRemainingSec = 0;
+  let captureActive = $state(false);
+  let captureRemainingSec = $state(0);
   let captureStatusInterval: ReturnType<typeof setInterval> | null = null;
   const CAPTURE_DURATION_MS = 30_000;
 
@@ -75,12 +75,12 @@
     }
   }
 
-  let isOpen = false;
-  let panelHeight = 200;
+  let isOpen = $state(false);
+  let panelHeight = $state(200);
   let isDragging = false;
   let startY = 0;
   let startHeight = 0;
-  let logsContainer: HTMLDivElement;
+  let logsContainer: HTMLDivElement = $state()!;
 
   // Store for log messages
   export const logs = writable<Array<{
@@ -223,8 +223,8 @@
   <!-- Drag Handle -->
   <div
     class="absolute top-0 left-0 right-0 h-1 bg-primary/20 hover:bg-primary/40 cursor-ns-resize"
-    on:mousedown={startDrag}
-  />
+    onmousedown={startDrag}
+></div>
 
   <!-- Header -->
   <div class="flex items-center justify-between px-3 py-2 border-b border-border">
@@ -244,7 +244,7 @@
         <button
           class="px-2 py-1 hover:bg-muted rounded text-xs flex items-center gap-1
             {captureActive ? 'text-red-500' : 'text-muted-foreground hover:text-foreground'}"
-          on:click={captureActive ? stopDiagnosticCapture : startDiagnosticCapture}
+          onclick={captureActive ? stopDiagnosticCapture : startDiagnosticCapture}
         >
           <Activity class="h-3 w-3 {captureActive ? 'animate-pulse' : ''}" />
           {#if captureActive}
@@ -257,14 +257,14 @@
       <Tooltip content="Clear Logs" placement="left">
         <button
           class="p-1 hover:bg-muted rounded text-muted-foreground hover:text-foreground"
-          on:click={clearLogs}
+          onclick={clearLogs}
         >
           <Ban class="h-3 w-3" />
         </button>
       </Tooltip>
       <button
         class="p-1 hover:bg-muted rounded text-muted-foreground hover:text-foreground"
-        on:click={() => isOpen = false}
+        onclick={() => isOpen = false}
       >
         <ChevronDown class="h-3 w-3" />
       </button>
@@ -295,13 +295,13 @@
 {#if !isOpen}
   <button
     class="fixed bottom-4 right-4 p-2 bg-card border border-border rounded-lg shadow-lg hover:bg-muted z-50"
-    on:click={() => isOpen = true}
+    onclick={() => isOpen = true}
   >
     <div class="flex items-center gap-2">
       <Terminal class="h-4 w-4" />
       <span class="text-xs">Logs</span>
       {#if $logs.some(l => l.level === 'error')}
-        <span class="h-2 w-2 bg-red-500 rounded-full animate-pulse" />
+        <span class="h-2 w-2 bg-red-500 rounded-full animate-pulse"></span>
       {/if}
     </div>
   </button>

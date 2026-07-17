@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { run, createBubbler, stopPropagation } from 'svelte/legacy';
+
+  const bubble = createBubbler();
   import { onMount, onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -45,17 +48,17 @@
   import { dndzone, type DndEvent } from 'svelte-dnd-action';
   import { flip } from 'svelte/animate';
 
-  let settingsOpen = false;
-  let helpOpen = false;
-  let outputPaused = false;
+  let settingsOpen = $state(false);
+  let helpOpen = $state(false);
+  let outputPaused = $state(false);
 
   // Connection state is now derived from the connectionState store (backend is source of truth)
   // These reactive declarations automatically update when the store changes
-  $: inputConnected = $connectionState.websocket_running;
-  $: outputConnected = $connectionState.bluetooth_connected;
-  $: batteryLevel = $connectionState.battery_level;
+  let inputConnected = $derived($connectionState.websocket_running);
+  let outputConnected = $derived($connectionState.bluetooth_connected);
+  let batteryLevel = $derived($connectionState.battery_level);
 
-  let settingsTab = 'general';
+  let settingsTab = $state('general');
 
   // Debounce rates (ms)
   const UPDATE_DEBOUNCE = 50;   // Backend state updates (real-time responsiveness)
@@ -63,16 +66,16 @@
 
   // Update timers for backend state (50ms debounce) — per-channel timers live in
   // channelATimers/channelBTimers below, alongside scheduleChannelSync.
-  let outputUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+  let outputUpdateTimer: ReturnType<typeof setTimeout> | null = $state(null);
 
   // Save timers for file persistence (500ms debounce)
-  let connectionSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  let bluetoothSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  let outputSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  let shortcutsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let connectionSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
+  let bluetoothSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
+  let outputSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
+  let shortcutsSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
 
   // Keyboard shortcuts configuration
-  let shortcuts = {
+  let shortcuts = $state({
     channelAFreqUp: 'q',
     channelAFreqDown: 'a',
     channelAIntUp: 'r',
@@ -95,17 +98,17 @@
     cyclePreset: '',
     cyclePresetForward: '',
     cyclePresetBack: ''
-  };
+  });
 
   // Gamepad bindings (orthogonal to keyboard shortcuts). Each action may have
   // at most one gamepad binding. Loaded from backend on mount, saved on change.
-  let gamepadBindings: GamepadBindings = {};
-  let gamepadBindingsSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  let gamepadEngine: 'off' | 'gilrs' | 'xinput' = 'xinput';
-  let gamepadStickSensitivity = 1.0;
+  let gamepadBindings: GamepadBindings = $state({});
+  let gamepadBindingsSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
+  let gamepadEngine: 'off' | 'gilrs' | 'xinput' = $state('xinput');
+  let gamepadStickSensitivity = $state(1.0);
   let sensitivitySaveTimer: ReturnType<typeof setTimeout> | null = null;
-  let gamepadRepeatDelay = 400;
-  let gamepadRepeatInterval = 100;
+  let gamepadRepeatDelay = $state(400);
+  let gamepadRepeatInterval = $state(100);
   let repeatSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   // When non-null, the rebind UI is capturing the next keyboard/gamepad event
@@ -116,7 +119,7 @@
 
   let rebindCapture:
     | { action: string; source: 'gamepad'; parts: ChordPart[]; heldIds: Set<string> }
-    | null = null;
+    | null = $state(null);
 
   function partId(p: { kind: string; index: number; dir?: string }): string {
     return `${p.kind}-${p.index}-${p.dir ?? ''}`;
@@ -253,57 +256,57 @@
   }
 
   // Connection settings
-  let websocketPort = 12346;
-  let selectedInterface = 0;
-  let autoScan = true;
-  let autoOpen = true;
-  let autoConnect = true;  // Auto-connect to Coyote when found
-  let settingsLoaded = false;  // Flag to prevent auto-save before settings are loaded
-  let hmrReloading = true;  // Start true - prevents reactive sync until after initial load completes
+  let websocketPort = $state(12346);
+  let selectedInterface = $state(0);
+  let autoScan = $state(true);
+  let autoOpen = $state(true);
+  let autoConnect = $state(true);  // Auto-connect to Coyote when found
+  let settingsLoaded = $state(false);  // Flag to prevent auto-save before settings are loaded
+  let hmrReloading = $state(true);  // Start true - prevents reactive sync until after initial load completes
 
   // savedSelectedDevice is a user preference (last device they connected to)
-  let savedSelectedDevice = '';
-  let inputPill: InputStatusPill;
-  let outputPill: OutputStatusPill;
-  let bluetoothPanel: BluetoothPanel;
+  let savedSelectedDevice = $state('');
+  let inputPill: InputStatusPill = $state()!;
+  let outputPill: OutputStatusPill = $state()!;
+  let bluetoothPanel: BluetoothPanel = $state()!;
 
   // Preset management
-  let presets: ChannelPreset[] = [];
-  let isAddingPreset = false;
-  let newPresetName = '';
-  let presetDirty = false;
-  let lastSavedPresetState: { channelA: ChannelSettings, channelB: ChannelSettings } | null = null;
+  let presets: ChannelPreset[] = $state([]);
+  let isAddingPreset = $state(false);
+  let newPresetName = $state('');
+  let presetDirty = $state(false);
+  let lastSavedPresetState: { channelA: ChannelSettings, channelB: ChannelSettings } | null = $state(null);
 
   // Event listener unsubscribe functions
   let unlistenOutputPause: UnlistenFn | null = null;
 
   // Engine info popover — shows the description of the currently-selected
   // engine on click. Description text comes from PROCESSING_ENGINES.
-  let engineInfoOpen = false;
-  $: activeEngine = PROCESSING_ENGINES.find(e => e.value === $generalSettings.processingEngine);
+  let engineInfoOpen = $state(false);
+  let activeEngine = $derived(PROCESSING_ENGINES.find(e => e.value === $generalSettings.processingEngine));
 
   // Derive current ecosystem from input source. Lovense input is funneled
   // through the Buttplug feature pipeline, so it shares the buttplug ecosystem
   // for preset filtering and channel-routing UI.
-  $: currentEcosystem = $currentInputSource === 'tcode'
+  let currentEcosystem = $derived($currentInputSource === 'tcode'
     ? ('tcode' as PresetEcosystem)
     : ($currentInputSource === 'buttplug' || $currentInputSource === 'lovense')
       ? ('buttplug' as PresetEcosystem)
-      : ('tcode' as PresetEcosystem);  // Default to tcode when no input
+      : ('tcode' as PresetEcosystem));  // Default to tcode when no input
 
   // Get selected preset name from store based on current ecosystem
-  $: selectedPresetName = $presetSelectionStore[currentEcosystem];
+  let selectedPresetName = $derived($presetSelectionStore[currentEcosystem]);
 
   // Filter presets based on current ecosystem
-  $: filteredPresets = presets.filter(p => p.ecosystem === currentEcosystem);
+  let filteredPresets = $derived(presets.filter(p => p.ecosystem === currentEcosystem));
 
   // Discovered Bluetooth devices come from the backend (not persisted to settings)
-  $: bluetoothDevicesForComponents = $connectionState.discovered_devices.map(d => ({
+  let bluetoothDevicesForComponents = $derived($connectionState.discovered_devices.map(d => ({
     address: d.address,
     name: d.name ?? undefined,
     product: d.product ?? undefined,
     rssi: d.rssi ?? undefined
-  }));
+  })));
 
   onMount(async () => {
     console.log('CoyoteSocket application starting...');
@@ -662,6 +665,9 @@
   const WINDOW_HEIGHT_WITH_MONITOR = 600;
 
   // Resize window when T-Code monitor is toggled
+  // Plain (non-reactive) tracker: compared inside the effect below to detect
+  // showTCodeMonitor transitions. Must NOT be $state, or the effect that reads
+  // and writes it would recurse (legacy_recursive_reactive_block).
   let lastTCodeMonitorState: boolean | null = null;
 
   async function resizeWindowForMonitor(monitorEnabled: boolean) {
@@ -683,78 +689,86 @@
   }
 
   // Watch for T-Code monitor toggle changes
-  $: {
+  run(() => {
     if (lastTCodeMonitorState !== null && lastTCodeMonitorState !== $generalSettings.showTCodeMonitor) {
       resizeWindowForMonitor($generalSettings.showTCodeMonitor);
     }
     lastTCodeMonitorState = $generalSettings.showTCodeMonitor;
-  }
+  });
 
   // Debounced save for connection settings
-  $: if (settingsLoaded && !hmrReloading) {
-    const _trackConnectionChanges = [websocketPort, autoOpen];
-    if (connectionSaveTimer) clearTimeout(connectionSaveTimer);
-    connectionSaveTimer = setTimeout(() => {
-      invoke('save_connection_settings', {
-        websocketPort,
-        autoOpen,
-        showTcodeMonitor: $generalSettings.showTCodeMonitor
-      }).catch((e) => console.error('[Settings] Failed to save connection settings:', e));
-    }, 500);
-  }
+  run(() => {
+    if (settingsLoaded && !hmrReloading) {
+      const _trackConnectionChanges = [websocketPort, autoOpen];
+      if (connectionSaveTimer) clearTimeout(connectionSaveTimer);
+      connectionSaveTimer = setTimeout(() => {
+        invoke('save_connection_settings', {
+          websocketPort,
+          autoOpen,
+          showTcodeMonitor: $generalSettings.showTCodeMonitor
+        }).catch((e) => console.error('[Settings] Failed to save connection settings:', e));
+      }, 500);
+    }
+  });
 
   // Debounced save for general settings
-  let generalSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  $: if (settingsLoaded && !hmrReloading && $generalSettings) {
-    if (generalSaveTimer) clearTimeout(generalSaveTimer);
-    generalSaveTimer = setTimeout(() => {
-      // Note: peakFill persists via save_output_settings (OutputSettings), not here.
-      invoke('save_general_settings', {
-        noInputBehavior: $generalSettings.noInputBehavior,
-        noInputDecayMs: $generalSettings.noInputDecayMs,
-        updateRateMs: $generalSettings.updateRateMs,
-        saveRateMs: $generalSettings.saveRateMs,
-        showTcodeMonitor: $generalSettings.showTCodeMonitor,
-        processingEngine: $generalSettings.processingEngine
-      }).catch((e) => console.error('[Settings] Failed to save general settings:', e));
-    }, $generalSettings.saveRateMs ?? 500);
-  }
+  let generalSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
+  run(() => {
+    if (settingsLoaded && !hmrReloading && $generalSettings) {
+      if (generalSaveTimer) clearTimeout(generalSaveTimer);
+      generalSaveTimer = setTimeout(() => {
+        // Note: peakFill persists via save_output_settings (OutputSettings), not here.
+        invoke('save_general_settings', {
+          noInputBehavior: $generalSettings.noInputBehavior,
+          noInputDecayMs: $generalSettings.noInputDecayMs,
+          updateRateMs: $generalSettings.updateRateMs,
+          saveRateMs: $generalSettings.saveRateMs,
+          showTcodeMonitor: $generalSettings.showTCodeMonitor,
+          processingEngine: $generalSettings.processingEngine
+        }).catch((e) => console.error('[Settings] Failed to save general settings:', e));
+      }, $generalSettings.saveRateMs ?? 500);
+    }
+  });
 
   // Debounced save for bluetooth settings (user preferences only, not discovered devices)
-  $: if (settingsLoaded && !hmrReloading) {
-    const _trackBluetoothChanges = [selectedInterface, autoScan, autoConnect, savedSelectedDevice];
-    if (bluetoothSaveTimer) clearTimeout(bluetoothSaveTimer);
-    bluetoothSaveTimer = setTimeout(() => {
-      const btState: BluetoothPanelState | undefined = bluetoothPanel?.getState?.();
-      invoke('save_bluetooth_settings', {
-        selectedInterface,
-        autoScan,
-        autoConnect,
-        // Don't save discovered devices - they come from backend state
-        savedDevices: [],
-        lastDevice: btState?.selectedDevice || savedSelectedDevice || null
-      }).catch((e) => console.error('[Settings] Failed to save bluetooth settings:', e));
-    }, 500);
-  }
+  run(() => {
+    if (settingsLoaded && !hmrReloading) {
+      const _trackBluetoothChanges = [selectedInterface, autoScan, autoConnect, savedSelectedDevice];
+      if (bluetoothSaveTimer) clearTimeout(bluetoothSaveTimer);
+      bluetoothSaveTimer = setTimeout(() => {
+        const btState: BluetoothPanelState | undefined = bluetoothPanel?.getState?.();
+        invoke('save_bluetooth_settings', {
+          selectedInterface,
+          autoScan,
+          autoConnect,
+          // Don't save discovered devices - they come from backend state
+          savedDevices: [],
+          lastDevice: btState?.selectedDevice || savedSelectedDevice || null
+        }).catch((e) => console.error('[Settings] Failed to save bluetooth settings:', e));
+      }, 500);
+    }
+  });
 
   // Sync output options to backend (50ms) and save to file (500ms).
-  $: if ($generalSettings && settingsLoaded && !hmrReloading) {
-    if (outputUpdateTimer) clearTimeout(outputUpdateTimer);
-    outputUpdateTimer = setTimeout(() => {
-      invoke('update_output_options', {
-        engine: $generalSettings.processingEngine ?? 'v2-balanced',
-        peakFill: $generalSettings.peakFill ?? 'forward'
-      }).catch(() => {});
-    }, UPDATE_DEBOUNCE);
+  run(() => {
+    if ($generalSettings && settingsLoaded && !hmrReloading) {
+      if (outputUpdateTimer) clearTimeout(outputUpdateTimer);
+      outputUpdateTimer = setTimeout(() => {
+        invoke('update_output_options', {
+          engine: $generalSettings.processingEngine ?? 'v2-balanced',
+          peakFill: $generalSettings.peakFill ?? 'forward'
+        }).catch(() => {});
+      }, UPDATE_DEBOUNCE);
 
-    if (outputSaveTimer) clearTimeout(outputSaveTimer);
-    outputSaveTimer = setTimeout(() => {
-      invoke('save_output_settings', {
-        processingEngine: $generalSettings.processingEngine ?? 'v2-balanced',
-        peakFill: $generalSettings.peakFill ?? 'forward'
-      }).catch((e) => console.error('[Settings] Failed to save output settings:', e));
-    }, SAVE_DEBOUNCE);
-  }
+      if (outputSaveTimer) clearTimeout(outputSaveTimer);
+      outputSaveTimer = setTimeout(() => {
+        invoke('save_output_settings', {
+          processingEngine: $generalSettings.processingEngine ?? 'v2-balanced',
+          peakFill: $generalSettings.peakFill ?? 'forward'
+        }).catch((e) => console.error('[Settings] Failed to save output settings:', e));
+      }, SAVE_DEBOUNCE);
+    }
+  });
 
   // Build the full ChannelSettings payload shipped to the backend (disk + runtime).
   // Same shape for A and B; default source axis differs per channel.
@@ -891,52 +905,60 @@
     save: { current: null as ReturnType<typeof setTimeout> | null }
   };
 
-  $: if ($channelA && settingsLoaded && !hmrReloading) {
-    scheduleChannelSync('A', $channelA, 'L0', channelATimers.update, channelATimers.save);
-  }
-  $: if ($channelB && settingsLoaded && !hmrReloading) {
-    scheduleChannelSync('B', $channelB, 'R2', channelBTimers.update, channelBTimers.save);
-  }
+  run(() => {
+    if ($channelA && settingsLoaded && !hmrReloading) {
+      scheduleChannelSync('A', $channelA, 'L0', channelATimers.update, channelATimers.save);
+    }
+  });
+  run(() => {
+    if ($channelB && settingsLoaded && !hmrReloading) {
+      scheduleChannelSync('B', $channelB, 'R2', channelBTimers.update, channelBTimers.save);
+    }
+  });
 
   // Save shortcuts when they change
-  $: if (settingsLoaded && !hmrReloading && shortcuts) {
-    if (shortcutsSaveTimer) clearTimeout(shortcutsSaveTimer);
-    shortcutsSaveTimer = setTimeout(() => {
-      invoke('save_shortcuts', {
-        channelAFreqUp: shortcuts.channelAFreqUp,
-        channelAFreqDown: shortcuts.channelAFreqDown,
-        channelAIntUp: shortcuts.channelAIntUp,
-        channelAIntDown: shortcuts.channelAIntDown,
-        channelAFreqBalUp: shortcuts.channelAFreqBalUp,
-        channelAFreqBalDown: shortcuts.channelAFreqBalDown,
-        channelAIntBalUp: shortcuts.channelAIntBalUp,
-        channelAIntBalDown: shortcuts.channelAIntBalDown,
-        channelBFreqUp: shortcuts.channelBFreqUp,
-        channelBFreqDown: shortcuts.channelBFreqDown,
-        channelBIntUp: shortcuts.channelBIntUp,
-        channelBIntDown: shortcuts.channelBIntDown,
-        channelBFreqBalUp: shortcuts.channelBFreqBalUp,
-        channelBFreqBalDown: shortcuts.channelBFreqBalDown,
-        channelBIntBalUp: shortcuts.channelBIntBalUp,
-        channelBIntBalDown: shortcuts.channelBIntBalDown,
-        help: shortcuts.help,
-        settingsKey: shortcuts.settings,
-        toggleOutputPause: shortcuts.toggleOutputPause,
-        cyclePreset: shortcuts.cyclePreset,
-        cyclePresetForward: shortcuts.cyclePresetForward,
-        cyclePresetBack: shortcuts.cyclePresetBack
-      }).catch((e) => console.error('[Settings] Failed to save shortcuts:', e));
-    }, 500);
-  }
+  run(() => {
+    if (settingsLoaded && !hmrReloading && shortcuts) {
+      if (shortcutsSaveTimer) clearTimeout(shortcutsSaveTimer);
+      shortcutsSaveTimer = setTimeout(() => {
+        invoke('save_shortcuts', {
+          channelAFreqUp: shortcuts.channelAFreqUp,
+          channelAFreqDown: shortcuts.channelAFreqDown,
+          channelAIntUp: shortcuts.channelAIntUp,
+          channelAIntDown: shortcuts.channelAIntDown,
+          channelAFreqBalUp: shortcuts.channelAFreqBalUp,
+          channelAFreqBalDown: shortcuts.channelAFreqBalDown,
+          channelAIntBalUp: shortcuts.channelAIntBalUp,
+          channelAIntBalDown: shortcuts.channelAIntBalDown,
+          channelBFreqUp: shortcuts.channelBFreqUp,
+          channelBFreqDown: shortcuts.channelBFreqDown,
+          channelBIntUp: shortcuts.channelBIntUp,
+          channelBIntDown: shortcuts.channelBIntDown,
+          channelBFreqBalUp: shortcuts.channelBFreqBalUp,
+          channelBFreqBalDown: shortcuts.channelBFreqBalDown,
+          channelBIntBalUp: shortcuts.channelBIntBalUp,
+          channelBIntBalDown: shortcuts.channelBIntBalDown,
+          help: shortcuts.help,
+          settingsKey: shortcuts.settings,
+          toggleOutputPause: shortcuts.toggleOutputPause,
+          cyclePreset: shortcuts.cyclePreset,
+          cyclePresetForward: shortcuts.cyclePresetForward,
+          cyclePresetBack: shortcuts.cyclePresetBack
+        }).catch((e) => console.error('[Settings] Failed to save shortcuts:', e));
+      }, 500);
+    }
+  });
 
   // Save gamepad bindings when they change
-  $: if (settingsLoaded && !hmrReloading && gamepadBindings) {
-    if (gamepadBindingsSaveTimer) clearTimeout(gamepadBindingsSaveTimer);
-    gamepadBindingsSaveTimer = setTimeout(() => {
-      invoke('save_gamepad_bindings', { bindings: gamepadBindings })
-        .catch((e) => console.error('[Settings] Failed to save gamepad bindings:', e));
-    }, 500);
-  }
+  run(() => {
+    if (settingsLoaded && !hmrReloading && gamepadBindings) {
+      if (gamepadBindingsSaveTimer) clearTimeout(gamepadBindingsSaveTimer);
+      gamepadBindingsSaveTimer = setTimeout(() => {
+        invoke('save_gamepad_bindings', { bindings: gamepadBindings })
+          .catch((e) => console.error('[Settings] Failed to save gamepad bindings:', e));
+      }, 500);
+    }
+  });
 
   async function saveSettings() {
     // Save is now handled by reactive statements, but we can manually trigger saves
@@ -1459,10 +1481,10 @@
   // aborts Svelte's flush when the dialog closes — leaving the modal stuck
   // open (Done worked, but the X/Escape/overlay close paths did not).
   type ReorderItem = ChannelPreset & { id: string };
-  let reorderOpen = false;
-  let reorderItems: ReorderItem[] = [];
+  let reorderOpen = $state(false);
+  let reorderItems: ReorderItem[] = $state([]);
   // Per-row delete-confirm popover state, keyed by preset id (== name).
-  let deleteConfirmOpen: Record<string, boolean> = {};
+  let deleteConfirmOpen: Record<string, boolean> = $state({});
   const REORDER_FLIP_MS = 200;
 
   // Gamepad jump-to-preset combos live in the shared gamepadBindings map under
@@ -1478,9 +1500,11 @@
 
   // Abandon an in-progress preset-combo capture if the modal closes, so it
   // doesn't linger and hijack the next gamepad press elsewhere.
-  $: if (!reorderOpen && rebindCapture?.action.startsWith('selectPreset:')) {
-    cancelRebind();
-  }
+  run(() => {
+    if (!reorderOpen && rebindCapture?.action.startsWith('selectPreset:')) {
+      cancelRebind();
+    }
+  });
 
   function handleReorderConsider(e: CustomEvent<DndEvent<ReorderItem>>) {
     reorderItems = e.detail.items;
@@ -1592,13 +1616,15 @@
 
   // Watch for channel changes to update dirty state
   // Include channel stores as dependencies so this re-runs when they change
-  $: if (settingsLoaded && selectedPresetName && lastSavedPresetState && $channelA && $channelB) {
-    presetDirty = checkPresetDirty();
-  }
+  run(() => {
+    if (settingsLoaded && selectedPresetName && lastSavedPresetState && $channelA && $channelB) {
+      presetDirty = checkPresetDirty();
+    }
+  });
 
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} />
 
 <main class="h-screen w-full bg-background text-foreground overflow-hidden flex flex-col">
   <!-- Compact Header -->
@@ -1642,7 +1668,7 @@
           <!-- Pause/Play Button -->
           <Tooltip content={outputPaused ? `Resume output <code>${shortcuts.toggleOutputPause === ' ' ? 'Space' : shortcuts.toggleOutputPause}</code>` : `Pause output <code>${shortcuts.toggleOutputPause === ' ' ? 'Space' : shortcuts.toggleOutputPause}</code>`} side="bottom">
             <button
-              on:click={toggleOutputPause}
+              onclick={toggleOutputPause}
               class="flex items-center justify-center h-[26px] w-[26px] rounded-full transition-all
                      {outputPaused
                        ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 hover:bg-yellow-500/30'
@@ -1694,10 +1720,10 @@
                   bind:value={newPresetName}
                   placeholder="Preset name"
                   class="flex-1 py-1 px-2 text-xs bg-transparent border-none outline-hidden min-w-0 text-foreground placeholder:text-muted-foreground"
-                  on:keydown={(e) => e.key === 'Enter' && saveNewPreset()}
+                  onkeydown={(e) => e.key === 'Enter' && saveNewPreset()}
                 />
                 <button
-                  on:click={saveNewPreset}
+                  onclick={saveNewPreset}
                   disabled={!newPresetName.trim()}
                   class="w-7 shrink-0 flex items-center justify-center bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 border-l border-border"
                   title="Save preset"
@@ -1705,7 +1731,7 @@
                   <Save class="h-3.5 w-3.5" />
                 </button>
                 <button
-                  on:click={cancelAddingPreset}
+                  onclick={cancelAddingPreset}
                   class="w-7 shrink-0 flex items-center justify-center hover:bg-background/50 border-l border-border"
                   title="Cancel"
                 >
@@ -1715,7 +1741,7 @@
                 <select
                   class="preset-select flex-1 py-1 pl-2 pr-1 mr-1 text-xs bg-transparent border-none outline-hidden min-w-0 cursor-pointer"
                   value={selectedPresetName}
-                  on:change={(e) => handlePresetSelect(e.currentTarget.value)}
+                  onchange={(e) => handlePresetSelect(e.currentTarget.value)}
                 >
                   <option value="">None</option>
                   {#each filteredPresets as preset}
@@ -1723,14 +1749,14 @@
                   {/each}
                 </select>
                 <button
-                  on:click={startAddingPreset}
+                  onclick={startAddingPreset}
                   class="w-7 shrink-0 flex items-center justify-center hover:bg-background/50 border-l border-border"
                   title="Save current settings as new preset"
                 >
                   <Plus class="h-3.5 w-3.5" />
                 </button>
                 <button
-                  on:click={openReorderDialog}
+                  onclick={openReorderDialog}
                   class="w-7 shrink-0 flex items-center justify-center hover:bg-background/50 border-l border-border"
                   title="Reorder presets"
                 >
@@ -1738,7 +1764,7 @@
                 </button>
                 {#if presetDirty && selectedPresetName}
                   <button
-                    on:click={saveCurrentPreset}
+                    onclick={saveCurrentPreset}
                     class="w-7 shrink-0 flex items-center justify-center bg-primary text-primary-foreground hover:bg-primary/90 border-l border-border"
                     title="Save changes to '{selectedPresetName}'"
                   >
@@ -1766,14 +1792,16 @@
                 {/each}
               </select>
               <Popover bind:open={engineInfoOpen} compact={true} contentClass="w-[260px]! min-w-0">
-                <button
-                  slot="trigger"
-                  type="button"
-                  class="w-7 h-7 shrink-0 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/50 border-l border-border"
-                  title="About this engine"
-                >
-                  <Info class="h-3.5 w-3.5" />
-                </button>
+                {#snippet trigger()}
+                                <button
+                    
+                    type="button"
+                    class="w-7 h-7 shrink-0 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-background/50 border-l border-border"
+                    title="About this engine"
+                  >
+                    <Info class="h-3.5 w-3.5" />
+                  </button>
+                              {/snippet}
                 <div class="space-y-1">
                   <div class="text-xs font-medium">{activeEngine?.label ?? ''}</div>
                   <div class="text-[11px] leading-snug text-muted-foreground">
@@ -2077,7 +2105,7 @@
               id="gamepad-engine"
               class="px-2 py-1 text-xs bg-muted rounded"
               value={gamepadEngine}
-              on:change={onGamepadEngineChange}
+              onchange={onGamepadEngineChange}
             >
               <option value="xinput">XInput (Xbox-only, recommended on Windows)</option>
               <option value="gilrs">gilrs (Xbox + Switch + generic, cross-platform)</option>
@@ -2100,7 +2128,7 @@
               max="3.0"
               step="0.05"
               value={gamepadStickSensitivity}
-              on:input={onSensitivityInput}
+              oninput={onSensitivityInput}
               class="w-32"
             />
           </div>
@@ -2120,7 +2148,7 @@
               max="2000"
               step="10"
               value={gamepadRepeatDelay}
-              on:input={onRepeatDelayInput}
+              oninput={onRepeatDelayInput}
               class="w-32"
             />
           </div>
@@ -2140,7 +2168,7 @@
               max="1000"
               step="10"
               value={gamepadRepeatInterval}
-              on:input={onRepeatIntervalInput}
+              oninput={onRepeatIntervalInput}
               class="w-32"
             />
           </div>
@@ -2242,8 +2270,8 @@
       <div
         class="flex flex-col gap-1 overflow-y-auto scrollbar-thin pr-1 max-h-[60vh]"
         use:dndzone={{ items: reorderItems, flipDurationMs: REORDER_FLIP_MS, dropTargetStyle: {} }}
-        on:consider={handleReorderConsider}
-        on:finalize={handleReorderFinalize}
+        onconsider={handleReorderConsider}
+        onfinalize={handleReorderFinalize}
       >
         {#each reorderItems as preset (preset.id)}
           {@const bindKey = presetBindKey(preset.name)}
@@ -2260,9 +2288,9 @@
                  stopPropagation wrapper so interacting never starts a drag. -->
             <div
               class="shrink-0 flex items-center gap-1"
-              on:mousedown|stopPropagation
-              on:touchstart|stopPropagation
-              on:pointerdown|stopPropagation
+              onmousedown={stopPropagation(bubble('mousedown'))}
+              ontouchstart={stopPropagation(bubble('touchstart'))}
+              onpointerdown={stopPropagation(bubble('pointerdown'))}
               role="presentation"
             >
               <GamepadBindControl
@@ -2283,20 +2311,22 @@
             {#if !capture}
             <div
               class="shrink-0"
-              on:mousedown|stopPropagation
-              on:touchstart|stopPropagation
-              on:pointerdown|stopPropagation
+              onmousedown={stopPropagation(bubble('mousedown'))}
+              ontouchstart={stopPropagation(bubble('touchstart'))}
+              onpointerdown={stopPropagation(bubble('pointerdown'))}
               role="presentation"
             >
               <Popover bind:open={deleteConfirmOpen[preset.id]} align="end" compact={true} contentClass="w-[220px]! min-w-0">
-                <button
-                  slot="trigger"
-                  type="button"
-                  class="w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 cursor-pointer"
-                  title="Delete preset"
-                >
-                  <Trash2 class="h-4 w-4" />
-                </button>
+                {#snippet trigger()}
+                                    <button
+                    
+                    type="button"
+                    class="w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 cursor-pointer"
+                    title="Delete preset"
+                  >
+                    <Trash2 class="h-4 w-4" />
+                  </button>
+                                  {/snippet}
                 <div class="space-y-2">
                   <div class="text-xs leading-snug">
                     Delete preset <span class="font-medium">{preset.name}</span>?

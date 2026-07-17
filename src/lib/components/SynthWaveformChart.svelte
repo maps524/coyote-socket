@@ -2,9 +2,14 @@
   import { onMount, onDestroy } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-  // Props
-  export let height = 120;
-  export let bufferDurationMs = 1000; // How much history to show (1-10 seconds)
+  
+  interface Props {
+    // Props
+    height?: number;
+    bufferDurationMs?: number; // How much history to show (1-10 seconds)
+  }
+
+  let { height = 120, bufferDurationMs = 1000 }: Props = $props();
 
   // Types matching backend WaveformSample
   interface WaveformSample {
@@ -38,12 +43,12 @@
   }
 
   // State
-  let canvas: HTMLCanvasElement;
+  let canvas: HTMLCanvasElement = $state()!;
   let ctx: CanvasRenderingContext2D | null = null;
   let animationFrame: number | null = null;
   let unlistenWaveform: UnlistenFn | null = null;
 
-  let samples: WaveformSample[] = [];
+  let samples: WaveformSample[] = $state([]);
 
   // Constants
   const MIN_PIXELS_PER_CYCLE = 4;       // Below this, render simplified
@@ -380,7 +385,7 @@
     width={400}
     height={height}
     class="waveform-canvas"
-  />
+></canvas>
   {#if samples.length === 0}
     <div class="absolute inset-0 flex items-center justify-center text-muted-foreground text-[10px]">
       Waiting for device output...

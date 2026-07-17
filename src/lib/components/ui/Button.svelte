@@ -1,17 +1,28 @@
 <script lang="ts">
+  import { createBubbler } from 'svelte/legacy';
+
+  const bubble = createBubbler();
   import { cn } from '$lib/utils/cn.js';
   import type { HTMLButtonAttributes } from 'svelte/elements';
 
-  interface $$Props extends HTMLButtonAttributes {
+  
+
+  interface Props {
     variant?: 'default' | 'destructive' | 'outline' | 'secondary' | 'ghost' | 'link';
     size?: 'default' | 'sm' | 'lg' | 'icon';
     class?: string;
+    children?: import('svelte').Snippet;
+    [key: string]: any
   }
 
-  export let variant: $$Props['variant'] = 'default';
-  export let size: $$Props['size'] = 'default';
-  let className: $$Props['class'] = undefined;
-  export { className as class };
+  let {
+    variant = 'default',
+    size = 'default',
+    class: className = undefined,
+    children,
+    ...rest
+  }: Props = $props();
+  
 
   const variants = {
     default: 'bg-primary text-primary-foreground hover:bg-primary/90',
@@ -37,8 +48,8 @@
     sizes[size ?? 'default'],
     className
   )}
-  {...$$restProps}
-  on:click
+  {...rest}
+  onclick={bubble('click')}
 >
-  <slot />
+  {@render children?.()}
 </button>

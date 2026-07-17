@@ -2,10 +2,14 @@
   import { createEventDispatcher } from 'svelte';
   import { cn } from '$lib/utils/cn.js';
 
-  export let port: number = 12346;
-  export let disabled: boolean = false;
-  let className: string = '';
-  export { className as class };
+  interface Props {
+    port?: number;
+    disabled?: boolean;
+    class?: string;
+  }
+
+  let { port = $bindable(12346), disabled = false, class: className = '' }: Props = $props();
+  
 
   const dispatch = createEventDispatcher<{ change: number }>();
 
@@ -45,7 +49,7 @@
     inputmode="numeric"
     pattern="[0-9]*"
     value={port}
-    on:input={handleInput}
+    oninput={handleInput}
     {disabled}
     class="flex-1 h-full bg-transparent py-2 pr-3 text-sm font-mono outline-hidden disabled:cursor-not-allowed"
   />

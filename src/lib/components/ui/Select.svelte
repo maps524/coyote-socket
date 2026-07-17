@@ -1,15 +1,21 @@
 <script lang="ts">
+  import { createBubbler } from 'svelte/legacy';
+
+  const bubble = createBubbler();
   import { cn } from '$lib/utils/cn.js';
   import type { HTMLSelectAttributes } from 'svelte/elements';
 
-  interface $$Props extends HTMLSelectAttributes {
+  
+
+  
+  interface Props {
     class?: string;
     value?: string;
+    children?: import('svelte').Snippet;
+    [key: string]: any
   }
 
-  let className: $$Props['class'] = undefined;
-  export { className as class };
-  export let value: string = '';
+  let { class: className = undefined, value = $bindable(''), children, ...rest }: Props = $props();
 </script>
 
 <select
@@ -18,10 +24,10 @@
     className
   )}
   bind:value
-  {...$$restProps}
-  on:change
+  {...rest}
+  onchange={bubble('change')}
 >
-  <slot />
+  {@render children?.()}
 </select>
 
 <style>

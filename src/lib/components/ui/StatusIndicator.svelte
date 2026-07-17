@@ -1,9 +1,14 @@
 <script lang="ts">
   // Small dot + label used to surface a live activity state (e.g. Bluetooth
   // scanning). The dot pulses while active so the user can see something is
-  // happening even when the result text is steady.
-  export let label = '';
-  export let state: 'scanning' | 'active' | 'idle' = 'idle';
+  
+  interface Props {
+    // happening even when the result text is steady.
+    label?: string;
+    state?: 'scanning' | 'active' | 'idle';
+  }
+
+  let { label = '', state = 'idle' }: Props = $props();
 
   const dotClass: Record<typeof state, string> = {
     scanning: 'bg-yellow-400 animate-pulse',

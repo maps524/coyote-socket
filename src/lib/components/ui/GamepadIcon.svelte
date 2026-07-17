@@ -30,8 +30,12 @@
 
   import type { ChordPart } from '$lib/types/settings';
 
-  export let binding: GamepadBinding | undefined = undefined;
-  export let size: number = 20;
+  interface Props {
+    binding?: GamepadBinding | undefined;
+    size?: number;
+  }
+
+  let { binding = undefined, size = 20 }: Props = $props();
 
   const BUTTON_LABELS: Record<number, string> = {
     0: 'A', 1: 'B', 2: 'X', 3: 'Y',

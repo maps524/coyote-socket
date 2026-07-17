@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { run } from 'svelte/legacy';
+
   import { generalSettings } from '$lib/stores/generalSettings';
   import { channelA, channelB } from '$lib/stores/channels';
   import Select from '$lib/components/ui/Select.svelte';
@@ -9,14 +11,14 @@
   import { invoke } from '@tauri-apps/api/core';
 
   // Local state bound to the store
-  let noInputBehavior = $generalSettings.noInputBehavior;
-  let noInputDecayMs = $generalSettings.noInputDecayMs;
-  let updateRateMs = $generalSettings.updateRateMs;
-  let saveRateMs = $generalSettings.saveRateMs;
-  let showTCodeMonitor = $generalSettings.showTCodeMonitor;
+  let noInputBehavior = $state($generalSettings.noInputBehavior);
+  let noInputDecayMs = $state($generalSettings.noInputDecayMs);
+  let updateRateMs = $state($generalSettings.updateRateMs);
+  let saveRateMs = $state($generalSettings.saveRateMs);
+  let showTCodeMonitor = $state($generalSettings.showTCodeMonitor);
 
   // Update store when local state changes (processingEngine is controlled from main UI)
-  $: {
+  run(() => {
     generalSettings.update(s => ({
       ...s,
       noInputBehavior,
@@ -25,7 +27,7 @@
       saveRateMs,
       showTCodeMonitor
     }));
-  }
+  });
 
   // Per-channel device intensity cap ("soft mode"). Push to backend + clamp the
   // channel's modulation range to fit inside the new cap, so stored rangeMax
@@ -195,14 +197,14 @@
         <button
           type="button"
           class="text-xs px-2 py-1 rounded border border-border bg-muted hover:bg-muted/70 text-foreground"
-          on:click={applySoftMode}
+          onclick={applySoftMode}
         >
           Soft Mode
         </button>
         <button
           type="button"
           class="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-muted/40 text-muted-foreground"
-          on:click={clearCaps}
+          onclick={clearCaps}
         >
           Clear
         </button>
