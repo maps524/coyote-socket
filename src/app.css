@@ -118,4 +118,10 @@
   body {
     @apply bg-background text-foreground;
   }
+  /* Tailwind v4 dropped the v3 default of cursor:pointer on buttons. Restore it
+     so clickable controls show the finger cursor again. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
 }

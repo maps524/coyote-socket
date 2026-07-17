@@ -14,7 +14,12 @@
   }
 
   let {
-    open = $bindable(false),
+    // No fallback value: Svelte 5 throws props_invalid_value on
+    // `bind:open={obj[key]}` when the key is still undefined AND the prop has a
+    // fallback. Dynamic-key binds (e.g. the reorder rows' delete-confirm
+    // popovers) pass undefined initially; without a fallback that's a valid
+    // (falsy) bind. Undefined reads as closed everywhere `open` is used.
+    open = $bindable(),
     align = 'start',
     sideOffset = 8,
     contentClass = '',
