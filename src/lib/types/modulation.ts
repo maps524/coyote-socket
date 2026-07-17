@@ -321,7 +321,7 @@ export function lerp(min: number, max: number, t: number): number {
 // referenced a type whose shape doesn't match this literal (no rotateScale /
 // oscillateMaxSpeed / constrict* fields exist on any ButtplugFeatureConfig).
 // This export is currently unused. Dropped the annotation to let it infer so
-// `svelte-check` is green — the maintainer to define the intended transform-config type.
+// `svelte-check` is green — the intended transform-config type is TBD by the owner.
 export const defaultButtplugConfig = {
   distance: 0.2,
   rotateScale: 0.5,

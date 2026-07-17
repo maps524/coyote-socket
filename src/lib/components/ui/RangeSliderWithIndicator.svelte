@@ -57,7 +57,7 @@
     ['GP_RX', 'GP_RY', 'GP_RT']
   ];
 
-  // Per the maintainer's direction: the picker shows only axis groups that are
+  // By design: the picker shows only axis groups that are
   // actually active. We drive group visibility off the live `inputBus`
   // (`knownAxes` = union of every axis the bus has seen this session) —
   // no input-mode toggle, no separation. T-Code → bare names, gamepad →
