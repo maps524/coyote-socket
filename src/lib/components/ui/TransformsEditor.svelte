@@ -9,6 +9,7 @@
   } from '$lib/types/modulation.js';
   import { knownAxes } from '$lib/stores/inputBus.js';
   import Slider from './Slider.svelte';
+  import ScalarInputControl from './ScalarInputControl.svelte';
 
   /**
    * Per-parameter transforms editor (sub G.2).
@@ -235,16 +236,13 @@
           />
         </div>
       {:else if t.type === 'vibrate'}
-        <label class="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-          <span>Speed axis</span>
-          <input
-            type="text"
-            value={t.speedAxis}
-            placeholder="bp:Vibrate_0" list="transforms-axes"
-            on:input={(e) => set(i, t, 'speedAxis', e.currentTarget.value)}
-            class="w-24 {axisInputClass(t.speedAxis)}"
-          />
-        </label>
+        <ScalarInputControl
+          label="Speed"
+          value={t.speed}
+          {channel}
+          axes={$knownAxes}
+          on:change={(e) => set(i, t, 'speed', e.detail)}
+        />
         <div class="space-y-0.5">
           <div class="flex justify-between text-[10px] text-muted-foreground">
             <span>Distance</span>
@@ -261,16 +259,13 @@
           />
         </div>
       {:else if t.type === 'oscillate'}
-        <label class="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-          <span>Speed axis</span>
-          <input
-            type="text"
-            value={t.speedAxis}
-            placeholder="bp:Oscillate_0" list="transforms-axes"
-            on:input={(e) => set(i, t, 'speedAxis', e.currentTarget.value)}
-            class="w-24 {axisInputClass(t.speedAxis)}"
-          />
-        </label>
+        <ScalarInputControl
+          label="Speed"
+          value={t.speed}
+          {channel}
+          axes={$knownAxes}
+          on:change={(e) => set(i, t, 'speed', e.detail)}
+        />
         <div class="space-y-0.5">
           <div class="flex justify-between text-[10px] text-muted-foreground">
             <span>Scale</span>
@@ -298,26 +293,22 @@
           />
         </label>
       {:else if t.type === 'rotate'}
-        <label class="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-          <span>Speed axis</span>
-          <input
-            type="text"
-            value={t.speedAxis}
-            placeholder="bp:Rotate_0" list="transforms-axes"
-            on:input={(e) => set(i, t, 'speedAxis', e.currentTarget.value)}
-            class="w-24 {axisInputClass(t.speedAxis)}"
-          />
-        </label>
-        <label class="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-          <span>Direction axis</span>
-          <input
-            type="text"
-            value={t.directionAxis}
-            placeholder="bp:RotateDir_0" list="transforms-axes"
-            on:input={(e) => set(i, t, 'directionAxis', e.currentTarget.value)}
-            class="w-24 {axisInputClass(t.directionAxis)}"
-          />
-        </label>
+        <ScalarInputControl
+          label="Speed"
+          value={t.speed}
+          {channel}
+          axes={$knownAxes}
+          on:change={(e) => set(i, t, 'speed', e.detail)}
+        />
+        <ScalarInputControl
+          label="Direction"
+          value={t.direction}
+          {channel}
+          control="toggle"
+          constFallback={1}
+          axes={$knownAxes}
+          on:change={(e) => set(i, t, 'direction', e.detail)}
+        />
         <div class="space-y-0.5">
           <div class="flex justify-between text-[10px] text-muted-foreground">
             <span>Scale</span>
@@ -345,16 +336,14 @@
           />
         </label>
       {:else if t.type === 'constrict'}
-        <label class="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-          <span>Amount axis</span>
-          <input
-            type="text"
-            value={t.amountAxis}
-            placeholder="bp:Constrict_0" list="transforms-axes"
-            on:input={(e) => set(i, t, 'amountAxis', e.currentTarget.value)}
-            class="w-24 {axisInputClass(t.amountAxis)}"
-          />
-        </label>
+        <ScalarInputControl
+          label="Amount"
+          value={t.amount}
+          {channel}
+          constFallback={0.5}
+          axes={$knownAxes}
+          on:change={(e) => set(i, t, 'amount', e.detail)}
+        />
         <div class="space-y-0.5">
           <div class="flex justify-between text-[10px] text-muted-foreground">
             <span>Min floor</span>

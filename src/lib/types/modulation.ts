@@ -61,22 +61,44 @@ export interface ParameterSource {
 // ============================================================================
 
 /**
+ * A transform modifier input — either a fixed constant the user dials in,
+ * or a live bus axis the backend pre-fetches. Mirrors the Rust
+ * `ScalarInput` enum's wire format: a bare `number` is a constant, a bare
+ * `string` is a bus axis name (empty string = unset). The two are
+ * unambiguous, so no `{kind}` wrapper is needed.
+ *
+ * This replaced the old required `speedAxis` / `directionAxis` /
+ * `amountAxis` text fields. Those forced every motion transform to point
+ * at a *second* bus axis — a holdover from the Buttplug pipeline that made
+ * no sense for a hand-built link. Now the common case ("vibrate at a fixed
+ * rate") is a constant slider, and linking a live axis is opt-in.
+ */
+export type ScalarInput = number | string;
+
+/** Narrow a `ScalarInput` to its bus-axis form. */
+export function isAxisInput(value: ScalarInput): value is string {
+  return typeof value === 'string';
+}
+
+/**
  * Per-tag discriminated union mirroring the Rust `TransformConfig` enum in
  * `src-tauri/src/transforms/mod.rs`. The backend uses
  * `#[serde(tag = "type", rename_all = "kebab-case")]` plus per-field
- * `#[serde(rename = "...")]` for the camelCase modifier-axis names. Field
- * names without a `rename` keep their snake_case Rust names (e.g.
+ * `#[serde(rename = "...")]` for the camelCase field names. Field names
+ * without a `rename` keep their snake_case Rust names (e.g.
  * `time_constant_ms`, `duration_ms`).
  *
  * Variants split into two categories:
  *
  * - **Generic primitives** (`smooth`, `scale`, `clamp`, `invert`, `hold`,
- *   `mix`) — composable shaping functions. Read at most one bus modifier
- *   axis (Mix); the others are pure value-in / value-out.
+ *   `mix`) — composable shaping functions. `mix` blends in one other bus
+ *   axis (its whole purpose, so it stays axis-only); the rest are pure
+ *   value-in / value-out.
  * - **Buttplug semantic wrappers** (`vibrate`, `oscillate`, `rotate`,
- *   `constrict`) — single-purpose variants that carry the labels users
- *   recognize from the legacy Buttplug pipeline. `rotate` is the only
- *   variant that declares two modifier axes (speed + direction).
+ *   `constrict`) — single-purpose variants carrying the labels users
+ *   recognize from the legacy Buttplug pipeline. Their speed / direction /
+ *   amount controls are `ScalarInput`s (constant by default, optionally
+ *   linked); `rotate` carries two (speed + direction).
  */
 export type Transform =
   | { type: 'smooth'; time_constant_ms: number }
@@ -85,12 +107,12 @@ export type Transform =
   | { type: 'invert' }
   | { type: 'hold'; duration_ms: number }
   | { type: 'mix'; otherAxis: string; weight: number }
-  | { type: 'vibrate'; speedAxis: string; distance: number }
-  | { type: 'oscillate'; speedAxis: string; scale: number; maxSpeedHz: number }
-  | { type: 'rotate'; speedAxis: string; directionAxis: string; scale: number; maxSpeedHz: number }
+  | { type: 'vibrate'; speed: ScalarInput; distance: number }
+  | { type: 'oscillate'; speed: ScalarInput; scale: number; maxSpeedHz: number }
+  | { type: 'rotate'; speed: ScalarInput; direction: ScalarInput; scale: number; maxSpeedHz: number }
   | {
       type: 'constrict';
-      amountAxis: string;
+      amount: ScalarInput;
       minFloor: number;
       useMidpoint: boolean;
       method: 'Downsample' | 'Clamp';
@@ -129,8 +151,11 @@ export const TRANSFORM_LABELS: Record<Transform['type'], string> = {
  * `TransformConfig::initial_state` priming: zero-state types start at zero,
  * Buttplug wrappers default to the legacy `convert_parameter_source` defaults
  * (Vibrate distance 0.2, Oscillate/Rotate scale 0.5 + 5Hz, Constrict
- * downsample). Modifier-axis fields default to empty so the editor surfaces
- * them as "fill me in".
+ * downsample). Speed/direction/amount default to sensible *constants* so a
+ * freshly added transform does something visible without forcing the user
+ * to hunt for a second axis: speed 0.5 (half rate), direction 1 (clockwise),
+ * amount 0 (no constriction until dialed up). `mix` still defaults its axis
+ * to empty since blending genuinely needs one.
  */
 export function defaultTransform(type: Transform['type']): Transform {
   switch (type) {
@@ -147,21 +172,21 @@ export function defaultTransform(type: Transform['type']): Transform {
     case 'mix':
       return { type: 'mix', otherAxis: '', weight: 0.5 };
     case 'vibrate':
-      return { type: 'vibrate', speedAxis: '', distance: 0.2 };
+      return { type: 'vibrate', speed: 0.5, distance: 0.2 };
     case 'oscillate':
-      return { type: 'oscillate', speedAxis: '', scale: 0.5, maxSpeedHz: 5 };
+      return { type: 'oscillate', speed: 0.5, scale: 0.5, maxSpeedHz: 5 };
     case 'rotate':
       return {
         type: 'rotate',
-        speedAxis: '',
-        directionAxis: '',
+        speed: 0.5,
+        direction: 1,
         scale: 0.5,
         maxSpeedHz: 5
       };
     case 'constrict':
       return {
         type: 'constrict',
-        amountAxis: '',
+        amount: 0,
         minFloor: 0,
         useMidpoint: false,
         method: 'Downsample'

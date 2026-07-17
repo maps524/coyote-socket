@@ -72,10 +72,10 @@ pub struct ParameterLinkConfig {
     pub delay_ms: Option<u32>,
 
     /// Ordered list of post-curve / pre-range shaping transforms. Each
-    /// entry's `declared_axes()` names the bus axes the resolver
-    /// pre-fetches at this link's `target_time` before calling
-    /// `apply_transform`. `#[serde(default)]` so saved presets that
-    /// pre-date sub D deserialize cleanly with an empty vec.
+    /// entry's `resolve_modifiers()` builds its modifier slice (constants
+    /// inline, axes pre-fetched at this link's `target_time`) before
+    /// calling `apply_transform`. `#[serde(default)]` so saved presets
+    /// that pre-date sub D deserialize cleanly with an empty vec.
     ///
     /// Sub D introduces the field + the transform variants but no
     /// caller reads it yet — sub E's resolver rewrite is the consumer.
@@ -404,8 +404,8 @@ impl ResolvedSample {
 ///  transforms (with pre-fetched modifiers)  →  lerp(range_min, range_max)`.
 ///
 /// Transforms run in declaration order; for each transform the resolver
-/// pre-fetches every axis named by `declared_axes()` at the link's
-/// `lookup_time` and passes the values into `apply_transform` as a slice.
+/// calls `resolve_modifiers()` (constants inline, axes read at the link's
+/// `lookup_time`) and passes the values into `apply_transform` as a slice.
 /// A misordered or short slice falls through to a documented zero/identity
 /// default rather than panicking.
 ///
@@ -468,15 +468,13 @@ pub fn resolve_link_at_time(
 
             let mut shaped = curved;
             for (i, tcfg) in cfg.transforms.iter().enumerate() {
-                // Pre-fetch every axis the transform declares — at the SAME
-                // `lookup_time` as the base read, so a delayed link's
-                // transforms see modifiers from the same instant the base
-                // value came from. No transform reads the bus directly.
-                let modifiers: Vec<f64> = tcfg
-                    .declared_axes()
-                    .iter()
-                    .map(|axis| bus.value_at(axis, lookup_time).unwrap_or(0.0))
-                    .collect();
+                // Resolve every modifier slot — constants inline, axes
+                // pre-fetched at the SAME `lookup_time` as the base read so
+                // a delayed link's transforms see modifiers from the same
+                // instant the base value came from. No transform reads the
+                // bus directly.
+                let modifiers: Vec<f64> =
+                    tcfg.resolve_modifiers(|axis| bus.value_at(axis, lookup_time).unwrap_or(0.0));
                 shaped = apply_transform(
                     tcfg,
                     &mut runtime.transform_state[i],
@@ -598,7 +596,7 @@ mod tests {
     }
 
     use crate::input_bus::InputBus;
-    use crate::transforms::{TransformConfig, TransformState};
+    use crate::transforms::{ScalarInput, TransformConfig, TransformState};
 
     fn resolve_value(
         cfg: &ParameterLinkConfig,
@@ -784,11 +782,11 @@ mod tests {
             ParameterLinkConfig::linked_source("bp:Position_0", 0.0, 200.0, CurveType::Linear);
         intensity.transforms = vec![
             TransformConfig::Vibrate {
-                speed_axis: "bp:Vibrate_0".into(),
+                speed: ScalarInput::Axis("bp:Vibrate_0".into()),
                 distance: 0.2,
             },
             TransformConfig::Constrict {
-                amount_axis: "bp:Constrict_0".into(),
+                amount: ScalarInput::Axis("bp:Constrict_0".into()),
                 min_floor: 0.0,
                 use_midpoint: false,
                 method: crate::transforms::ConstrictionMethod::Downsample,
@@ -824,7 +822,7 @@ mod tests {
         let mut cfg =
             ParameterLinkConfig::linked_source("bp:Position_0", 0.0, 200.0, CurveType::Linear);
         cfg.transforms = vec![TransformConfig::Vibrate {
-            speed_axis: "bp:Vibrate_0".into(),
+            speed: ScalarInput::Axis("bp:Vibrate_0".into()),
             distance: 0.2,
         }];
         let mut runtime = ParameterLinkRuntime::for_config(&cfg);
@@ -884,11 +882,11 @@ mod tests {
             ParameterLinkConfig::linked_source("bp:Position_0", 0.0, 1.0, CurveType::Linear);
         cfg.transforms = vec![
             TransformConfig::Vibrate {
-                speed_axis: "bp:Vibrate_0".into(),
+                speed: ScalarInput::Axis("bp:Vibrate_0".into()),
                 distance: 0.2,
             },
             TransformConfig::Constrict {
-                amount_axis: "bp:Constrict_0".into(),
+                amount: ScalarInput::Axis("bp:Constrict_0".into()),
                 min_floor: 0.0,
                 use_midpoint: false,
                 method: ConstrictionMethod::Downsample,
@@ -919,7 +917,7 @@ mod tests {
         let mut cfg =
             ParameterLinkConfig::linked_source("L0", 0.0, 1.0, CurveType::Linear);
         cfg.transforms = vec![TransformConfig::Vibrate {
-            speed_axis: "bp:Vibrate_0".into(),
+            speed: ScalarInput::Axis("bp:Vibrate_0".into()),
             distance: 0.2,
         }];
         // Runtime starts empty (mismatched length).

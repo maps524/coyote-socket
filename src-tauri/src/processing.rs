@@ -1417,11 +1417,8 @@ impl Channel {
 
         let mut shaped = base.clamp(0.0, 1.0);
         for (i, tcfg) in self.config.intensity.transforms.iter().enumerate() {
-            let modifiers: Vec<f64> = tcfg
-                .declared_axes()
-                .iter()
-                .map(|axis| bus.value_at(axis, target).unwrap_or(0.0))
-                .collect();
+            let modifiers: Vec<f64> =
+                tcfg.resolve_modifiers(|axis| bus.value_at(axis, target).unwrap_or(0.0));
             shaped = apply_transform(
                 tcfg,
                 &mut self.link_runtime.intensity.transform_state[i],

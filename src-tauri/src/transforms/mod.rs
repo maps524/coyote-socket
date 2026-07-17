@@ -25,9 +25,110 @@
 //! per-tick loop; sub F deleted the old `process_buttplug_pipeline` and
 //! moved `ConstrictionMethod` here as the canonical home.
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 
 pub mod buttplug;
+
+/// A transform modifier input: either a fixed constant the user dials in,
+/// or a live bus axis the resolver pre-fetches.
+///
+/// This replaces the bare `String` axis fields the Buttplug-wrapper
+/// variants (`Vibrate`, `Oscillate`, `Rotate`, `Constrict`) used to
+/// carry. Those fields were a holdover from the Buttplug pipeline, where
+/// a device emitted speed / direction / amount as *separate* command
+/// streams. When a user hand-builds a link there is no second stream, so
+/// forcing an axis made the field a required-but-meaningless text box
+/// (red until filled, silently `unwrap_or(0.0)` at runtime). A `Const`
+/// covers the common "vibrate at a fixed rate" case; promoting to `Axis`
+/// recovers the live-feed behavior.
+///
+/// ## Wire format
+///
+/// Serializes as a bare JSON **number** (`Const`) or **string** (`Axis`)
+/// — no `{kind: ...}` wrapper. The two are unambiguous (a constant is
+/// numeric, an axis name is a string) and JS distinguishes them with a
+/// `typeof` check, so the editor model stays `number | string`.
+///
+/// Deserialization also accepts the legacy bare axis string saved by
+/// pre-migration presets, so an old `"speedAxis": "bp:Vibrate_0"` loads
+/// as `Axis("bp:Vibrate_0")` unchanged. An empty axis string resolves to
+/// `0.0` (the same "unset" behavior the old `unwrap_or(0.0)` gave).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScalarInput {
+    /// Fixed value dialed in by the user (slider / toggle).
+    Const(f64),
+    /// Live bus axis read at the link's `target_time`. Empty name = unset.
+    Axis(String),
+}
+
+impl ScalarInput {
+    /// Resolve to a modifier value. `Const` returns its literal; `Axis`
+    /// fetches via the closure. An empty axis name short-circuits to
+    /// `0.0` without calling `fetch`, matching the pre-migration "unset
+    /// axis reads zero" behavior.
+    pub fn value(&self, fetch: &mut impl FnMut(&str) -> f64) -> f64 {
+        match self {
+            ScalarInput::Const(v) => *v,
+            ScalarInput::Axis(a) if a.is_empty() => 0.0,
+            ScalarInput::Axis(a) => fetch(a),
+        }
+    }
+
+    /// The bus axis this input depends on, if any. `Const` and empty
+    /// `Axis` return `None` — they create no bus dependency.
+    pub fn axis(&self) -> Option<&str> {
+        match self {
+            ScalarInput::Axis(a) if !a.is_empty() => Some(a),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for ScalarInput {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ScalarInput::Const(v) => serializer.serialize_f64(*v),
+            ScalarInput::Axis(a) => serializer.serialize_str(a),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ScalarInput {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct InputVisitor;
+
+        impl<'de> de::Visitor<'de> for InputVisitor {
+            type Value = ScalarInput;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a number (constant) or a string (bus axis name)")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ScalarInput, E> {
+                Ok(ScalarInput::Axis(v.to_string()))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<ScalarInput, E> {
+                Ok(ScalarInput::Axis(v))
+            }
+
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<ScalarInput, E> {
+                Ok(ScalarInput::Const(v))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<ScalarInput, E> {
+                Ok(ScalarInput::Const(v as f64))
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<ScalarInput, E> {
+                Ok(ScalarInput::Const(v as f64))
+            }
+        }
+
+        deserializer.deserialize_any(InputVisitor)
+    }
+}
 
 /// Method for applying Constrict bounds. Sub F moved this enum from
 /// `crate::buttplug::types` into the transforms layer so the resolver
@@ -94,52 +195,53 @@ pub enum TransformConfig {
     },
 
     // ====== Buttplug semantic wrappers (built atop the generics) ======
-    /// High-frequency sinusoidal wobble around the input value. The
-    /// modifier `speed_axis` (typically `bp:Vibrate_<i>`) drives
-    /// frequency in `[0, 20]` Hz; `distance` sets amplitude.
+    /// High-frequency sinusoidal wobble around the input value. `speed`
+    /// (a constant or the resolver's read of e.g. `bp:Vibrate_<i>`)
+    /// drives frequency in `[0, 20]` Hz; `distance` sets amplitude. The
+    /// `speedAxis` serde alias keeps pre-migration presets loading.
     Vibrate {
-        #[serde(rename = "speedAxis")]
-        speed_axis: String,
+        #[serde(alias = "speedAxis")]
+        speed: ScalarInput,
         distance: f64,
     },
 
-    /// Triangle-wave sweep around the input value. `speed_axis` drives
+    /// Triangle-wave sweep around the input value. `speed` drives
     /// frequency in `[0, max_speed_hz]`; `scale` sets amplitude.
     Oscillate {
-        #[serde(rename = "speedAxis")]
-        speed_axis: String,
+        #[serde(alias = "speedAxis")]
+        speed: ScalarInput,
         scale: f64,
         #[serde(rename = "maxSpeedHz")]
         max_speed_hz: f64,
     },
 
-    /// Sawtooth directional sweep around the input value. `speed_axis`
-    /// drives frequency in `[0, max_speed_hz]`; `direction_axis` carries a
-    /// 0/1 bool (typically `bp:RotateDir_<i>`) where `>= 0.5` is clockwise
-    /// (+sign) and `< 0.5` is counter-clockwise (-sign). `scale` sets
-    /// amplitude. Mirrors the pre-refactor `process_buttplug_pipeline`'s
-    /// Rotate stage so a saved Rotate-driven preset reproduces the same
-    /// sweep on the new resolver path.
+    /// Sawtooth directional sweep around the input value. `speed` drives
+    /// frequency in `[0, max_speed_hz]`; `direction` carries a 0/1 value
+    /// where `>= 0.5` is clockwise (+sign) and `< 0.5` is
+    /// counter-clockwise (-sign) — typically a constant CW/CCW toggle,
+    /// but linkable to e.g. `bp:RotateDir_<i>`. `scale` sets amplitude.
+    /// Mirrors the pre-refactor `process_buttplug_pipeline`'s Rotate
+    /// stage so a saved Rotate-driven preset reproduces the same sweep.
     Rotate {
-        #[serde(rename = "speedAxis")]
-        speed_axis: String,
-        #[serde(rename = "directionAxis")]
-        direction_axis: String,
+        #[serde(alias = "speedAxis")]
+        speed: ScalarInput,
+        #[serde(alias = "directionAxis")]
+        direction: ScalarInput,
         scale: f64,
         #[serde(rename = "maxSpeedHz")]
         max_speed_hz: f64,
     },
 
-    /// Range-narrowing transform. The modifier `amount_axis` drives a
-    /// 0..1 constriction strength: 0 leaves the full range alone, 1
-    /// collapses to `min_floor`. `use_midpoint = false` centers the
-    /// shrinking range on the input value (so the shrink follows the
-    /// stroke); `true` pins it to 0.5. `method` chooses Downsample
-    /// (remap into the bounds, preserves shape) vs Clamp (cut off at
-    /// the bounds, can flat-spot).
+    /// Range-narrowing transform. `amount` drives a 0..1 constriction
+    /// strength: 0 leaves the full range alone, 1 collapses to
+    /// `min_floor`. `use_midpoint = false` centers the shrinking range
+    /// on the input value (so the shrink follows the stroke); `true`
+    /// pins it to 0.5. `method` chooses Downsample (remap into the
+    /// bounds, preserves shape) vs Clamp (cut off at the bounds, can
+    /// flat-spot).
     Constrict {
-        #[serde(rename = "amountAxis")]
-        amount_axis: String,
+        #[serde(alias = "amountAxis")]
+        amount: ScalarInput,
         #[serde(rename = "minFloor")]
         min_floor: f64,
         #[serde(rename = "useMidpoint")]
@@ -149,28 +251,41 @@ pub enum TransformConfig {
 }
 
 impl TransformConfig {
-    /// Bus axes this transform reads modifier values from. The resolver
-    /// pre-fetches each at the link's `target_time` and passes the
-    /// resolved values into `apply_transform` in declaration order, so
-    /// the transform never touches the bus directly.
-    pub fn declared_axes(&self) -> Vec<&str> {
+    /// Build the modifier slice `apply_transform` expects, in the fixed
+    /// per-variant slot order it reads (`Rotate` = `[speed, direction]`,
+    /// etc.). Each `ScalarInput` slot resolves to its constant or, for an
+    /// `Axis`, the value `fetch` returns for that axis name. `Mix`'s
+    /// single `other_axis` is always a bus read (empty name → 0.0).
+    ///
+    /// Unlike the old `declared_axes()` this keeps slot positions stable
+    /// regardless of which inputs are constants — a `Rotate` with a const
+    /// speed and a linked direction still lands the speed at slot 0 and
+    /// the direction at slot 1. The resolver passes
+    /// `|axis| bus.value_at(axis, target).unwrap_or(0.0)`; no transform
+    /// touches the bus directly.
+    pub fn resolve_modifiers(&self, mut fetch: impl FnMut(&str) -> f64) -> Vec<f64> {
         match self {
-            // Pure shaping primitives that read no modifier axes.
+            // Pure shaping primitives that read no modifier values.
             Self::Smooth { .. }
             | Self::Scale { .. }
             | Self::Clamp { .. }
             | Self::Invert
             | Self::Hold { .. } => Vec::new(),
-            Self::Mix { other_axis, .. } => vec![other_axis.as_str()],
-            Self::Vibrate { speed_axis, .. } | Self::Oscillate { speed_axis, .. } => {
-                vec![speed_axis.as_str()]
+            Self::Mix { other_axis, .. } => {
+                let v = if other_axis.is_empty() {
+                    0.0
+                } else {
+                    fetch(other_axis)
+                };
+                vec![v]
+            }
+            Self::Vibrate { speed, .. } | Self::Oscillate { speed, .. } => {
+                vec![speed.value(&mut fetch)]
             }
             Self::Rotate {
-                speed_axis,
-                direction_axis,
-                ..
-            } => vec![speed_axis.as_str(), direction_axis.as_str()],
-            Self::Constrict { amount_axis, .. } => vec![amount_axis.as_str()],
+                speed, direction, ..
+            } => vec![speed.value(&mut fetch), direction.value(&mut fetch)],
+            Self::Constrict { amount, .. } => vec![amount.value(&mut fetch)],
         }
     }
 
@@ -244,8 +359,8 @@ pub enum TransformState {
 }
 
 /// Apply one transform to `value`, threading any per-tick state mutations
-/// through `state`. `modifiers` carries the resolver's pre-fetched
-/// values for `cfg.declared_axes()` in declaration order; an empty
+/// through `state`. `modifiers` carries the resolver's resolved
+/// values from `cfg.resolve_modifiers()` in slot order; an empty
 /// slice means the transform reads no bus axes (any access via
 /// `modifiers.first()` falls through to a documented default rather
 /// than panicking, so a misordered resolver is loud at the call site
@@ -371,10 +486,16 @@ fn apply_hold(
 mod tests {
     use super::*;
 
-    // ---------- declared_axes ----------
+    // ---------- resolve_modifiers ----------
+
+    /// A `fetch` closure that maps every axis name to a fixed sentinel so
+    /// tests can tell an axis-sourced slot apart from a constant one.
+    fn fetch_const(v: f64) -> impl FnMut(&str) -> f64 {
+        move |_axis: &str| v
+    }
 
     #[test]
-    fn declared_axes_empty_for_pure_primitives() {
+    fn resolve_modifiers_empty_for_pure_primitives() {
         for cfg in [
             TransformConfig::Smooth {
                 time_constant_ms: 100.0,
@@ -385,56 +506,105 @@ mod tests {
             TransformConfig::Hold { duration_ms: 200 },
         ] {
             assert!(
-                cfg.declared_axes().is_empty(),
-                "{:?} reads no bus axes",
+                cfg.resolve_modifiers(fetch_const(0.9)).is_empty(),
+                "{:?} reads no modifiers",
                 cfg
             );
         }
     }
 
     #[test]
-    fn declared_axes_reports_modifier_axis_names() {
+    fn resolve_modifiers_fetches_axis_inputs() {
+        // Mix's other_axis is always a bus read.
         let mix = TransformConfig::Mix {
             other_axis: "L1".into(),
             weight: 0.3,
         };
-        assert_eq!(mix.declared_axes(), vec!["L1"]);
+        assert_eq!(mix.resolve_modifiers(fetch_const(0.7)), vec![0.7]);
 
         let vibrate = TransformConfig::Vibrate {
-            speed_axis: "bp:Vibrate_0".into(),
+            speed: ScalarInput::Axis("bp:Vibrate_0".into()),
             distance: 0.2,
         };
-        assert_eq!(vibrate.declared_axes(), vec!["bp:Vibrate_0"]);
+        assert_eq!(vibrate.resolve_modifiers(fetch_const(0.5)), vec![0.5]);
 
-        let oscillate = TransformConfig::Oscillate {
-            speed_axis: "bp:Oscillate_1".into(),
-            scale: 0.4,
-            max_speed_hz: 5.0,
-        };
-        assert_eq!(oscillate.declared_axes(), vec!["bp:Oscillate_1"]);
-
-        // Rotate declares two axes — speed first, direction second. The
-        // resolver's pre-fetch must preserve that order so
-        // `apply_rotate` reads `modifiers[0]` as speed and
-        // `modifiers[1]` as direction.
+        // Rotate keeps slot order — speed at [0], direction at [1] — even
+        // when fetched from the bus, so `apply_rotate` reads them right.
         let rotate = TransformConfig::Rotate {
-            speed_axis: "bp:Rotate_0".into(),
-            direction_axis: "bp:RotateDir_0".into(),
+            speed: ScalarInput::Axis("bp:Rotate_0".into()),
+            direction: ScalarInput::Axis("bp:RotateDir_0".into()),
             scale: 0.4,
             max_speed_hz: 5.0,
         };
-        assert_eq!(
-            rotate.declared_axes(),
-            vec!["bp:Rotate_0", "bp:RotateDir_0"]
-        );
+        assert_eq!(rotate.resolve_modifiers(fetch_const(0.8)), vec![0.8, 0.8]);
+    }
 
-        let constrict = TransformConfig::Constrict {
-            amount_axis: "bp:Constrict_0".into(),
-            min_floor: 0.1,
-            use_midpoint: true,
-            method: ConstrictionMethod::Downsample,
+    #[test]
+    fn resolve_modifiers_uses_constants_without_fetching() {
+        // A Const slot returns its literal and never calls `fetch` — the
+        // closure here panics if touched, proving constants short-circuit.
+        let panic_fetch = |_axis: &str| -> f64 { panic!("const must not fetch the bus") };
+        let vibrate = TransformConfig::Vibrate {
+            speed: ScalarInput::Const(0.25),
+            distance: 0.2,
         };
-        assert_eq!(constrict.declared_axes(), vec!["bp:Constrict_0"]);
+        assert_eq!(vibrate.resolve_modifiers(panic_fetch), vec![0.25]);
+    }
+
+    #[test]
+    fn resolve_modifiers_keeps_slot_order_for_mixed_const_and_axis() {
+        // The whole point of the fixed-slot contract: a const speed and a
+        // linked direction must still land speed at [0], direction at [1].
+        let rotate = TransformConfig::Rotate {
+            speed: ScalarInput::Const(0.3),
+            direction: ScalarInput::Axis("bp:RotateDir_0".into()),
+            scale: 0.4,
+            max_speed_hz: 5.0,
+        };
+        // Direction axis fetches to 1.0; speed is the constant 0.3.
+        assert_eq!(rotate.resolve_modifiers(fetch_const(1.0)), vec![0.3, 1.0]);
+    }
+
+    #[test]
+    fn resolve_modifiers_empty_axis_reads_zero() {
+        // An unset (empty) axis name resolves to 0.0 without fetching,
+        // matching the pre-migration "unset axis reads zero" behavior.
+        let panic_fetch = |_axis: &str| -> f64 { panic!("empty axis must not fetch") };
+        let vibrate = TransformConfig::Vibrate {
+            speed: ScalarInput::Axis(String::new()),
+            distance: 0.2,
+        };
+        assert_eq!(vibrate.resolve_modifiers(panic_fetch), vec![0.0]);
+    }
+
+    #[test]
+    fn scalar_input_round_trips_const_as_number_and_axis_as_string() {
+        // Wire format: Const → bare number, Axis → bare string. A legacy
+        // bare axis string also deserializes back to Axis.
+        let c: ScalarInput = serde_json::from_str("0.5").unwrap();
+        assert_eq!(c, ScalarInput::Const(0.5));
+        let a: ScalarInput = serde_json::from_str("\"bp:Vibrate_0\"").unwrap();
+        assert_eq!(a, ScalarInput::Axis("bp:Vibrate_0".into()));
+        assert_eq!(serde_json::to_string(&ScalarInput::Const(0.5)).unwrap(), "0.5");
+        assert_eq!(
+            serde_json::to_string(&ScalarInput::Axis("L1".into())).unwrap(),
+            "\"L1\""
+        );
+    }
+
+    #[test]
+    fn legacy_speed_axis_key_deserializes_into_speed() {
+        // Pre-migration presets stored `speedAxis` as a bare string. The
+        // serde alias + ScalarInput's string visitor load it as an Axis.
+        let json = r#"{"type":"vibrate","speedAxis":"bp:Vibrate_0","distance":0.3}"#;
+        let cfg: TransformConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg,
+            TransformConfig::Vibrate {
+                speed: ScalarInput::Axis("bp:Vibrate_0".into()),
+                distance: 0.3,
+            }
+        );
     }
 
     // ---------- initial_state ----------
@@ -452,7 +622,7 @@ mod tests {
                 weight: 0.5,
             },
             TransformConfig::Constrict {
-                amount_axis: "bp:Constrict_0".into(),
+                amount: ScalarInput::Axis("bp:Constrict_0".into()),
                 min_floor: 0.0,
                 use_midpoint: false,
                 method: ConstrictionMethod::Clamp,
@@ -480,7 +650,7 @@ mod tests {
         ));
         assert!(matches!(
             TransformConfig::Vibrate {
-                speed_axis: "x".into(),
+                speed: ScalarInput::Axis("x".into()),
                 distance: 0.1,
             }
             .initial_state(),
@@ -491,7 +661,7 @@ mod tests {
         ));
         assert!(matches!(
             TransformConfig::Oscillate {
-                speed_axis: "x".into(),
+                speed: ScalarInput::Axis("x".into()),
                 scale: 0.5,
                 max_speed_hz: 5.0,
             }
@@ -503,8 +673,8 @@ mod tests {
         ));
         assert!(matches!(
             TransformConfig::Rotate {
-                speed_axis: "x".into(),
-                direction_axis: "y".into(),
+                speed: ScalarInput::Axis("x".into()),
+                direction: ScalarInput::Axis("y".into()),
                 scale: 0.5,
                 max_speed_hz: 5.0,
             }

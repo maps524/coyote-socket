@@ -142,9 +142,9 @@ pub fn apply_oscillate(
 ///
 /// Mirrors the pre-refactor `process_buttplug_pipeline`'s Rotate stage:
 /// `phase % 1.0 * scale * direction`, added to `value`. The modifier
-/// slot order matches `declared_axes()` (`speed_axis` first,
-/// `direction_axis` second) so the resolver pre-fetch always lands the
-/// values in the right slot.
+/// slot order matches `resolve_modifiers()` (`speed` first, `direction`
+/// second) so the resolved slice always lands the values in the right
+/// slot.
 pub fn apply_rotate(
     scale: f64,
     max_speed_hz: f64,
@@ -215,7 +215,7 @@ pub fn apply_constrict(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transforms::{apply_transform, TransformConfig};
+    use crate::transforms::{apply_transform, ScalarInput, TransformConfig};
 
     #[test]
     fn vibrate_first_call_passes_value_through() {
@@ -223,7 +223,7 @@ mod tests {
         // at 0 → sin(0) = 0 → output equals input. Prevents an
         // initial-tick wobble that would surprise users.
         let cfg = TransformConfig::Vibrate {
-            speed_axis: "bp:Vibrate_0".into(),
+            speed: ScalarInput::Axis("bp:Vibrate_0".into()),
             distance: 0.2,
         };
         let mut state = cfg.initial_state();
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn vibrate_offsets_output_after_phase_advance() {
         let cfg = TransformConfig::Vibrate {
-            speed_axis: "bp:Vibrate_0".into(),
+            speed: ScalarInput::Axis("bp:Vibrate_0".into()),
             distance: 0.2,
         };
         let mut state = cfg.initial_state();
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn vibrate_speed_zero_holds_phase_so_offset_stays_zero() {
         let cfg = TransformConfig::Vibrate {
-            speed_axis: "bp:Vibrate_0".into(),
+            speed: ScalarInput::Axis("bp:Vibrate_0".into()),
             distance: 0.5,
         };
         let mut state = cfg.initial_state();
@@ -279,7 +279,7 @@ mod tests {
         // = 0 gives identity on the first call; Oscillate's triangle(0)
         // = 0 does not. Document the asymmetry rather than mask it.
         let cfg = TransformConfig::Oscillate {
-            speed_axis: "bp:Oscillate_0".into(),
+            speed: ScalarInput::Axis("bp:Oscillate_0".into()),
             scale: 0.4,
             max_speed_hz: 5.0,
         };
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn oscillate_advances_phase_with_speed_and_dt() {
         let cfg = TransformConfig::Oscillate {
-            speed_axis: "bp:Oscillate_0".into(),
+            speed: ScalarInput::Axis("bp:Oscillate_0".into()),
             scale: 0.4,
             max_speed_hz: 5.0,
         };
@@ -318,7 +318,7 @@ mod tests {
         // effective = 0.5, bounds = [0.25, 0.75].
         // Input 0.0 → 0.25; 0.5 → 0.5; 1.0 → 0.75.
         let cfg = TransformConfig::Constrict {
-            amount_axis: "bp:Constrict_0".into(),
+            amount: ScalarInput::Axis("bp:Constrict_0".into()),
             min_floor: 0.0,
             use_midpoint: true,
             method: ConstrictionMethod::Downsample,
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn constrict_clamp_cuts_off_at_bounds() {
         let cfg = TransformConfig::Constrict {
-            amount_axis: "bp:Constrict_0".into(),
+            amount: ScalarInput::Axis("bp:Constrict_0".into()),
             min_floor: 0.0,
             use_midpoint: true,
             method: ConstrictionMethod::Clamp,
@@ -351,8 +351,8 @@ mod tests {
         // gives on its priming tick, so a Rotate-driven preset doesn't
         // jump on the first frame.
         let cfg = TransformConfig::Rotate {
-            speed_axis: "bp:Rotate_0".into(),
-            direction_axis: "bp:RotateDir_0".into(),
+            speed: ScalarInput::Axis("bp:Rotate_0".into()),
+            direction: ScalarInput::Axis("bp:RotateDir_0".into()),
             scale: 0.4,
             max_speed_hz: 5.0,
         };
@@ -364,8 +364,8 @@ mod tests {
     #[test]
     fn rotate_advances_phase_clockwise() {
         let cfg = TransformConfig::Rotate {
-            speed_axis: "bp:Rotate_0".into(),
-            direction_axis: "bp:RotateDir_0".into(),
+            speed: ScalarInput::Axis("bp:Rotate_0".into()),
+            direction: ScalarInput::Axis("bp:RotateDir_0".into()),
             scale: 0.4,
             max_speed_hz: 5.0,
         };
@@ -387,8 +387,8 @@ mod tests {
         // direction modifier < 0.5 → counter-clockwise → offset is
         // subtracted. Same speed / dt as the clockwise test, opposite sign.
         let cfg = TransformConfig::Rotate {
-            speed_axis: "bp:Rotate_0".into(),
-            direction_axis: "bp:RotateDir_0".into(),
+            speed: ScalarInput::Axis("bp:Rotate_0".into()),
+            direction: ScalarInput::Axis("bp:RotateDir_0".into()),
             scale: 0.4,
             max_speed_hz: 5.0,
         };
@@ -412,8 +412,8 @@ mod tests {
         // when the slice is short — defense-in-depth for a misordered
         // resolver.
         let cfg = TransformConfig::Rotate {
-            speed_axis: "bp:Rotate_0".into(),
-            direction_axis: "bp:RotateDir_0".into(),
+            speed: ScalarInput::Axis("bp:Rotate_0".into()),
+            direction: ScalarInput::Axis("bp:RotateDir_0".into()),
             scale: 0.4,
             max_speed_hz: 5.0,
         };
@@ -434,7 +434,7 @@ mod tests {
         // use_midpoint=true) or centered on the input. Either way,
         // a downsample pass with input 0.4 should hit ~0.4.
         let cfg = TransformConfig::Constrict {
-            amount_axis: "bp:Constrict_0".into(),
+            amount: ScalarInput::Axis("bp:Constrict_0".into()),
             min_floor: 0.0,
             use_midpoint: true,
             method: ConstrictionMethod::Downsample,

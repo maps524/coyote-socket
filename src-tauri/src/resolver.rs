@@ -409,7 +409,7 @@ mod tests {
         CurveType, NoInputBehavior, ParameterLinkConfig, ParameterLinkRuntime, ResolvedSample,
     };
     use crate::processing::{Channel, ChannelId, ProcessingEngineType};
-    use crate::transforms::TransformConfig;
+    use crate::transforms::{ScalarInput, TransformConfig};
 
     fn build_channel_with_intensity(cfg: ParameterLinkConfig, id: ChannelId) -> Channel {
         let mut ch = Channel::new(id);
@@ -541,7 +541,7 @@ mod tests {
         let mut cfg =
             ParameterLinkConfig::linked_source("bp:Position_0", 0.0, 200.0, CurveType::Linear);
         cfg.transforms = vec![TransformConfig::Vibrate {
-            speed_axis: "bp:Vibrate_0".into(),
+            speed: ScalarInput::Axis("bp:Vibrate_0".into()),
             distance: 0.2,
         }];
         let mut ch = build_channel_with_intensity(cfg, ChannelId::A);

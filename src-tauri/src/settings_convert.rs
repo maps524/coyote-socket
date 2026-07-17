@@ -72,7 +72,7 @@ pub(crate) fn convert_channel_settings(settings: &ChannelSettings) -> ChannelCon
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transforms::TransformConfig;
+    use crate::transforms::{ScalarInput, TransformConfig};
 
     fn base_settings() -> ParameterSourceSettings {
         ParameterSourceSettings {
@@ -173,7 +173,7 @@ mod tests {
             transforms: vec![
                 TransformConfig::Scale { factor: 0.5 },
                 TransformConfig::Vibrate {
-                    speed_axis: "bp:Vibrate_0".into(),
+                    speed: ScalarInput::Axis("bp:Vibrate_0".into()),
                     distance: 0.3,
                 },
             ],
@@ -187,8 +187,8 @@ mod tests {
         ));
         assert!(matches!(
             &p.transforms[1],
-            TransformConfig::Vibrate { speed_axis, distance }
-                if speed_axis == "bp:Vibrate_0" && (*distance - 0.3).abs() < 1e-9
+            TransformConfig::Vibrate { speed, distance }
+                if *speed == ScalarInput::Axis("bp:Vibrate_0".into()) && (*distance - 0.3).abs() < 1e-9
         ));
     }
 
