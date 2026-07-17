@@ -22,7 +22,7 @@
   import LogsPanel from './lib/components/LogsPanel.svelte';
   import GeneralTab from './lib/components/settings/GeneralTab.svelte';
   import ButtplugTab from './lib/components/settings/ButtplugTab.svelte';
-  import GamepadIcon from './lib/components/ui/GamepadIcon.svelte';
+  import GamepadBindControl from './lib/components/ui/GamepadBindControl.svelte';
   import { outputOptions, connectionStatus, PROCESSING_ENGINES, PEAK_FILL_STRATEGIES, type ProcessingEngine, type PeakFillStrategy } from './lib/stores/connection.js';
   import { channelA, channelB } from './lib/stores/channels.js';
   import { generalSettings } from './lib/stores/generalSettings.js';
@@ -41,7 +41,7 @@
   import type { AppSettings, ChannelPreset, ChannelSettings, ChordPart, GamepadBinding, GamepadBindings, PresetEcosystem } from './lib/types/settings';
   import type { NoInputBehavior } from './lib/types/modulation';
   import { coyoteService } from './lib/services/CoyoteService.js';
-  import { Plus, Save, X, ListOrdered, GripVertical } from 'lucide-svelte';
+  import { Plus, Save, X, ListOrdered, GripVertical, Trash2 } from 'lucide-svelte';
   import { dndzone, type DndEvent } from 'svelte-dnd-action';
   import { flip } from 'svelte/animate';
 
@@ -202,11 +202,6 @@
 
   function shortcutKeyFor(action: string): string | undefined {
     return (shortcuts as Record<string, string>)[action];
-  }
-
-  function captureToBinding(parts: ChordPart[]): GamepadBinding {
-    if (parts.length === 1) return parts[0] as GamepadBinding;
-    return { kind: 'combo', parts };
   }
 
   async function changeGamepadEngine(engine: 'off' | 'gilrs' | 'xinput') {
@@ -1023,6 +1018,13 @@
       case 'cyclePreset':          cyclePresets(1); break;
       case 'cyclePresetForward':   cyclePresets(1); break;
       case 'cyclePresetBack':      cyclePresets(-1); break;
+      default:
+        // Per-preset jump combos are stored under the dynamic action key
+        // `selectPreset:<name>`. Resolve within the current ecosystem.
+        if (action.startsWith('selectPreset:')) {
+          handlePresetSelect(action.slice('selectPreset:'.length));
+        }
+        break;
     }
   }
 
@@ -1450,20 +1452,41 @@
   // Reorder dialog state. Opens a centered modal with a drag-and-drop list
   // (svelte-dnd-action). Local working copy lets the user reorder freely;
   // persistence happens on `finalize` via reorder_presets.
+  //
+  // svelte-dnd-action requires every item to carry an `id` property, so the
+  // working copy tags each preset with `id: name`. Without it the library
+  // throws "missing 'id' property", and that async rejection intermittently
+  // aborts Svelte's flush when the dialog closes — leaving the modal stuck
+  // open (Done worked, but the X/Escape/overlay close paths did not).
+  type ReorderItem = ChannelPreset & { id: string };
   let reorderOpen = false;
-  let reorderItems: ChannelPreset[] = [];
+  let reorderItems: ReorderItem[] = [];
+  // Per-row delete-confirm popover state, keyed by preset id (== name).
+  let deleteConfirmOpen: Record<string, boolean> = {};
   const REORDER_FLIP_MS = 200;
 
+  // Gamepad jump-to-preset combos live in the shared gamepadBindings map under
+  // the key `selectPreset:<name>`, so they persist and evaluate through the same
+  // pipeline as every other binding. Scoped to the current ecosystem at dispatch.
+  const presetBindKey = (name: string) => `selectPreset:${name}`;
+
   function openReorderDialog() {
-    reorderItems = [...filteredPresets];
+    reorderItems = filteredPresets.map(p => ({ ...p, id: p.name }));
+    deleteConfirmOpen = {};
     reorderOpen = true;
   }
 
-  function handleReorderConsider(e: CustomEvent<DndEvent<ChannelPreset>>) {
+  // Abandon an in-progress preset-combo capture if the modal closes, so it
+  // doesn't linger and hijack the next gamepad press elsewhere.
+  $: if (!reorderOpen && rebindCapture?.action.startsWith('selectPreset:')) {
+    cancelRebind();
+  }
+
+  function handleReorderConsider(e: CustomEvent<DndEvent<ReorderItem>>) {
     reorderItems = e.detail.items;
   }
 
-  async function handleReorderFinalize(e: CustomEvent<DndEvent<ChannelPreset>>) {
+  async function handleReorderFinalize(e: CustomEvent<DndEvent<ReorderItem>>) {
     reorderItems = e.detail.items;
     const names = reorderItems.map(p => p.name);
     try {
@@ -1471,6 +1494,30 @@
       presets = await invoke<ChannelPreset[]>('get_presets');
     } catch (err) {
       console.error('[Presets] Failed to reorder:', err);
+    }
+  }
+
+  async function deletePresetFromReorder(item: ReorderItem) {
+    deleteConfirmOpen[item.id] = false;
+    try {
+      await invoke('delete_preset', { name: item.name });
+      // Drop the selection if the deleted preset was active.
+      if ($presetSelectionStore[currentEcosystem] === item.name) {
+        clearSelectedPreset(currentEcosystem);
+        lastSavedPresetState = null;
+        presetDirty = false;
+      }
+      presets = await invoke<ChannelPreset[]>('get_presets');
+      reorderItems = reorderItems.filter(p => p.id !== item.id);
+      // Drop any gamepad jump-combo bound to the deleted preset.
+      const bindKey = presetBindKey(item.name);
+      if (gamepadBindings[bindKey]) {
+        const next = { ...gamepadBindings };
+        delete next[bindKey];
+        gamepadBindings = next;
+      }
+    } catch (err) {
+      console.error('[Presets] Failed to delete:', err);
     }
   }
 
@@ -2113,30 +2160,15 @@
                     <span class="w-10 text-center text-muted-foreground font-mono">
                       {kbKey === ' ' ? 'Space' : (kbKey ?? '')}
                     </span>
-                    <span class="flex-1 flex justify-end items-center min-w-0 overflow-hidden">
-                      {#if capture}
-                        {#if capture.parts.length === 0}
-                          <span class="text-xs text-amber-500">Press buttons…</span>
-                        {:else}
-                          <GamepadIcon binding={captureToBinding(capture.parts)} />
-                        {/if}
-                      {:else}
-                        <GamepadIcon {binding} />
-                      {/if}
-                    </span>
-                    {#if capture}
-                      <Button variant="default" size="sm" on:click={saveCombo}>Save</Button>
-                      <Button variant="ghost" size="sm" on:click={cancelRebind}>Cancel</Button>
-                    {:else}
-                      <Button variant="outline" size="sm" on:click={() => startRebindGamepad(row.action)}>
-                        {binding ? 'Rebind' : 'Bind'}
-                      </Button>
-                      {#if binding}
-                        <Button variant="ghost" size="sm" on:click={() => clearGamepadBinding(row.action)}>
-                          ✕
-                        </Button>
-                      {/if}
-                    {/if}
+                    <GamepadBindControl
+                      {binding}
+                      capturing={!!capture}
+                      captureParts={capture?.parts ?? []}
+                      on:start={() => startRebindGamepad(row.action)}
+                      on:save={saveCombo}
+                      on:cancel={cancelRebind}
+                      on:clear={() => clearGamepadBinding(row.action)}
+                    />
                   </div>
                 {/each}
               </div>
@@ -2213,13 +2245,82 @@
         on:consider={handleReorderConsider}
         on:finalize={handleReorderFinalize}
       >
-        {#each reorderItems as preset (preset.name)}
+        {#each reorderItems as preset (preset.id)}
+          {@const bindKey = presetBindKey(preset.name)}
+          {@const binding = gamepadBindings[bindKey]}
+          {@const capture = rebindCapture?.action === bindKey && rebindCapture?.source === 'gamepad' ? rebindCapture : null}
           <div
             animate:flip={{ duration: REORDER_FLIP_MS }}
             class="flex items-center gap-2 px-2 py-2 rounded border border-border bg-muted/30 cursor-grab active:cursor-grabbing"
           >
             <GripVertical class="h-4 w-4 text-muted-foreground shrink-0" />
             <span class="text-sm flex-1 truncate">{preset.name}</span>
+            <!-- Gamepad jump-combo: inline capture, mirrors the settings
+                 rebind UI. Combo is always visible; click to capture in place.
+                 stopPropagation wrapper so interacting never starts a drag. -->
+            <div
+              class="shrink-0 flex items-center gap-1"
+              on:mousedown|stopPropagation
+              on:touchstart|stopPropagation
+              on:pointerdown|stopPropagation
+              role="presentation"
+            >
+              <GamepadBindControl
+                compact
+                {binding}
+                capturing={!!capture}
+                captureParts={capture?.parts ?? []}
+                label={`jump to “${preset.name}”`}
+                on:start={() => startRebindGamepad(bindKey)}
+                on:save={saveCombo}
+                on:cancel={cancelRebind}
+                on:clear={() => clearGamepadBinding(bindKey)}
+              />
+            </div>
+            <!-- Delete control (hidden while this row is capturing to save room).
+                 Stop pointer/touch events from reaching the dndzone so
+                 interacting with it never starts a drag. -->
+            {#if !capture}
+            <div
+              class="shrink-0"
+              on:mousedown|stopPropagation
+              on:touchstart|stopPropagation
+              on:pointerdown|stopPropagation
+              role="presentation"
+            >
+              <Popover bind:open={deleteConfirmOpen[preset.id]} align="end" compact={true} contentClass="!w-[220px] min-w-0">
+                <button
+                  slot="trigger"
+                  type="button"
+                  class="w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 cursor-pointer"
+                  title="Delete preset"
+                >
+                  <Trash2 class="h-4 w-4" />
+                </button>
+                <div class="space-y-2">
+                  <div class="text-xs leading-snug">
+                    Delete preset <span class="font-medium">{preset.name}</span>?
+                  </div>
+                  <div class="flex justify-end gap-2">
+                    <Button
+                      variant="ghost"
+                      class="h-7 px-2 text-xs"
+                      on:click={() => (deleteConfirmOpen[preset.id] = false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      class="h-7 px-2 text-xs"
+                      on:click={() => deletePresetFromReorder(preset)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </div>
+              </Popover>
+            </div>
+            {/if}
           </div>
         {/each}
       </div>

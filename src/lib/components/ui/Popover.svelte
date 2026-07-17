@@ -87,18 +87,27 @@
       left = rect.right;
     }
 
-    // Use fixed width since we set w-[320px] on the popover
-    // Measuring during transition can give incorrect values
-    const contentWidth = 320;
+    // Measure the real rendered size. A `scale` transition doesn't change the
+    // layout box, so offsetWidth/Height are stable here (we've already awaited
+    // tick + a frame). Falls back to sane defaults if not yet laid out.
+    const contentWidth = contentEl?.offsetWidth || 320;
     const contentHeight = contentEl?.offsetHeight || 400;
 
-    // Horizontal boundary check - keep within viewport
-    if (left + contentWidth > viewportWidth - 16) {
-      left = viewportWidth - contentWidth - 16;
+    // Horizontal boundary check. `left` is the CSS anchor, but the element is
+    // shifted by a translate for center/end alignment, so clamp the *visual*
+    // box [visualLeft, visualLeft+contentWidth] into the viewport, then convert
+    // back to the anchor. Without this, an end-aligned popover gets clamped as
+    // if it grew rightward and drifts off its trigger in narrow windows.
+    const margin = 16;
+    const anchorToVisual = align === 'center' ? contentWidth / 2 : align === 'end' ? contentWidth : 0;
+    let visualLeft = left - anchorToVisual;
+    if (visualLeft + contentWidth > viewportWidth - margin) {
+      visualLeft = viewportWidth - margin - contentWidth;
     }
-    if (left < 16) {
-      left = 16;
+    if (visualLeft < margin) {
+      visualLeft = margin;
     }
+    left = visualLeft + anchorToVisual;
 
     // Vertical boundary check
     if (top + contentHeight > viewportHeight - 16) {
