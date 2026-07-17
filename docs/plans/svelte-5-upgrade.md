@@ -1,7 +1,16 @@
 # Full-Bore Frontend Upgrade — Svelte 5 + Vite 8 + Tailwind 4
 
 **Scope (decided):** go all in — Svelte 4→5 **with full runes migration**, Vite 5→8, Tailwind 3→4.
-**Branch:** `svelte-5-upgrade`. **Status:** PREP only — `package.json` bumped + this doc. Nothing installed, migrated, built, or committed.
+**Branch:** `svelte-5-upgrade` (in the primary worktree, on top of the maintainer's `46a8774`).
+
+## PROGRESS (2026-07-17)
+
+Done + committed (all `svelte-check` 0 errors, app renders pixel-identical + functional):
+- ✅ `c4a3dba` — Svelte 5 + Vite 8 (legacy mode)
+- ✅ `6de2e58` — Tailwind 4
+- ✅ `8c93040` — runes migration (codemod `sv migrate svelte-5` + residue fixes + 2 recursion fixes)
+
+**Remaining — pure runes (Phase 2 tail):** the codemod left `svelte/legacy` compat shims — **21 `run()`, 25 `createBubbler` event-forwards, 12 `stopPropagation`** across 11 files. These are functional and behave as they did in Svelte 4, but produce **21 `legacy_recursive_reactive_block` runtime warnings** (advisory — guarded by the `run()` shim, not fatal). Converting them to `$derived`/`$effect` + callback props resolves the warnings and completes "pure runes." This is coupled work (event-forwarding change touches child API + all consumers), best done child→parent per component. **Follow-ups:** also swap `lucide-svelte`→`@lucide/svelte` (deprecated), and clear the 23 cosmetic legacy warnings (self-closing tags, a11y).
 
 **Base (confirmed):** `worktree-pipeline-refactor` @ **`f342e0a`** — **not** `main`. Jessica signalled done (2026-07-17); her gamepad/delete/tauri-panels work is committed:
 - `f342e0a` feat(presets): delete + gamepad jump-to-preset in reorder modal, fix close; adds `GamepadBindControl.svelte`; Popover fix
