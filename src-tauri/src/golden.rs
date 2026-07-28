@@ -590,13 +590,23 @@ fn all_specs() -> Vec<TraceSpec> {
     out.push(
         SpecBuilder::new(
             "ramp-retarget-midflight",
-            "A new ramped target arrives while the previous ramp is still in flight. This is the \
-             only trace that exercises `ramp_start_value = self.get_value_at(timestamp)` in \
-             V2ChannelState::set_target with a partially-completed ramp — a port that re-anchors \
-             from `current_value` or from the previous target instead of from the interpolated \
-             position produces a visible discontinuity here and nowhere else. A: 0 -> 1.0 over \
-             800ms, retargeted to 0.3 over 400ms at +600ms (mid-ramp), then to 0.9 over 600ms. \
-             B: the same pattern with an inverse curve and shorter ramps.",
+            "A new ramped target arrives while the previous ramp is still in flight, exercising \
+             `ramp_start_value = self.get_value_at(timestamp)` in V2ChannelState::set_target \
+             against a partially-completed ramp. A: 0 -> 1.0 over 800ms, retargeted to 0.3 over \
+             400ms at +600ms (mid-ramp), then to 0.9 over 600ms. B: the same pattern with an \
+             inverse curve and shorter ramps. \
+             \
+             Two re-anchor mistakes are worth distinguishing. Anchoring from the PREVIOUS TARGET \
+             is caught only here — no other trace retargets mid-ramp. Anchoring from \
+             `current_value` is caught here AND by ramped-targets, where `current_value` is only \
+             ever assigned for the `duration_ms == 0` command at t=0 and so stays 0 for the whole \
+             trace; that port ramps 0 -> 0 at +1400 and emits flat zeros where the fixture has \
+             [160,150,140,130]. \
+             \
+             Note also tick +600: all four sample points fall at or before the new \
+             `ramp_start_time`, so `get_value_at` returns the anchor itself and the re-anchor \
+             value appears in the output as a bare [100,100,100,100]. A port that computes it \
+             wrong fails both on that literal and on the interpolated ramp that follows.",
             chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
             chan(cfg_default_params(link("R2", 0.0, 200.0, CurveType::Inverse))),
         )
@@ -623,8 +633,18 @@ fn all_specs() -> Vec<TraceSpec> {
              device units (axis pairs 0.100/0.295, 0.100/0.300, 0.100/0.305 -> 20/59, 20/60, \
              20/61), and the two channels run the phases in opposite order so both branches are \
              live in the same tick. Phase edges land on tick boundaries so no downsampler window \
-             ever mixes two phases. A port with the threshold transcribed as 30 or 50, or with \
-             `<` written as `<=`, diverges on the middle phase only.",
+             ever mixes two phases. \
+             \
+             Which mistake each phase catches: a threshold transcribed as 30 diverges on the 39 \
+             phase; as 50, on both the 40 and 41 phases; `<` written as `<=` diverges on the 40 \
+             phase alone. \
+             \
+             DO NOT TRIM TICKS FROM THIS FIXTURE. The two branches produce IDENTICAL output at \
+             ticks +600, +800 and +1000, where the window's sample parity starts low. The entire \
+             discriminating power sits in the ticks where parity starts high: +700 and +900 on \
+             both channels (the 40 phase), plus +200/+400 on B and +1200/+1400 on A (the 41 \
+             phase). Delete those and the fixture still looks reasonable, still passes, and \
+             tests nothing.",
             chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
             chan(cfg_default_params(link("R2", 0.0, 200.0, CurveType::Linear))),
         )

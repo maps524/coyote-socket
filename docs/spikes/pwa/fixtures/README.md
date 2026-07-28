@@ -21,7 +21,7 @@ Per the V1 scope doc, the fixtures cover only what V1 ships:
 | `index.json` | Manifest of every fixture, plus the all-stop `zero_b0` frame |
 | `ramped-targets` | T-Code `I<ms>` ramp durations — the only fixtures where V2's interpolation runs |
 | `ramp-retarget-midflight` | A new ramped target arriving while the previous ramp is in flight |
-| `oscillation-threshold-boundary` | Per-window spread of exactly 39, 40 and 41 device units |
+| `oscillation-threshold-boundary` | Per-window spread of exactly 39, 40 and 41 device units — **do not trim its ticks**, see below |
 | `static-intensity-endpoints` | Static intensity at 0 and 200; no input at all |
 | `static-intensity-midpoint-and-overflow` | Static 100 and 255 — pins the 200 clamp on the static branch |
 | `linked-linear-full-axis-sweep` | Both channels linear over 0..200, axis swept 0→1 |
@@ -241,10 +241,39 @@ That fails in the unsafe direction. Two fixtures exist specifically to catch it:
   target, then later ticks fall back to the ramp evaluated over `[now-100, now-25]` and read
   *lower*. That non-monotonic shape is genuine engine-dispatch behaviour in
   `Channel::next_raw_values`, not a fixture artefact.
-- `ramp-retarget-midflight` — a new target arriving mid-ramp. This is the only trace that
-  exercises `ramp_start_value = self.get_value_at(timestamp)` against a partially completed
-  ramp. A port that re-anchors from `current_value` (never updated while a ramp is running) or
-  from the previous target produces a discontinuity here and nowhere else.
+- `ramp-retarget-midflight` — a new target arriving mid-ramp, exercising
+  `ramp_start_value = self.get_value_at(timestamp)` against a partially completed ramp. At tick
+  +600 all four sample points fall at or before the new `ramp_start_time`, so the re-anchor
+  value appears in the output as a bare `[100,100,100,100]`. Tick +700 then reads
+  `[60,60,60,60]` — the retarget command's own sample is inside that window, so the downsampler
+  branch wins — and the interpolated ramp appears at +800 as `[90,88,85,83]`. A wrong anchor
+  fails on both the bare literal and the ramp.
+
+Two re-anchor mistakes are worth telling apart:
+
+| Mistake | Caught by |
+|---|---|
+| anchor from the **previous target** | `ramp-retarget-midflight` only — nothing else retargets mid-ramp |
+| anchor from **`current_value`** | both fixtures. `current_value` is assigned only when `duration_ms == 0`, so in `ramped-targets` it stays 0 for the whole trace; that port ramps 0→0 at +1400 and emits flat zeros where the fixture has `[160,150,140,130]` |
+
+## The oscillation threshold
+
+`downsample_dynamic` switches algorithm outright on a per-window spread of 40 device units:
+below it, peak-preserving forward-fill; at or above it, alternating min/max.
+`oscillation-threshold-boundary` runs three 500ms phases at spreads of exactly 39, 40 and 41,
+with the two channels stepping through them in opposite order.
+
+| Mistake | Diverges on |
+|---|---|
+| threshold transcribed as 30 | the 39 phase |
+| threshold transcribed as 50 | the 40 **and** 41 phases |
+| `<` written as `<=` | the 40 phase only |
+
+**Do not trim ticks from this fixture.** The two branches produce *identical* output at ticks
++600, +800 and +1000, where the window's sample parity starts low. All of the discriminating
+power sits in the ticks where parity starts high: **+700 and +900 on both channels**, plus
++200/+400 on B and +1200/+1400 on A. Remove those and the fixture still looks reasonable,
+still passes, and tests nothing.
 
 ## Known gaps
 
