@@ -1,0 +1,1550 @@
+{
+  "schema_version": 1,
+  "name": "range-degenerate-equal",
+  "description": "range_min == range_max (A: 120..120, B: 0..0). Same max<=min branch as the inverted case: output pins at the shared value for every input.",
+  "engine": "v2-sustained",
+  "peak_fill": "forward",
+  "no_input_behavior": "hold",
+  "no_input_decay_ms": 1000,
+  "start_time_ms": 1000000,
+  "tick_interval_ms": 100,
+  "tick_count": 8,
+  "channel_a": {
+    "config": {
+      "frequency": {
+        "type": "static",
+        "staticValue": 100.0,
+        "rangeMin": 0.0,
+        "rangeMax": 0.0,
+        "curve": "linear"
+      },
+      "frequencyBalance": {
+        "type": "static",
+        "staticValue": 128.0,
+        "rangeMin": 0.0,
+        "rangeMax": 0.0,
+        "curve": "linear"
+      },
+      "intensityBalance": {
+        "type": "static",
+        "staticValue": 128.0,
+        "rangeMin": 0.0,
+        "rangeMax": 0.0,
+        "curve": "linear"
+      },
+      "intensity": {
+        "type": "linked",
+        "sourceAxis": "L0",
+        "rangeMin": 120.0,
+        "rangeMax": 120.0,
+        "curve": "linear",
+        "curveStrength": 2.0
+      }
+    },
+    "max_intensity": 200
+  },
+  "channel_b": {
+    "config": {
+      "frequency": {
+        "type": "static",
+        "staticValue": 100.0,
+        "rangeMin": 0.0,
+        "rangeMax": 0.0,
+        "curve": "linear"
+      },
+      "frequencyBalance": {
+        "type": "static",
+        "staticValue": 128.0,
+        "rangeMin": 0.0,
+        "rangeMax": 0.0,
+        "curve": "linear"
+      },
+      "intensityBalance": {
+        "type": "static",
+        "staticValue": 128.0,
+        "rangeMin": 0.0,
+        "rangeMax": 0.0,
+        "curve": "linear"
+      },
+      "intensity": {
+        "type": "linked",
+        "sourceAxis": "R2",
+        "rangeMin": 0.0,
+        "rangeMax": 0.0,
+        "curve": "linear",
+        "curveStrength": 2.0
+      }
+    },
+    "max_intensity": 200
+  },
+  "inputs": [
+    {
+      "t": 1000000,
+      "axis": "L0",
+      "value": 0.0
+    },
+    {
+      "t": 1000025,
+      "axis": "L0",
+      "value": 0.03571428571428571
+    },
+    {
+      "t": 1000050,
+      "axis": "L0",
+      "value": 0.07142857142857142
+    },
+    {
+      "t": 1000075,
+      "axis": "L0",
+      "value": 0.10714285714285714
+    },
+    {
+      "t": 1000100,
+      "axis": "L0",
+      "value": 0.14285714285714285
+    },
+    {
+      "t": 1000125,
+      "axis": "L0",
+      "value": 0.17857142857142858
+    },
+    {
+      "t": 1000150,
+      "axis": "L0",
+      "value": 0.21428571428571427
+    },
+    {
+      "t": 1000175,
+      "axis": "L0",
+      "value": 0.25
+    },
+    {
+      "t": 1000200,
+      "axis": "L0",
+      "value": 0.2857142857142857
+    },
+    {
+      "t": 1000225,
+      "axis": "L0",
+      "value": 0.32142857142857145
+    },
+    {
+      "t": 1000250,
+      "axis": "L0",
+      "value": 0.35714285714285715
+    },
+    {
+      "t": 1000275,
+      "axis": "L0",
+      "value": 0.39285714285714285
+    },
+    {
+      "t": 1000300,
+      "axis": "L0",
+      "value": 0.42857142857142855
+    },
+    {
+      "t": 1000325,
+      "axis": "L0",
+      "value": 0.4642857142857143
+    },
+    {
+      "t": 1000350,
+      "axis": "L0",
+      "value": 0.5
+    },
+    {
+      "t": 1000375,
+      "axis": "L0",
+      "value": 0.5357142857142857
+    },
+    {
+      "t": 1000400,
+      "axis": "L0",
+      "value": 0.5714285714285714
+    },
+    {
+      "t": 1000425,
+      "axis": "L0",
+      "value": 0.6071428571428571
+    },
+    {
+      "t": 1000450,
+      "axis": "L0",
+      "value": 0.6428571428571429
+    },
+    {
+      "t": 1000475,
+      "axis": "L0",
+      "value": 0.6785714285714286
+    },
+    {
+      "t": 1000500,
+      "axis": "L0",
+      "value": 0.7142857142857143
+    },
+    {
+      "t": 1000525,
+      "axis": "L0",
+      "value": 0.75
+    },
+    {
+      "t": 1000550,
+      "axis": "L0",
+      "value": 0.7857142857142857
+    },
+    {
+      "t": 1000575,
+      "axis": "L0",
+      "value": 0.8214285714285714
+    },
+    {
+      "t": 1000600,
+      "axis": "L0",
+      "value": 0.8571428571428571
+    },
+    {
+      "t": 1000625,
+      "axis": "L0",
+      "value": 0.8928571428571429
+    },
+    {
+      "t": 1000650,
+      "axis": "L0",
+      "value": 0.9285714285714286
+    },
+    {
+      "t": 1000675,
+      "axis": "L0",
+      "value": 0.9642857142857143
+    },
+    {
+      "t": 1000700,
+      "axis": "L0",
+      "value": 1.0
+    },
+    {
+      "t": 1000000,
+      "axis": "R2",
+      "value": 0.0
+    },
+    {
+      "t": 1000025,
+      "axis": "R2",
+      "value": 0.03571428571428571
+    },
+    {
+      "t": 1000050,
+      "axis": "R2",
+      "value": 0.07142857142857142
+    },
+    {
+      "t": 1000075,
+      "axis": "R2",
+      "value": 0.10714285714285714
+    },
+    {
+      "t": 1000100,
+      "axis": "R2",
+      "value": 0.14285714285714285
+    },
+    {
+      "t": 1000125,
+      "axis": "R2",
+      "value": 0.17857142857142858
+    },
+    {
+      "t": 1000150,
+      "axis": "R2",
+      "value": 0.21428571428571427
+    },
+    {
+      "t": 1000175,
+      "axis": "R2",
+      "value": 0.25
+    },
+    {
+      "t": 1000200,
+      "axis": "R2",
+      "value": 0.2857142857142857
+    },
+    {
+      "t": 1000225,
+      "axis": "R2",
+      "value": 0.32142857142857145
+    },
+    {
+      "t": 1000250,
+      "axis": "R2",
+      "value": 0.35714285714285715
+    },
+    {
+      "t": 1000275,
+      "axis": "R2",
+      "value": 0.39285714285714285
+    },
+    {
+      "t": 1000300,
+      "axis": "R2",
+      "value": 0.42857142857142855
+    },
+    {
+      "t": 1000325,
+      "axis": "R2",
+      "value": 0.4642857142857143
+    },
+    {
+      "t": 1000350,
+      "axis": "R2",
+      "value": 0.5
+    },
+    {
+      "t": 1000375,
+      "axis": "R2",
+      "value": 0.5357142857142857
+    },
+    {
+      "t": 1000400,
+      "axis": "R2",
+      "value": 0.5714285714285714
+    },
+    {
+      "t": 1000425,
+      "axis": "R2",
+      "value": 0.6071428571428571
+    },
+    {
+      "t": 1000450,
+      "axis": "R2",
+      "value": 0.6428571428571429
+    },
+    {
+      "t": 1000475,
+      "axis": "R2",
+      "value": 0.6785714285714286
+    },
+    {
+      "t": 1000500,
+      "axis": "R2",
+      "value": 0.7142857142857143
+    },
+    {
+      "t": 1000525,
+      "axis": "R2",
+      "value": 0.75
+    },
+    {
+      "t": 1000550,
+      "axis": "R2",
+      "value": 0.7857142857142857
+    },
+    {
+      "t": 1000575,
+      "axis": "R2",
+      "value": 0.8214285714285714
+    },
+    {
+      "t": 1000600,
+      "axis": "R2",
+      "value": 0.8571428571428571
+    },
+    {
+      "t": 1000625,
+      "axis": "R2",
+      "value": 0.8928571428571429
+    },
+    {
+      "t": 1000650,
+      "axis": "R2",
+      "value": 0.9285714285714286
+    },
+    {
+      "t": 1000675,
+      "axis": "R2",
+      "value": 0.9642857142857143
+    },
+    {
+      "t": 1000700,
+      "axis": "R2",
+      "value": 1.0
+    }
+  ],
+  "ticks": [
+    {
+      "t": 1000000,
+      "channel_a": {
+        "raw_intensity": 0,
+        "scaled_intensity": 120,
+        "waveform_intensity": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "raw_values": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 120,
+        "range_max": 120,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 999975
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000000
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000000
+          },
+          "intensity": {
+            "raw_input": 0.0,
+            "normalized_pre_range": 0.0,
+            "device_value": 0.0,
+            "target_time_ms": 1000000,
+            "source_axis": "L0"
+          }
+        }
+      },
+      "channel_b": {
+        "raw_intensity": 0,
+        "scaled_intensity": 0,
+        "waveform_intensity": [
+          100,
+          100,
+          100,
+          100
+        ],
+        "raw_values": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 0,
+        "range_max": 0,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 999975
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000000
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000000
+          },
+          "intensity": {
+            "raw_input": 0.0,
+            "normalized_pre_range": 0.0,
+            "device_value": 0.0,
+            "target_time_ms": 1000000,
+            "source_axis": "R2"
+          }
+        }
+      },
+      "b0": [
+        176,
+        15,
+        120,
+        0,
+        10,
+        10,
+        10,
+        10,
+        100,
+        100,
+        100,
+        100,
+        10,
+        10,
+        10,
+        10,
+        100,
+        100,
+        100,
+        100
+      ]
+    },
+    {
+      "t": 1000100,
+      "channel_a": {
+        "raw_intensity": 21,
+        "scaled_intensity": 120,
+        "waveform_intensity": [
+          0,
+          34,
+          67,
+          100
+        ],
+        "raw_values": [
+          0,
+          7,
+          14,
+          21
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 120,
+        "range_max": 120,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000075
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000100
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000100
+          },
+          "intensity": {
+            "raw_input": 0.14285714285714285,
+            "normalized_pre_range": 0.145,
+            "device_value": 29.0,
+            "target_time_ms": 1000100,
+            "source_axis": "L0"
+          }
+        }
+      },
+      "channel_b": {
+        "raw_intensity": 21,
+        "scaled_intensity": 0,
+        "waveform_intensity": [
+          0,
+          34,
+          67,
+          100
+        ],
+        "raw_values": [
+          0,
+          7,
+          14,
+          21
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 0,
+        "range_max": 0,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000075
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000100
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000100
+          },
+          "intensity": {
+            "raw_input": 0.14285714285714285,
+            "normalized_pre_range": 0.145,
+            "device_value": 29.0,
+            "target_time_ms": 1000100,
+            "source_axis": "R2"
+          }
+        }
+      },
+      "b0": [
+        176,
+        15,
+        120,
+        0,
+        10,
+        10,
+        10,
+        10,
+        0,
+        34,
+        67,
+        100,
+        10,
+        10,
+        10,
+        10,
+        0,
+        34,
+        67,
+        100
+      ]
+    },
+    {
+      "t": 1000200,
+      "channel_a": {
+        "raw_intensity": 50,
+        "scaled_intensity": 120,
+        "waveform_intensity": [
+          58,
+          72,
+          86,
+          100
+        ],
+        "raw_values": [
+          29,
+          36,
+          43,
+          50
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 120,
+        "range_max": 120,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000175
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000200
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000200
+          },
+          "intensity": {
+            "raw_input": 0.2857142857142857,
+            "normalized_pre_range": 0.285,
+            "device_value": 57.0,
+            "target_time_ms": 1000200,
+            "source_axis": "L0"
+          }
+        }
+      },
+      "channel_b": {
+        "raw_intensity": 50,
+        "scaled_intensity": 0,
+        "waveform_intensity": [
+          58,
+          72,
+          86,
+          100
+        ],
+        "raw_values": [
+          29,
+          36,
+          43,
+          50
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 0,
+        "range_max": 0,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000175
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000200
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000200
+          },
+          "intensity": {
+            "raw_input": 0.2857142857142857,
+            "normalized_pre_range": 0.285,
+            "device_value": 57.0,
+            "target_time_ms": 1000200,
+            "source_axis": "R2"
+          }
+        }
+      },
+      "b0": [
+        176,
+        15,
+        120,
+        0,
+        10,
+        10,
+        10,
+        10,
+        58,
+        72,
+        86,
+        100,
+        10,
+        10,
+        10,
+        10,
+        58,
+        72,
+        86,
+        100
+      ]
+    },
+    {
+      "t": 1000300,
+      "channel_a": {
+        "raw_intensity": 79,
+        "scaled_intensity": 120,
+        "waveform_intensity": [
+          73,
+          82,
+          90,
+          100
+        ],
+        "raw_values": [
+          57,
+          64,
+          71,
+          79
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 120,
+        "range_max": 120,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000275
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000300
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000300
+          },
+          "intensity": {
+            "raw_input": 0.42857142857142855,
+            "normalized_pre_range": 0.43,
+            "device_value": 86.0,
+            "target_time_ms": 1000300,
+            "source_axis": "L0"
+          }
+        }
+      },
+      "channel_b": {
+        "raw_intensity": 79,
+        "scaled_intensity": 0,
+        "waveform_intensity": [
+          73,
+          82,
+          90,
+          100
+        ],
+        "raw_values": [
+          57,
+          64,
+          71,
+          79
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 0,
+        "range_max": 0,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000275
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000300
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000300
+          },
+          "intensity": {
+            "raw_input": 0.42857142857142855,
+            "normalized_pre_range": 0.43,
+            "device_value": 86.0,
+            "target_time_ms": 1000300,
+            "source_axis": "R2"
+          }
+        }
+      },
+      "b0": [
+        176,
+        15,
+        120,
+        0,
+        10,
+        10,
+        10,
+        10,
+        73,
+        82,
+        90,
+        100,
+        10,
+        10,
+        10,
+        10,
+        73,
+        82,
+        90,
+        100
+      ]
+    },
+    {
+      "t": 1000400,
+      "channel_a": {
+        "raw_intensity": 107,
+        "scaled_intensity": 120,
+        "waveform_intensity": [
+          81,
+          87,
+          94,
+          100
+        ],
+        "raw_values": [
+          86,
+          93,
+          100,
+          107
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 120,
+        "range_max": 120,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000375
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000400
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000400
+          },
+          "intensity": {
+            "raw_input": 0.5714285714285714,
+            "normalized_pre_range": 0.57,
+            "device_value": 114.0,
+            "target_time_ms": 1000400,
+            "source_axis": "L0"
+          }
+        }
+      },
+      "channel_b": {
+        "raw_intensity": 107,
+        "scaled_intensity": 0,
+        "waveform_intensity": [
+          81,
+          87,
+          94,
+          100
+        ],
+        "raw_values": [
+          86,
+          93,
+          100,
+          107
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 0,
+        "range_max": 0,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000375
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000400
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000400
+          },
+          "intensity": {
+            "raw_input": 0.5714285714285714,
+            "normalized_pre_range": 0.57,
+            "device_value": 114.0,
+            "target_time_ms": 1000400,
+            "source_axis": "R2"
+          }
+        }
+      },
+      "b0": [
+        176,
+        15,
+        120,
+        0,
+        10,
+        10,
+        10,
+        10,
+        81,
+        87,
+        94,
+        100,
+        10,
+        10,
+        10,
+        10,
+        81,
+        87,
+        94,
+        100
+      ]
+    },
+    {
+      "t": 1000500,
+      "channel_a": {
+        "raw_intensity": 136,
+        "scaled_intensity": 120,
+        "waveform_intensity": [
+          84,
+          89,
+          95,
+          100
+        ],
+        "raw_values": [
+          114,
+          121,
+          129,
+          136
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 120,
+        "range_max": 120,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000475
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000500
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000500
+          },
+          "intensity": {
+            "raw_input": 0.7142857142857143,
+            "normalized_pre_range": 0.715,
+            "device_value": 143.0,
+            "target_time_ms": 1000500,
+            "source_axis": "L0"
+          }
+        }
+      },
+      "channel_b": {
+        "raw_intensity": 136,
+        "scaled_intensity": 0,
+        "waveform_intensity": [
+          84,
+          89,
+          95,
+          100
+        ],
+        "raw_values": [
+          114,
+          121,
+          129,
+          136
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 0,
+        "range_max": 0,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000475
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000500
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000500
+          },
+          "intensity": {
+            "raw_input": 0.7142857142857143,
+            "normalized_pre_range": 0.715,
+            "device_value": 143.0,
+            "target_time_ms": 1000500,
+            "source_axis": "R2"
+          }
+        }
+      },
+      "b0": [
+        176,
+        15,
+        120,
+        0,
+        10,
+        10,
+        10,
+        10,
+        84,
+        89,
+        95,
+        100,
+        10,
+        10,
+        10,
+        10,
+        84,
+        89,
+        95,
+        100
+      ]
+    },
+    {
+      "t": 1000600,
+      "channel_a": {
+        "raw_intensity": 164,
+        "scaled_intensity": 120,
+        "waveform_intensity": [
+          88,
+          92,
+          96,
+          100
+        ],
+        "raw_values": [
+          143,
+          150,
+          157,
+          164
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 120,
+        "range_max": 120,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000575
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000600
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000600
+          },
+          "intensity": {
+            "raw_input": 0.8571428571428571,
+            "normalized_pre_range": 0.855,
+            "device_value": 171.0,
+            "target_time_ms": 1000600,
+            "source_axis": "L0"
+          }
+        }
+      },
+      "channel_b": {
+        "raw_intensity": 164,
+        "scaled_intensity": 0,
+        "waveform_intensity": [
+          88,
+          92,
+          96,
+          100
+        ],
+        "raw_values": [
+          143,
+          150,
+          157,
+          164
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 0,
+        "range_max": 0,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000575
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000600
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000600
+          },
+          "intensity": {
+            "raw_input": 0.8571428571428571,
+            "normalized_pre_range": 0.855,
+            "device_value": 171.0,
+            "target_time_ms": 1000600,
+            "source_axis": "R2"
+          }
+        }
+      },
+      "b0": [
+        176,
+        15,
+        120,
+        0,
+        10,
+        10,
+        10,
+        10,
+        88,
+        92,
+        96,
+        100,
+        10,
+        10,
+        10,
+        10,
+        88,
+        92,
+        96,
+        100
+      ]
+    },
+    {
+      "t": 1000700,
+      "channel_a": {
+        "raw_intensity": 193,
+        "scaled_intensity": 120,
+        "waveform_intensity": [
+          89,
+          93,
+          97,
+          100
+        ],
+        "raw_values": [
+          171,
+          179,
+          186,
+          193
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 120,
+        "range_max": 120,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000675
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000700
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000700
+          },
+          "intensity": {
+            "raw_input": 1.0,
+            "normalized_pre_range": 1.0,
+            "device_value": 200.0,
+            "target_time_ms": 1000700,
+            "source_axis": "L0"
+          }
+        }
+      },
+      "channel_b": {
+        "raw_intensity": 193,
+        "scaled_intensity": 0,
+        "waveform_intensity": [
+          89,
+          93,
+          97,
+          100
+        ],
+        "raw_values": [
+          171,
+          179,
+          186,
+          193
+        ],
+        "frequency_hz": 100.0,
+        "freq_slots_hz": [
+          100.0,
+          100.0,
+          100.0,
+          100.0
+        ],
+        "period_slots": [
+          10,
+          10,
+          10,
+          10
+        ],
+        "freq_balance": 128,
+        "int_balance": 128,
+        "range_min": 0,
+        "range_max": 0,
+        "intensity_is_static": false,
+        "resolved": {
+          "frequency": {
+            "raw_input": 100.0,
+            "normalized_pre_range": 100.0,
+            "device_value": 100.0,
+            "target_time_ms": 1000675
+          },
+          "frequency_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000700
+          },
+          "intensity_balance": {
+            "raw_input": 128.0,
+            "normalized_pre_range": 128.0,
+            "device_value": 128.0,
+            "target_time_ms": 1000700
+          },
+          "intensity": {
+            "raw_input": 1.0,
+            "normalized_pre_range": 1.0,
+            "device_value": 200.0,
+            "target_time_ms": 1000700,
+            "source_axis": "R2"
+          }
+        }
+      },
+      "b0": [
+        176,
+        15,
+        120,
+        0,
+        10,
+        10,
+        10,
+        10,
+        89,
+        93,
+        97,
+        100,
+        10,
+        10,
+        10,
+        10,
+        89,
+        93,
+        97,
+        100
+      ]
+    }
+  ]
+}

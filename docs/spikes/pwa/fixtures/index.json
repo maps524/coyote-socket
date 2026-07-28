@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "engine": "v2-sustained",
+  "zero_b0": [
+    176,
+    15,
+    0,
+    0,
+    10,
+    10,
+    10,
+    10,
+    0,
+    0,
+    0,
+    0,
+    10,
+    10,
+    10,
+    10,
+    0,
+    0,
+    0,
+    0
+  ],
+  "fixtures": [
+    {
+      "name": "static-intensity-endpoints",
+      "file": "static-intensity-endpoints.json",
+      "description": "Static intensity at both endpoints of the device range (A=0, B=200) with no input at all. Static values bypass the engines and range scaling entirely.",
+      "tick_count": 5
+    },
+    {
+      "name": "static-intensity-midpoint-and-overflow",
+      "file": "static-intensity-midpoint-and-overflow.json",
+      "description": "Static intensity mid-scale (A=100) and above the device maximum (B=255). The overflow case pins the 200 clamp in the static branch of get_next_waveform_data.",
+      "tick_count": 5
+    },
+    {
+      "name": "linked-linear-full-axis-sweep",
+      "file": "linked-linear-full-axis-sweep.json",
+      "description": "Both channels linked over the full 0..200 range with a linear curve, driven by a slow 0.0→1.0 sweep on L0 (A) and R2 (B) at 20ms cadence. Covers the whole axis domain through the V2Sustained downsampler.",
+      "tick_count": 14
+    },
+    {
+      "name": "linked-inverse-full-axis-sweep",
+      "file": "linked-inverse-full-axis-sweep.json",
+      "description": "Same sweep as linked-linear-full-axis-sweep but with the inverse curve (1-x) on both channels, so output falls as the axis rises.",
+      "tick_count": 14
+    },
+    {
+      "name": "linked-linear-vs-inverse-same-axis",
+      "file": "linked-linear-vs-inverse-same-axis.json",
+      "description": "The reference config from the V1 scope doc: both channels driven by L0, A linear and B inverse, so the two channels mirror each other.",
+      "tick_count": 12
+    },
+    {
+      "name": "ramped-targets",
+      "file": "ramped-targets.json",
+      "description": "Sparse T-Code commands carrying I<ms> ramp durations (600ms up, 500ms down) with long gaps between them. Note the two-stage response this produces: the tick right after a command sees the sample in its downsampler window and jumps straight to the target, then subsequent ticks fall back to V2's ramp interpolation evaluated over [now-100, now-25] and read LOWER. That non-monotonic shape is real production behaviour of the engine dispatch in Channel::next_raw_values, not an artefact.",
+      "tick_count": 24
+    },
+    {
+      "name": "ramp-retarget-midflight",
+      "file": "ramp-retarget-midflight.json",
+      "description": "A new ramped target arrives while the previous ramp is still in flight, exercising `ramp_start_value = self.get_value_at(timestamp)` in V2ChannelState::set_target against a partially-completed ramp. A: 0 -> 1.0 over 800ms, retargeted to 0.3 over 400ms at +600ms (mid-ramp), then to 0.9 over 600ms. B: the same pattern with an inverse curve and shorter ramps. Two re-anchor mistakes are worth distinguishing. Anchoring from the PREVIOUS TARGET is caught only here — no other trace retargets mid-ramp. Anchoring from `current_value` is caught here AND by ramped-targets, where `current_value` is only ever assigned for the `duration_ms == 0` command at t=0 and so stays 0 for the whole trace; that port ramps 0 -> 0 at +1400 and emits flat zeros where the fixture has [160,150,140,130]. Note also tick +600: all four sample points fall at or before the new `ramp_start_time`, so `get_value_at` returns the anchor itself and the re-anchor value appears in the output as a bare [100,100,100,100]. A port that computes it wrong fails both on that literal and on the interpolated ramp that follows.",
+      "tick_count": 24
+    },
+    {
+      "name": "oscillation-threshold-boundary",
+      "file": "oscillation-threshold-boundary.json",
+      "description": "Straddles downsample_dynamic's OSCILLATION_THRESHOLD of 40 device units, which switches the algorithm outright: `range < 40` falls back to peak-preserving forward-fill, `range >= 40` emits the alternating min/max pattern. Each channel steps through three 500ms phases whose per-window spread is exactly 39, 40 and 41 device units (axis pairs 0.100/0.295, 0.100/0.300, 0.100/0.305 -> 20/59, 20/60, 20/61), and the two channels run the phases in opposite order so both branches are live in the same tick. Phase edges land on tick boundaries so no downsampler window ever mixes two phases. Which mistake each phase catches: a threshold transcribed as 30 diverges on the 39 phase; as 50, on both the 40 and 41 phases; `<` written as `<=` diverges on the 40 phase alone. DO NOT TRIM TICKS FROM THIS FIXTURE. The two branches produce IDENTICAL output at ticks +600, +800 and +1000, where the window's sample parity starts low. The entire discriminating power sits in the ticks where parity starts high: +700 and +900 on both channels (the 40 phase), plus +200/+400 on B and +1200/+1400 on A (the 41 phase). Delete those and the fixture still looks reasonable, still passes, and tests nothing.",
+      "tick_count": 16
+    },
+    {
+      "name": "range-partial-window",
+      "file": "range-partial-window.json",
+      "description": "Linked intensity mapped into a narrow sub-range (A: 50..150, B: 120..140) while the axis sweeps the full 0..1. Pins scale_intensity's min + intensity*range/200 arithmetic and its rounding.",
+      "tick_count": 12
+    },
+    {
+      "name": "range-inverted",
+      "file": "range-inverted.json",
+      "description": "range_min > range_max on both channels (A: 200..0, B: 150..50). device.rs's scale_intensity returns `min` verbatim whenever max <= min, so the intensity byte pins at range_min regardless of input — an inverted range does NOT invert the output. The resolver's own lerp does honour the inversion, which is visible in `resolved.intensity`; that divergence is real production behaviour on the engine path and a port must reproduce it.",
+      "tick_count": 10
+    },
+    {
+      "name": "range-degenerate-equal",
+      "file": "range-degenerate-equal.json",
+      "description": "range_min == range_max (A: 120..120, B: 0..0). Same max<=min branch as the inverted case: output pins at the shared value for every input.",
+      "tick_count": 8
+    },
+    {
+      "name": "intensity-soft-cap",
+      "file": "intensity-soft-cap.json",
+      "description": "Full-range linked intensity on both channels with the per-channel soft cap set to A=80, B=200. A's intensity byte flat-tops at 80 while B runs free; the waveform bytes are unaffected by the cap.",
+      "tick_count": 12
+    },
+    {
+      "name": "sustained-single-transient",
+      "file": "sustained-single-transient.json",
+      "description": "One 20ms full-scale spike on L0 surrounded by silence, then 1.5s of nothing. Isolates IntensityPeakHold: the master intensity byte must stay at the peak for 200ms after the spike and then fall back. Channel B is static so the spike's effect on A is unambiguous.",
+      "tick_count": 16
+    },
+    {
+      "name": "sustained-fast-flicking",
+      "file": "sustained-fast-flicking.json",
+      "description": "Rapid pole-flicking: L0 alternates 0.0/1.0 every 10ms for 600ms, then stops dead for 900ms. This is the input pattern V2Sustained was built for — the per-slot waveform keeps oscillating while the master intensity is held at the rolling 200ms peak, and the tail shows the hold decaying once input stops.",
+      "tick_count": 16
+    },
+    {
+      "name": "sustained-step-changes",
+      "file": "sustained-step-changes.json",
+      "description": "Step ladder on L0: 0 → 1.0 (held 400ms) → 0.0 (held 500ms) → 0.5 (held 400ms) → 0. Each falling edge must be followed by exactly 200ms of peak hold before the master intensity drops, which at a 100ms tick is observable across two ticks.",
+      "tick_count": 20
+    },
+    {
+      "name": "sustained-peak-hold-boundary",
+      "file": "sustained-peak-hold-boundary.json",
+      "description": "Two isolated 10ms full-scale pulses (+150ms, +550ms) landing mid-tick rather than on a tick boundary, so the peak enters the hold buffer from a tick whose own slot values then immediately return to zero. What this does NOT do, despite the pulse offsets looking deliberate: it does not move the hold-window boundary. `IntensityPeakHold::observe` is called exactly once per tick with the tick instant, so every sample in the buffer is a tick timestamp at 100ms spacing, and `peak_in_last_ms(now, 200)` with its `>=` cutoff therefore always spans exactly the current tick plus the two before it. That property is fixed by the tick grid dividing 200ms evenly and holds in every sustained fixture — editing these offsets will not change it. Kept because the mid-tick placement still gives the cleanest single-pulse decay shape of the set.",
+      "tick_count": 14
+    },
+    {
+      "name": "frequency-period-boundaries",
+      "file": "frequency-period-boundaries.json",
+      "description": "Frequency linked to L1 over the protocol range 1..200 Hz, stepped through values chosen to land on every branch boundary of convert_period: period 5/10/50/95/100 (the <=100 passthrough, including its upper edge), 101/200/500/588/600 (the /5+100 branch, including both edges), 602/833/1000 (the /10+200 branch, including its upper edge). Note the final `>1000 -> 240` branch is UNREACHABLE from the device path: the resolver clamps frequency to >=1 Hz, so frequency_to_period never exceeds 1000. Channel B holds 100Hz static as a control.",
+      "tick_count": 14
+    },
+    {
+      "name": "frequency-per-slot-sweep",
+      "file": "frequency-per-slot-sweep.json",
+      "description": "Frequency linked to L1 with 25ms-cadence input, so the four B0 period bytes differ within a single tick — this is the sub-100ms frequency sweep get_per_slot_frequencies produces. A uses a linear curve, B inverse, both over 1..200 Hz.",
+      "tick_count": 12
+    },
+    {
+      "name": "balance-linked",
+      "file": "balance-linked.json",
+      "description": "Frequency balance and intensity balance linked over their full 0..255 range on A (linear, axis R0) and B (inverse, axis R1). These feed the BF command rather than B0, so the B0 bytes stay flat while `freq_balance` / `int_balance` move.",
+      "tick_count": 10
+    },
+    {
+      "name": "midpoint-distance-from-center",
+      "file": "midpoint-distance-from-center.json",
+      "description": "Channel A has midpoint enabled (|x-0.5|*2 applied before the curve), B does not, both driven by the same L0 sweep 0→1. A traces a V: full at the extremes, zero at centre.",
+      "tick_count": 12
+    },
+    {
+      "name": "channels-independent",
+      "file": "channels-independent.json",
+      "description": "Fully asymmetric channels: A linked to L0 (linear, 0..200, cap 200, 100Hz static frequency), B linked to R2 (inverse, 20..180, cap 150, frequency linked to L1). The two channels are driven by unrelated input so any cross-channel state leak shows up immediately.",
+      "tick_count": 14
+    },
+    {
+      "name": "no-input-hold",
+      "file": "no-input-hold.json",
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = hold, the last value is held indefinitely. Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 36
+    },
+    {
+      "name": "no-input-zero",
+      "file": "no-input-zero.json",
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = zero, the value snaps to zero the moment the axis goes stale. Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 36
+    },
+    {
+      "name": "no-input-decay",
+      "file": "no-input-decay.json",
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = decay, the value ramps toward zero as age_ms/no_input_decay_ms, reaching zero at age_ms = 3000 (tick 34 here). Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 36
+    },
+    {
+      "name": "no-input-default",
+      "file": "no-input-default.json",
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = default, the value falls back to the link's staticValue (0.75 pre-curve on the frequency link, so 150.25 Hz). Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 36
+    },
+    {
+      "name": "no-input-at-all",
+      "file": "no-input-at-all.json",
+      "description": "Every parameter linked, zero input events for the whole trace. Exercises handle_no_input_no_state (axis slot never created) and the engines' cold-start output. Should be all zeros with the frequency floor at 1 Hz.",
+      "tick_count": 6
+    }
+  ]
+}

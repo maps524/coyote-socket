@@ -1615,7 +1615,16 @@ impl ProcessingState {
     ///   advances exactly once per tick); sub-slot ramp detail is
     ///   intentionally dropped once a transform is attached.
     pub fn get_next_waveform_data(&mut self) -> (WaveformData, WaveformData) {
-        let now_ms = current_time_ms();
+        self.get_next_waveform_data_at(current_time_ms())
+    }
+
+    /// `get_next_waveform_data` with the tick instant supplied by the caller.
+    ///
+    /// The wall-clock read is the only non-deterministic input to this
+    /// function; hoisting it into a parameter lets the golden-trace fixture
+    /// generator (`golden.rs`) replay a fixed timeline through the exact
+    /// production body. Production still calls the no-argument wrapper above.
+    pub fn get_next_waveform_data_at(&mut self, now_ms: u64) -> (WaveformData, WaveformData) {
         // Drain pending TCode samples (with optional delay) into engine state
         // before computing the output for this tick.
         self.replay_pending_intensity_samples(now_ms);
