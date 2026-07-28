@@ -24,6 +24,13 @@ pub enum CurveType {
     Inverse,
 }
 
+/// How long an axis may go without a sample before the resolver stops
+/// reading it and hands over to `NoInputBehavior`.
+///
+/// `NoInputBehavior::Decay` measures its ramp from the instant this
+/// threshold is crossed, not from the last sample — see `handle_no_input`.
+pub const STALENESS_THRESHOLD_MS: u64 = 1000;
+
 /// Behavior when a linked axis has no incoming data
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -462,7 +469,7 @@ pub fn resolve_link_at_time(
                     // stale axis produces the same no-input response for every
                     // slot within one tick.
                     let age_ms = current_time_ms.saturating_sub(state.timestamp);
-                    if age_ms > 1000 {
+                    if age_ms > STALENESS_THRESHOLD_MS {
                         handle_no_input(no_input_behavior, cfg, state, age_ms, no_input_decay_ms)
                     } else {
                         state.value_at(lookup_time).unwrap_or(state.value)
@@ -557,8 +564,26 @@ fn handle_no_input(
         NoInputBehavior::Default => source.static_value.unwrap_or(0.0),
         NoInputBehavior::Zero => 0.0,
         NoInputBehavior::Decay => {
-            // Decay from last value to zero over decay_ms
-            let decay_progress = (age_ms as f64 / decay_ms as f64).min(1.0);
+            // Decay from the last value to zero over `decay_ms`, measured
+            // from the instant the axis went stale — NOT from the last
+            // sample. This branch is only ever reached once
+            // `age_ms > STALENESS_THRESHOLD_MS`, so timing the ramp from
+            // the sample would already have spent `STALENESS_THRESHOLD_MS`
+            // of the budget before Decay got a chance to run: at the
+            // shipped default of `decay_ms = 1000` progress was 1.0 on
+            // entry and Decay was an exact alias for Zero.
+            //
+            // Measuring from the threshold also makes Hold -> Decay
+            // continuous: at the moment staleness begins this returns
+            // `state.value`, the same value Hold would, and falls from
+            // there.
+            // `decay_ms == 0` needs no special case: this branch is only
+            // reached when `age_ms > STALENESS_THRESHOLD_MS`, so
+            // `stale_for_ms >= 1` and the division yields +inf, which
+            // `.min(1.0)` folds to a completed decay. No NaN, no divide
+            // trap — `decay_with_zero_window_is_zero_not_nan` pins it.
+            let stale_for_ms = age_ms.saturating_sub(STALENESS_THRESHOLD_MS);
+            let decay_progress = (stale_for_ms as f64 / decay_ms as f64).min(1.0);
             state.value * (1.0 - decay_progress)
         }
     }
@@ -773,6 +798,84 @@ mod tests {
             "stale-axis Hold should return last value despite delay, got {}",
             result
         );
+    }
+
+    /// Decay must actually ramp at the app's shipped `decay_ms = 1000`.
+    /// It used to time its progress from the last sample while the
+    /// staleness gate withheld the branch for the first 1000ms, so decay
+    /// was entered with progress already at 1.0 — an exact alias for Zero.
+    #[test]
+    fn decay_ramps_at_the_shipped_default_decay_ms() {
+        // 0..1 range so device_value is the normalized value verbatim.
+        let source = ParameterLinkConfig::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        let mut bus = InputBus::new();
+        bus.update("L0", 1.0, 0, None);
+
+        let at = |now: u64| resolve_value(&source, &bus, &NoInputBehavior::Decay, now, 1000);
+
+        // Not yet stale: the live sample still wins.
+        assert!((at(1000) - 1.0).abs() < 1e-9, "got {}", at(1000));
+
+        // Decay begins where Hold left off and falls from there.
+        assert!(
+            at(1001) > 0.99,
+            "decay must start at the held value, got {}",
+            at(1001)
+        );
+        assert!(
+            (at(1500) - 0.5).abs() < 1e-9,
+            "halfway through a 1000ms decay expected 0.5, got {}",
+            at(1500)
+        );
+        assert!(
+            (at(2000)).abs() < 1e-9,
+            "decay must reach 0 after decay_ms, got {}",
+            at(2000)
+        );
+        assert!(
+            (at(5000)).abs() < 1e-9,
+            "decay must stay at 0, got {}",
+            at(5000)
+        );
+    }
+
+    /// The bug's own signature: at any `decay_ms <= 1000`, Decay produced
+    /// byte-identical output to Zero. It must not any more.
+    #[test]
+    fn decay_is_distinguishable_from_zero() {
+        let source = ParameterLinkConfig::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        let mut bus = InputBus::new();
+        bus.update("L0", 1.0, 0, None);
+
+        for decay_ms in [200u32, 500, 1000, 3000] {
+            let now = 1000 + (decay_ms as u64) / 2;
+            let decayed = resolve_value(&source, &bus, &NoInputBehavior::Decay, now, decay_ms);
+            let zeroed = resolve_value(&source, &bus, &NoInputBehavior::Zero, now, decay_ms);
+            assert!(
+                (decayed - 0.5).abs() < 1e-9,
+                "decay_ms={} halfway expected 0.5, got {}",
+                decay_ms,
+                decayed
+            );
+            assert!(
+                (decayed - zeroed).abs() > 1e-9,
+                "decay_ms={} is indistinguishable from Zero",
+                decay_ms
+            );
+        }
+    }
+
+    /// `decay_ms = 0` means "no decay window", which must collapse to zero
+    /// rather than divide by zero into NaN.
+    #[test]
+    fn decay_with_zero_window_is_zero_not_nan() {
+        let source = ParameterLinkConfig::linked_source("L0", 0.0, 1.0, CurveType::Linear);
+        let mut bus = InputBus::new();
+        bus.update("L0", 1.0, 0, None);
+
+        let result = resolve_value(&source, &bus, &NoInputBehavior::Decay, 1500, 0);
+        assert!(result.is_finite(), "decay_ms=0 produced {}", result);
+        assert!(result.abs() < 1e-9, "decay_ms=0 expected 0, got {}", result);
     }
 
     #[test]
