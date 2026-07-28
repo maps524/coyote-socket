@@ -160,8 +160,9 @@ engine path lags it through downsampling, the V2 ramp and the peak hold. That ga
   input** that then runs through the curve and range mapping. In `no-input-default.json` the
   frequency link's `staticValue: 0.75` resolves to `lerp(1, 200, 0.75) = 150.25 Hz`, not
   0.75 Hz.
-- **`no_input_decay_ms` is 3000 in the no-input fixtures, not the app default of 1000.** See
-  the note under `no-input-decay` in Known gaps — at 1000 the setting is inoperative.
+- **`no_input_decay_ms` is 3000 in the no-input fixtures, not the app default of 1000.** Only
+  so the ramp spans enough ticks to read by eye. Decay works at any value — see
+  `no-input-decay` under Known gaps.
 
 `index.json` also carries `zero_b0`, the all-stop frame sent on pause
 (`device.rs::send_zero_command`).
@@ -191,7 +192,7 @@ Start by making one fixture pass end to end rather than all of them at once.
 On step 5's ordering: in production the frequency pass advances link state that the snapshot
 pass then consumes rather than re-resolving, which matters when a stateful transform is
 attached to frequency. **Transforms are out of V1 scope, so within these fixtures that
-coupling has no observable effect** — `frequency_hz == freq_slots_hz[3]` in all 868
+coupling has no observable effect** — `frequency_hz == freq_slots_hz[3]` in all 948
 channel-ticks, and a port that skips the stash and simply copies slot 3 is indistinguishable
 here. Preserve the ordering anyway if you intend to add transforms later, but know that no
 fixture will tell you if you got it wrong. Review it by hand.
@@ -236,25 +237,40 @@ So a `getValueAt()` implemented as `return this.targetValue` passes every fixtur
 `interval_ms`, and silently converts every ramped command into an instant jump on hardware.
 That fails in the unsafe direction. Two fixtures exist specifically to catch it:
 
-- `ramped-targets` — sparse ramped commands with long gaps. Watch the two-stage response: the
-  tick immediately after a command sees the sample in its downsampler window and jumps to the
-  target, then later ticks fall back to the ramp evaluated over `[now-100, now-25]` and read
-  *lower*. That non-monotonic shape is genuine engine-dispatch behaviour in
-  `Channel::next_raw_values`, not a fixture artefact.
+- `ramped-targets` — sparse ramped commands with long gaps. Every ramp is monotonic from the
+  tick its command lands to the tick it completes.
 - `ramp-retarget-midflight` — a new target arriving mid-ramp, exercising
   `ramp_start_value = self.get_value_at(timestamp)` against a partially completed ramp. At tick
   +600 all four sample points fall at or before the new `ramp_start_time`, so the re-anchor
-  value appears in the output as a bare `[100,100,100,100]`. Tick +700 then reads
-  `[60,60,60,60]` — the retarget command's own sample is inside that window, so the downsampler
-  branch wins — and the interpolated ramp appears at +800 as `[90,88,85,83]`. A wrong anchor
+  value appears in the output as a bare `[100,100,100,100]`. Tick +700 then interpolates away
+  from that anchor as `[100,98,95,93]`, and +800 continues it as `[90,88,85,83]`. A wrong anchor
   fails on both the bare literal and the ramp.
+
+### Dispatch: the ramp outranks the downsampler
+
+`apply_tcode` feeds the downsampler the commanded **target** at the command's own timestamp,
+while the V2 ramp stores interpolated positions. `Channel::next_raw_values` resolves that
+conflict by consulting `V2ChannelState::is_ramping_at(window_start)` first: while a ramp is in
+flight the ramp wins outright, and only otherwise does `has_samples_in_window` hand the window
+to the downsampler.
+
+A port that gets this backwards — preferring the downsampler whenever the window holds a
+sample — puts the tick containing the command straight at the ramp's endpoint. `L0 -> 1.0 over
+600ms` then reaches full scale after ~100ms and holds it, with the ramp running *inverted* for
+the following two ticks. It errs toward more output, sooner, and it needs no misconfiguration.
+`ramped-targets` (+300, +1500) and `ramp-retarget-midflight` (+300, +700, +1300) all fail on it.
+
+`is_ramping_at` is false whenever `ramp_end_time == ramp_start_time`, which is every command
+without an `I<ms>` suffix, plus the default and post-`reset` states. Un-ramped input therefore
+never reaches the ramp branch at all — which is why the other 24 fixtures are untouched by this
+rule.
 
 Two re-anchor mistakes are worth telling apart:
 
 | Mistake | Caught by |
 |---|---|
 | anchor from the **previous target** | `ramp-retarget-midflight` only — nothing else retargets mid-ramp |
-| anchor from **`current_value`** | both fixtures. `current_value` is assigned only when `duration_ms == 0`, so in `ramped-targets` it stays 0 for the whole trace; that port ramps 0→0 at +1400 and emits flat zeros where the fixture has `[160,150,140,130]` |
+| anchor from **`current_value`** | both fixtures. `current_value` is assigned only when `duration_ms == 0`, so in `ramped-targets` it stays 0 for the whole trace; that port ramps 0→0 at +1400 and emits flat zeros where the fixture has `[200,190,180,170]` at +1500 |
 
 ## The oscillation threshold
 
@@ -281,22 +297,24 @@ still passes, and tests nothing.
   not covered. `build_channel_snapshot` and `resolve_slot_frequencies` both clamp frequency
   to `>= 1 Hz`, so `frequency_to_period` never returns more than 1000. A port should still
   implement the branch, but no fixture will catch getting it wrong.
-- **Inverted and degenerate ranges do not invert the output.** `device.rs::scale_intensity`
-  returns `min` verbatim whenever `max <= min`, so the intensity byte pins at `range_min`.
-  The resolver's own `lerp` *does* honour the inversion, which is visible in the
-  `resolved.intensity` fields — the two disagree. That divergence is real production
-  behaviour on the engine path and `range-inverted.json` captures it deliberately. Do not
-  "fix" it in a port without deciding it is a bug first.
+- **A transposed range is ordered, not inverted.** `range_min > range_max` is treated as a
+  data-entry mistake: `device.rs::scale_intensity` and
+  `ParameterLinkConfig::ordered_range` both sort the endpoints, so `200..0` behaves exactly
+  like `0..200`. `curve: inverse` is the supported way to make output fall as input rises.
+  A port must sort in both places or the device and the UI will disagree.
+  `range-inverted.json` covers it; `range-degenerate-equal.json` covers `min == max`, which
+  still collapses to the shared constant.
 - **Buttplug (`bp:`) intensity routing is not covered.** Those links bypass the engines and
   run the resolver wholesale; out of V1 scope.
-- **`NoInputBehavior::Decay` is inoperative at the app's default setting**, and the fixtures
-  deliberately do not reproduce that. The staleness gate is `age_ms > 1000` while decay
-  progress is `(age_ms / decay_ms).min(1.0)`, so with `no_input_decay_ms <= 1000` the Decay
-  branch is first entered only once progress has already reached 1.0 — it can return nothing
-  but zero, making it identical to `Zero`. The app ships `no_input_decay_ms = 1000`. These
-  fixtures use 3000 so the ramp is observable and the four no-input traces are actually
-  distinct. Port the arithmetic as written; just know the shipped default makes the feature
-  a no-op. Worth fixing at source.
+- **`NoInputBehavior::Decay` measures its ramp from the staleness threshold, not from the
+  last sample.** Progress is `((age_ms - STALENESS_THRESHOLD_MS) / decay_ms).min(1.0)`, so
+  decay leaves the held value at the instant the axis goes stale and reaches zero
+  `decay_ms` later — `Hold` and `Decay` agree at the handover instant and diverge from
+  there. Timing it from the sample instead, as the engine used to, spent the whole 1000ms
+  threshold before the branch was reachable and made `Decay` an exact alias for `Zero` at
+  the shipped default of `decay_ms = 1000`. These fixtures use 3000 only so the ramp spans
+  enough ticks to read by eye; the trace runs to +4500 so the floor is visible after decay
+  completes at +4300.
 - **`delay_ms` is never set**, so the delayed-replay path in
   `replay_pending_intensity_samples` — including the `INTENSITY_REPLAY_FLOOR_MS = 200` bound
   on how far a stale watermark can reach back — runs only in its zero-delay form. Per-parameter

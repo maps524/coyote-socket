@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "range-degenerate-equal",
-  "description": "range_min == range_max (A: 120..120, B: 0..0). Same max<=min branch as the inverted case: output pins at the shared value for every input.",
+  "description": "range_min == range_max (A: 120..120, B: 0..0). A zero-width range is a legitimate way to hold a channel at a constant, so output pins at the shared value for every input. Unaffected by the transposed-range fix — ordering the endpoints of an already-equal pair is a no-op, and this trace is byte-identical across it.",
   "engine": "v2-sustained",
   "peak_fill": "forward",
   "no_input_behavior": "hold",
