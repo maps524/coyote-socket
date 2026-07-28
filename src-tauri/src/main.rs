@@ -586,8 +586,12 @@ async fn get_full_state() -> Result<FullAppState, String> {
         let state_guard = state.read().await;
         let engine = state_guard.options.processing_engine.as_str();
         let range_for = |id: crate::processing::ChannelId| -> (u8, u8) {
-            let src = &state_guard.channel(id).config.intensity;
-            (src.range_min as u8, src.range_max as u8)
+            // Ordered, matching `resolver::build_channel_snapshot` and
+            // `device::scale_intensity`. Without this a transposed range
+            // would be echoed back verbatim here while every other path
+            // reported it sorted.
+            let (min, max) = state_guard.channel(id).config.intensity.ordered_range();
+            (min as u8, max as u8)
         };
         (
             engine.to_string(),
