@@ -100,6 +100,28 @@ impl ParameterLinkConfig {
         }
     }
 
+    /// The link's output range with its endpoints in ascending order.
+    ///
+    /// A transposed range (`range_min > range_max`) is a data-entry
+    /// mistake, not a request to invert: the UI's own bound adjusters
+    /// clamp each endpoint against the other so it cannot be produced
+    /// through the app, and `curve: Inverse` is the supported way to
+    /// make output fall as input rises. Left unordered it is actively
+    /// dangerous — `200..0` maps a resting axis to full device output.
+    ///
+    /// Ordering here (and identically in `device::scale_intensity`)
+    /// keeps every range-mapping path in the codebase reading a
+    /// transposed range the same way, so a config that slips past the
+    /// UI — a hand-edited `presets.json`, an older preset file — cannot
+    /// make the resolver and the device path disagree.
+    pub fn ordered_range(&self) -> (f64, f64) {
+        if self.range_min <= self.range_max {
+            (self.range_min, self.range_max)
+        } else {
+            (self.range_max, self.range_min)
+        }
+    }
+
     /// Create a linked parameter source
     pub fn linked_source(axis: &str, min: f64, max: f64, curve: CurveType) -> Self {
         Self {
@@ -485,7 +507,8 @@ pub fn resolve_link_at_time(
             }
 
             let normalized = shaped.clamp(0.0, 1.0);
-            let device_value = lerp(cfg.range_min, cfg.range_max, normalized);
+            let (range_min, range_max) = cfg.ordered_range();
+            let device_value = lerp(range_min, range_max, normalized);
 
             ResolvedSample {
                 raw_input: raw,
@@ -585,6 +608,18 @@ mod tests {
     }
 
     #[test]
+    fn ordered_range_sorts_a_transposed_range() {
+        let normal = ParameterLinkConfig::linked_source("L0", 0.0, 200.0, CurveType::Linear);
+        assert_eq!(normal.ordered_range(), (0.0, 200.0));
+
+        let transposed = ParameterLinkConfig::linked_source("L0", 200.0, 0.0, CurveType::Linear);
+        assert_eq!(transposed.ordered_range(), (0.0, 200.0));
+
+        let degenerate = ParameterLinkConfig::linked_source("L0", 120.0, 120.0, CurveType::Linear);
+        assert_eq!(degenerate.ordered_range(), (120.0, 120.0));
+    }
+
+    #[test]
     fn test_axis_state_update() {
         let mut state = AxisState::default();
         assert!(!state.has_data);
@@ -637,6 +672,32 @@ mod tests {
 
         let result = resolve_value(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
         assert_eq!(result, 50.0);
+    }
+
+    /// A transposed range must not invert the mapping — the resolver
+    /// orders the endpoints, matching `device::scale_intensity`.
+    #[test]
+    fn resolve_orders_a_transposed_range_instead_of_inverting() {
+        let source = ParameterLinkConfig::linked_source("L0", 200.0, 0.0, CurveType::Linear);
+        let mut bus = InputBus::new();
+        bus.update("L0", 0.25, 100, None);
+
+        let result = resolve_value(&source, &bus, &NoInputBehavior::Hold, 200, 1000);
+        assert!(
+            (result - 50.0).abs() < 1e-9,
+            "expected 200..0 to map like 0..200 (50.0), got {}",
+            result
+        );
+
+        // ...and an axis at rest must sit at the bottom of the range, not
+        // the top. This is the safety property.
+        bus.update("L0", 0.0, 300, None);
+        let at_rest = resolve_value(&source, &bus, &NoInputBehavior::Hold, 400, 1000);
+        assert!(
+            at_rest.abs() < 1e-9,
+            "a resting axis on a transposed range must resolve to 0, got {}",
+            at_rest
+        );
     }
 
     #[test]

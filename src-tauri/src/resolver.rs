@@ -166,8 +166,12 @@ pub(crate) fn build_channel_snapshot(
     use crate::modulation::{resolve_link, ParameterSourceType, ResolvedSample};
 
     let intensity_is_static = ch.config.intensity.source_type == ParameterSourceType::Static;
-    let range_min = ch.config.intensity.range_min as u8;
-    let range_max = ch.config.intensity.range_max as u8;
+    // Ordered so a transposed range reaches `device::scale_intensity`
+    // and the UI telemetry the same way the resolver's own range mapping
+    // reads it.
+    let (range_min_f, range_max_f) = ch.config.intensity.ordered_range();
+    let range_min = range_min_f as u8;
+    let range_max = range_max_f as u8;
 
     // Frequency: prefer the per-slot pass's stashed sample.
     // `get_per_slot_frequencies` runs first in the device tick and is the

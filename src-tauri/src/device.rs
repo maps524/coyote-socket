@@ -596,13 +596,25 @@ pub(crate) fn build_zero_b0_frame() -> Vec<u8> {
     generate_b0_command(3, 3, 0, 0, [p; 4], [0; 4], [p; 4], [0; 4])
 }
 
-/// Scale intensity based on range limits
+/// Map an engine intensity (0-200) into the channel's configured output
+/// range.
+///
+/// A transposed range (`min > max`) is treated as the data-entry mistake
+/// it is and the endpoints are ordered before mapping — the same reading
+/// `ParameterLinkConfig::ordered_range` applies on the resolver side, so
+/// the two paths cannot disagree about what a given config means.
+///
+/// Returning `min` verbatim on `max <= min`, as this used to, pinned the
+/// device at `min` for every input: a range entered as `200..0` sat at
+/// full output from the first tick with the axis at rest, and the UI
+/// showed 0 the whole time.
+///
+/// `min == max` still collapses to that value — a zero-width range is a
+/// legitimate way to hold a channel at a constant.
 pub(crate) fn scale_intensity(intensity: u8, min: u8, max: u8) -> u8 {
-    if max <= min {
-        return min;
-    }
-    let range = (max - min) as f64;
-    let scaled = min as f64 + (intensity as f64 * range / 200.0);
+    let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+    let range = (hi - lo) as f64;
+    let scaled = lo as f64 + (intensity as f64 * range / 200.0);
     scaled.round().clamp(0.0, 200.0) as u8
 }
 
@@ -630,4 +642,61 @@ pub async fn get_channel_a_params() -> ChannelParams {
 pub async fn get_channel_b_params() -> ChannelParams {
     let state = get_device_state().await;
     state.channel_b_params.read().await.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_intensity_maps_a_normal_range() {
+        assert_eq!(scale_intensity(0, 50, 150), 50);
+        assert_eq!(scale_intensity(100, 50, 150), 100);
+        assert_eq!(scale_intensity(200, 50, 150), 150);
+    }
+
+    /// A range entered back-to-front used to return `min` verbatim for
+    /// every input, so `200..0` sat at full device output from the first
+    /// tick with the axis at rest. Endpoints are now ordered, so the
+    /// channel tracks its input over the span the user typed.
+    #[test]
+    fn scale_intensity_orders_a_transposed_range() {
+        assert_eq!(scale_intensity(0, 200, 0), 0);
+        assert_eq!(scale_intensity(100, 200, 0), 100);
+        assert_eq!(scale_intensity(200, 200, 0), 200);
+
+        // Narrower transposition: 150..50 spans the same band as 50..150.
+        assert_eq!(scale_intensity(0, 150, 50), 50);
+        assert_eq!(scale_intensity(200, 150, 50), 150);
+    }
+
+    /// A zero-width range is a legitimate "hold this channel at a
+    /// constant", and must keep collapsing to that constant.
+    #[test]
+    fn scale_intensity_keeps_a_zero_width_range_constant() {
+        assert_eq!(scale_intensity(0, 120, 120), 120);
+        assert_eq!(scale_intensity(200, 120, 120), 120);
+    }
+
+    /// `scale_intensity` and the resolver's own range mapping must read a
+    /// transposed range identically, or the device and the UI disagree
+    /// about what the channel is doing.
+    #[test]
+    fn scale_intensity_agrees_with_the_resolver_on_a_transposed_range() {
+        use crate::modulation::{lerp, CurveType, ParameterLinkConfig};
+
+        let cfg = ParameterLinkConfig::linked_source("L0", 200.0, 0.0, CurveType::Linear);
+        let (lo, hi) = cfg.ordered_range();
+
+        for engine_intensity in [0u8, 37, 100, 199, 200] {
+            let normalized = engine_intensity as f64 / 200.0;
+            let resolver = lerp(lo, hi, normalized).round() as u8;
+            let device = scale_intensity(engine_intensity, 200, 0);
+            assert_eq!(
+                device, resolver,
+                "device path and resolver disagree at intensity {}",
+                engine_intensity
+            );
+        }
+    }
 }
