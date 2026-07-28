@@ -1043,6 +1043,16 @@ fn all_specs() -> Vec<TraceSpec> {
              [151, 550], wide enough that a port implementing 500 passed byte-for-byte while \
              replaying 450ms-old input on hardware. \
              \
+             WHY STALL 1 IS STILL HERE, since the algebra invites deleting it: stall 2's \
+             constraints strictly imply stall 1's, so only two of the four bind and stall 1 no \
+             longer narrows the bracket at all. Measured, not assumed — deleting stall 1's two \
+             samples and re-sweeping leaves the admissible window at exactly [196, 205]. It is \
+             kept for four other reasons. Its samples still change the emitted bytes, so \
+             removing it is not free. It is the larger-magnitude demonstration of the no-floor \
+             mistake (A reads 200, from an axis commanded to 1.0, against stall 2's 190 from \
+             0.95). It carries the +1150 recovery. And it establishes the watermark history \
+             stall 2 builds on. Delete it and you lose all four; you do not lose the bracket. \
+             \
              The mistakes it does catch: no floor at all (replays everything — A reads 200 after \
              stall 1, from an axis commanded to 1.0 mid-stall); discarding everything after a \
              gap (replays nothing — B reads 60); and the constant transcribed as 100 or 150. \

@@ -358,6 +358,15 @@ Stall 2 exists because stall 1 alone admitted `[151, 550]` — wide enough that 
 implementing **500 ms** passed byte-for-byte while, on hardware, replaying a 450 ms-old sample
 after a background stall.
 
+**Stall 1 no longer constrains the bracket, and should be kept anyway.** Stall 2's constraints
+strictly imply stall 1's, so only two of the four rows above are active — deleting stall 1's two
+samples and re-sweeping leaves the window at exactly `[196, 205]` (measured, not assumed). Do
+not read the four-row table as four binding constraints. It stays because: its samples still
+change the emitted bytes, so removing it is not free; it is the larger-magnitude demonstration
+of the no-floor mistake (A reads **200**, from an axis commanded to 1.0, against stall 2's 190
+from 0.95); it carries the +1150 recovery; and it establishes the watermark history stall 2
+builds on. Delete it and you lose those four things — you do not lose the bracket.
+
 The mistakes it catches: **no floor at all** (replays everything — A reads 200 after stall 1,
 from an axis commanded to 1.0 mid-stall); **discarding everything after a gap** (replays nothing
 — B reads 60); and the constant transcribed as 100, 150, 500 or anything else outside the
@@ -422,10 +431,13 @@ still passes, and tests nothing.
   than 200ms would distinguish them, and nothing reads longer.
 - **`INTENSITY_REPLAY_FLOOR_MS` is bracketed to `[196, 205]`, not pinned.** Any value in that
   window is byte-identical across the corpus. See "A stalled device loop" above for the sweep.
-- **Tick timing is barely varied.** 26 fixtures tick at a uniform 100 ms; one uses
-  `tick_offsets_ms`, with two gaps of the same 600 ms size. The mechanism for irregular
-  timelines now exists, but jitter, sub-100 ms ticks, gaps of other sizes, and back-to-back
-  stalls are all uncovered. A real loop under load produces all of them.
+- **Tick timing is barely varied — unexplored space, but no known risk.** 26 fixtures tick at a
+  uniform 100 ms; one uses `tick_offsets_ms`, with two gaps of the same 600 ms size. Jitter,
+  sub-100 ms ticks, gaps of other sizes, and back-to-back stalls are all uncovered, and a real
+  loop under load produces all of them. To be clear about the status though:
+  `replay_pending_intensity_samples` is the only gap-sensitive path anyone has identified, and
+  it is now bracketed, so this is a coverage gap rather than a suspected defect. Treat it as
+  somewhere to look if a timing bug ever surfaces, not as a known hazard.
 - **`apply_midpoint` does not clamp its input while `apply_curve` does** — but this is safe, and
   the asymmetry is not reachable as a defect. Checked rather than assumed:
   `AxisState::update` clamps every bus write to `[0,1]`, so a raw axis value can never leave
