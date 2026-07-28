@@ -218,6 +218,15 @@ signal you want.
 Determinism has been verified by generating twice in separate processes at different
 wall-clock times and diffing the whole folder.
 
+`.github/workflows/test.yml` enforces this on every pull request: it runs the suite —
+which regenerates the folder as a side effect — and then fails on
+`git diff --exit-code` over these files. **A behaviour change in the engine breaks CI
+rather than silently rewriting the corpus.** If a diff is intended, regenerate locally,
+review every changed tick, and commit the result with the change that caused it.
+
+`.gitattributes` pins these files to LF so a Windows checkout does not report the whole
+folder as modified the moment it is regenerated.
+
 The generator lives in `src-tauri/src/golden.rs`. It is a `#[cfg(test)]` module rather than a
 binary because `coyote-socket` is a binary-only Cargo package — with no `lib` target, neither
 `src/bin/*.rs` nor `tests/*.rs` can reach `crate::processing`, so an in-crate test module is
