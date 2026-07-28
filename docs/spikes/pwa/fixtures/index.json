@@ -55,6 +55,24 @@
       "tick_count": 12
     },
     {
+      "name": "ramped-targets",
+      "file": "ramped-targets.json",
+      "description": "Sparse T-Code commands carrying I<ms> ramp durations (600ms up, 500ms down) with long gaps between them. Note the two-stage response this produces: the tick right after a command sees the sample in its downsampler window and jumps straight to the target, then subsequent ticks fall back to V2's ramp interpolation evaluated over [now-100, now-25] and read LOWER. That non-monotonic shape is real production behaviour of the engine dispatch in Channel::next_raw_values, not an artefact.",
+      "tick_count": 24
+    },
+    {
+      "name": "ramp-retarget-midflight",
+      "file": "ramp-retarget-midflight.json",
+      "description": "A new ramped target arrives while the previous ramp is still in flight. This is the only trace that exercises `ramp_start_value = self.get_value_at(timestamp)` in V2ChannelState::set_target with a partially-completed ramp — a port that re-anchors from `current_value` or from the previous target instead of from the interpolated position produces a visible discontinuity here and nowhere else. A: 0 -> 1.0 over 800ms, retargeted to 0.3 over 400ms at +600ms (mid-ramp), then to 0.9 over 600ms. B: the same pattern with an inverse curve and shorter ramps.",
+      "tick_count": 24
+    },
+    {
+      "name": "oscillation-threshold-boundary",
+      "file": "oscillation-threshold-boundary.json",
+      "description": "Straddles downsample_dynamic's OSCILLATION_THRESHOLD of 40 device units, which switches the algorithm outright: `range < 40` falls back to peak-preserving forward-fill, `range >= 40` emits the alternating min/max pattern. Each channel steps through three 500ms phases whose per-window spread is exactly 39, 40 and 41 device units (axis pairs 0.100/0.295, 0.100/0.300, 0.100/0.305 -> 20/59, 20/60, 20/61), and the two channels run the phases in opposite order so both branches are live in the same tick. Phase edges land on tick boundaries so no downsampler window ever mixes two phases. A port with the threshold transcribed as 30 or 50, or with `<` written as `<=`, diverges on the middle phase only.",
+      "tick_count": 16
+    },
+    {
       "name": "range-partial-window",
       "file": "range-partial-window.json",
       "description": "Linked intensity mapped into a narrow sub-range (A: 50..150, B: 120..140) while the axis sweeps the full 0..1. Pins scale_intensity's min + intensity*range/200 arithmetic and its rounding.",
@@ -99,7 +117,7 @@
     {
       "name": "sustained-peak-hold-boundary",
       "file": "sustained-peak-hold-boundary.json",
-      "description": "Sub-tick transients placed to straddle the 200ms peak-hold window edge: full-scale pulses at +150ms and +550ms, each only 10ms wide. Pins whether a sample exactly at the `now - 200` cutoff is inside the hold window (peak_in_last_ms uses >=).",
+      "description": "Two isolated 10ms full-scale pulses (+150ms, +550ms) landing mid-tick rather than on a tick boundary, so the peak enters the hold buffer from a tick whose own slot values then immediately return to zero. What this does NOT do, despite the pulse offsets looking deliberate: it does not move the hold-window boundary. `IntensityPeakHold::observe` is called exactly once per tick with the tick instant, so every sample in the buffer is a tick timestamp at 100ms spacing, and `peak_in_last_ms(now, 200)` with its `>=` cutoff therefore always spans exactly the current tick plus the two before it. That property is fixed by the tick grid dividing 200ms evenly and holds in every sustained fixture — editing these offsets will not change it. Kept because the mid-tick placement still gives the cleanest single-pulse decay shape of the set.",
       "tick_count": 14
     },
     {
@@ -135,26 +153,26 @@
     {
       "name": "no-input-hold",
       "file": "no-input-hold.json",
-      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 2s, crossing the resolver's 1000ms staleness threshold. With no_input_behavior = hold, the last value is held indefinitely. Frequency (linked to L1) shows the effect directly in the B0 period bytes; intensity is on the engine path, which holds via the V2 ramp regardless of this setting.",
-      "tick_count": 24
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = hold, the last value is held indefinitely. Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 36
     },
     {
       "name": "no-input-zero",
       "file": "no-input-zero.json",
-      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 2s, crossing the resolver's 1000ms staleness threshold. With no_input_behavior = zero, the value snaps to zero once stale. Frequency (linked to L1) shows the effect directly in the B0 period bytes; intensity is on the engine path, which holds via the V2 ramp regardless of this setting.",
-      "tick_count": 24
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = zero, the value snaps to zero the moment the axis goes stale. Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 36
     },
     {
       "name": "no-input-decay",
       "file": "no-input-decay.json",
-      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 2s, crossing the resolver's 1000ms staleness threshold. With no_input_behavior = decay, the value ramps to zero over no_input_decay_ms once stale. Frequency (linked to L1) shows the effect directly in the B0 period bytes; intensity is on the engine path, which holds via the V2 ramp regardless of this setting.",
-      "tick_count": 24
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = decay, the value ramps toward zero as age_ms/no_input_decay_ms, reaching zero at age_ms = 3000 (tick 34 here). Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 36
     },
     {
       "name": "no-input-default",
       "file": "no-input-default.json",
-      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 2s, crossing the resolver's 1000ms staleness threshold. With no_input_behavior = default, the value falls back to the link's static_value (None here, so 0). Frequency (linked to L1) shows the effect directly in the B0 period bytes; intensity is on the engine path, which holds via the V2 ramp regardless of this setting.",
-      "tick_count": 24
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = default, the value falls back to the link's staticValue (0.75 pre-curve on the frequency link, so 150.25 Hz). Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 36
     },
     {
       "name": "no-input-at-all",

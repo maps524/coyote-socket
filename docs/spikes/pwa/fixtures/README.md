@@ -19,6 +19,9 @@ Per the V1 scope doc, the fixtures cover only what V1 ships:
 | File | Covers |
 |---|---|
 | `index.json` | Manifest of every fixture, plus the all-stop `zero_b0` frame |
+| `ramped-targets` | T-Code `I<ms>` ramp durations — the only fixtures where V2's interpolation runs |
+| `ramp-retarget-midflight` | A new ramped target arriving while the previous ramp is in flight |
+| `oscillation-threshold-boundary` | Per-window spread of exactly 39, 40 and 41 device units |
 | `static-intensity-endpoints` | Static intensity at 0 and 200; no input at all |
 | `static-intensity-midpoint-and-overflow` | Static 100 and 255 — pins the 200 clamp on the static branch |
 | `linked-linear-full-axis-sweep` | Both channels linear over 0..200, axis swept 0→1 |
@@ -37,7 +40,7 @@ Per the V1 scope doc, the fixtures cover only what V1 ships:
 | `balance-linked` | Frequency/intensity balance linked across 0..255 |
 | `midpoint-distance-from-center` | `midpoint` on vs off, same input |
 | `channels-independent` | Fully asymmetric channels driven by unrelated input |
-| `no-input-{hold,zero,decay,default}` | Input stops, trace crosses the 1000ms staleness threshold |
+| `no-input-{hold,zero,decay,default}` | Input stops, trace crosses the staleness threshold and the full decay window |
 | `no-input-at-all` | Everything linked, zero input events — cold start |
 
 ## Format
@@ -80,9 +83,12 @@ Each fixture is one self-describing JSON object.
   "channel_b": { … },
 
   // Axis writes, chronological. `t` is absolute, same clock as the ticks.
+  // `interval_ms` is the T-Code `I<ms>` ramp duration; the key is omitted
+  // when the command carried none. Only `ramped-targets` and
+  // `ramp-retarget-midflight` contain it — see "V2 ramp" below.
   "inputs": [
     { "t": 1000000, "axis": "L0", "value": 0.0 },
-    { "t": 1000020, "axis": "L0", "value": 0.0166…, "interval_ms": 500 }
+    { "t": 1000200, "axis": "L0", "value": 1.0, "interval_ms": 600 }
   ],
 
   "ticks": [
@@ -142,6 +148,21 @@ pre-engine). For intensity it will generally *disagree* with `scaled_intensity`,
 engine path lags it through downsampling, the V2 ramp and the peak hold. That gap is expected
 — it is not a sign either number is wrong.
 
+### Three fields that will mislead you
+
+- **`peak_fill` is inert.** It is serialized because it is part of engine configuration, but
+  `V2Sustained` reaches `downsample_dynamic`, which hardcodes `PeakFillStrategy::Forward` for
+  its sub-threshold fallback. The field cannot affect any byte in these fixtures. It only
+  matters for `V2Detailed`, which is out of V1 scope.
+- **`staticValue` means two different things.** On a `"type": "static"` parameter it is the
+  device value verbatim. On a `"type": "linked"` parameter it is only read by
+  `NoInputBehavior::Default`, and there it is consumed as a **raw, pre-curve, normalized 0..1
+  input** that then runs through the curve and range mapping. In `no-input-default.json` the
+  frequency link's `staticValue: 0.75` resolves to `lerp(1, 200, 0.75) = 150.25 Hz`, not
+  0.75 Hz.
+- **`no_input_decay_ms` is 3000 in the no-input fixtures, not the app default of 1000.** See
+  the note under `no-input-decay` in Known gaps — at 1000 the setting is inoperative.
+
 `index.json` also carries `zero_b0`, the all-stop frame sent on pause
 (`device.rs::send_zero_command`).
 
@@ -157,8 +178,7 @@ engine path lags it through downsampling, the V2 ramp and the peak hold. That ga
    axis write with that exact timestamp. An event landing exactly on a tick instant is
    delivered *before* that tick runs, but is not yet inside the tick's `[now-100, now)`
    sampling window — it first affects the following tick.
-5. Per tick, in this order (the order `device.rs::send_device_update` uses, and it matters
-   because the frequency pass mutates link state the snapshot pass then reads):
+5. Per tick, in this order (the order `device.rs::send_device_update` uses):
    1. advance the engines and produce waveform data,
    2. resolve the four per-25ms-slot frequencies over `[now-100, now)`,
    3. resolve the channel parameter snapshot,
@@ -166,8 +186,15 @@ engine path lags it through downsampling, the V2 ramp and the peak hold. That ga
    5. assemble the B0 frame.
 6. Assert your frame equals `ticks[i].b0`.
 
-Start by making one fixture pass end to end rather than all of them at once; the ordering in
-step 5 is the usual first thing to get wrong.
+Start by making one fixture pass end to end rather than all of them at once.
+
+On step 5's ordering: in production the frequency pass advances link state that the snapshot
+pass then consumes rather than re-resolving, which matters when a stateful transform is
+attached to frequency. **Transforms are out of V1 scope, so within these fixtures that
+coupling has no observable effect** — `frequency_hz == freq_slots_hz[3]` in all 868
+channel-ticks, and a port that skips the stash and simply copies slot 3 is indistinguishable
+here. Preserve the ordering anyway if you intend to add transforms later, but know that no
+fixture will tell you if you got it wrong. Review it by hand.
 
 ## Regenerating
 
@@ -195,6 +222,30 @@ binary because `coyote-socket` is a binary-only Cargo package — with no `lib` 
 `src/bin/*.rs` nor `tests/*.rs` can reach `crate::processing`, so an in-crate test module is
 the only place that can drive the real code path.
 
+## The V2 ramp
+
+Worth calling out separately, because it is the one part of the engine that is easy to fake
+and dangerous to get wrong.
+
+A T-Code command may carry an `I<ms>` suffix (`L0500I600`) giving a ramp duration. That
+duration reaches `V2ChannelState::set_target(value, duration_ms, ts)`. When it is zero —
+which it is for every command without the suffix — `ramp_end_time == ramp_start_time` and
+`get_value_at` returns the target on its first branch. **The interpolation body never runs.**
+
+So a `getValueAt()` implemented as `return this.targetValue` passes every fixture that has no
+`interval_ms`, and silently converts every ramped command into an instant jump on hardware.
+That fails in the unsafe direction. Two fixtures exist specifically to catch it:
+
+- `ramped-targets` — sparse ramped commands with long gaps. Watch the two-stage response: the
+  tick immediately after a command sees the sample in its downsampler window and jumps to the
+  target, then later ticks fall back to the ramp evaluated over `[now-100, now-25]` and read
+  *lower*. That non-monotonic shape is genuine engine-dispatch behaviour in
+  `Channel::next_raw_values`, not a fixture artefact.
+- `ramp-retarget-midflight` — a new target arriving mid-ramp. This is the only trace that
+  exercises `ramp_start_value = self.get_value_at(timestamp)` against a partially completed
+  ramp. A port that re-anchors from `current_value` (never updated while a ramp is running) or
+  from the previous target produces a discontinuity here and nowhere else.
+
 ## Known gaps
 
 - **`convert_period`'s `>1000 → 240` branch is unreachable** from the device path and so is
@@ -209,3 +260,19 @@ the only place that can drive the real code path.
   "fix" it in a port without deciding it is a bug first.
 - **Buttplug (`bp:`) intensity routing is not covered.** Those links bypass the engines and
   run the resolver wholesale; out of V1 scope.
+- **`NoInputBehavior::Decay` is inoperative at the app's default setting**, and the fixtures
+  deliberately do not reproduce that. The staleness gate is `age_ms > 1000` while decay
+  progress is `(age_ms / decay_ms).min(1.0)`, so with `no_input_decay_ms <= 1000` the Decay
+  branch is first entered only once progress has already reached 1.0 — it can return nothing
+  but zero, making it identical to `Zero`. The app ships `no_input_decay_ms = 1000`. These
+  fixtures use 3000 so the ramp is observable and the four no-input traces are actually
+  distinct. Port the arithmetic as written; just know the shipped default makes the feature
+  a no-op. Worth fixing at source.
+- **`delay_ms` is never set**, so the delayed-replay path in
+  `replay_pending_intensity_samples` — including the `INTENSITY_REPLAY_FLOOR_MS = 200` bound
+  on how far a stale watermark can reach back — runs only in its zero-delay form. Per-parameter
+  input delay is out of V1 scope.
+- **The peak-hold buffer's prune cutoff is untested.** `IntensityPeakHold::observe` prunes at
+  1000ms while every read uses a 200ms window, so the prune is unobservable: a port that
+  prunes at the read window instead agrees on every fixture here. Only a read window longer
+  than 200ms would distinguish them, and nothing reads longer.

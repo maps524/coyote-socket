@@ -380,6 +380,49 @@ impl SpecBuilder {
         self
     }
 
+    /// One axis write at `offset_ms` carrying a T-Code ramp duration
+    /// (`I<ms>`). This is what reaches `V2ChannelState::set_target` as a
+    /// non-zero `duration_ms` and makes the ramp interpolation body run —
+    /// with `interval_ms` absent the ramp collapses to an instant jump and
+    /// `get_value_at` short-circuits on its first branch forever.
+    fn at_ramp(mut self, offset_ms: u64, axis: &str, value: f64, interval_ms: u32) -> Self {
+        self.spec.inputs.push(InputEvent {
+            t: TRACE_EPOCH_MS + offset_ms,
+            axis: axis.to_string(),
+            value,
+            interval_ms: Some(interval_ms),
+        });
+        self
+    }
+
+    /// Alternating `lo`/`hi` writes across `[start_ms, end_ms)` at `step_ms`.
+    /// Unlike `flick`, the span is expressed as a half-open range so phases
+    /// can be chained on tick boundaries without their samples ever sharing a
+    /// downsampler window.
+    fn phased_flick(
+        mut self,
+        start_ms: u64,
+        end_ms: u64,
+        step_ms: u64,
+        axis: &str,
+        lo: f64,
+        hi: f64,
+    ) -> Self {
+        let mut i = 0u64;
+        let mut t = start_ms;
+        while t < end_ms {
+            self.spec.inputs.push(InputEvent {
+                t: TRACE_EPOCH_MS + t,
+                axis: axis.to_string(),
+                value: if i % 2 == 0 { lo } else { hi },
+                interval_ms: None,
+            });
+            i += 1;
+            t += step_ms;
+        }
+        self
+    }
+
     /// `count` writes on `axis` at `step_ms` intervals starting at
     /// `offset_ms`, linearly interpolating `from`→`to` across them.
     fn sweep(
@@ -512,6 +555,89 @@ fn all_specs() -> Vec<TraceSpec> {
         .build(),
     );
 
+    // --- V2 ramp (interval_ms) -------------------------------------------
+    //
+    // These are the only fixtures whose input events carry `interval_ms`.
+    // Without one, `apply_tcode` passes `duration_ms = 0` to
+    // `V2ChannelState::set_target`, `ramp_end_time == ramp_start_time`, and
+    // `get_value_at` returns the target on its very first branch — the
+    // interpolation body never executes. A port that implements
+    // `getValueAt()` as `return targetValue` would otherwise pass every
+    // other fixture here while turning every ramped command into an instant
+    // jump on hardware.
+    out.push(
+        SpecBuilder::new(
+            "ramped-targets",
+            "Sparse T-Code commands carrying I<ms> ramp durations (600ms up, 500ms down) with \
+             long gaps between them. Note the two-stage response this produces: the tick right \
+             after a command sees the sample in its downsampler window and jumps straight to the \
+             target, then subsequent ticks fall back to V2's ramp interpolation evaluated over \
+             [now-100, now-25] and read LOWER. That non-monotonic shape is real production \
+             behaviour of the engine dispatch in Channel::next_raw_values, not an artefact.",
+            chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
+            chan(cfg_default_params(link("R2", 0.0, 200.0, CurveType::Linear))),
+        )
+        .ticks(24)
+        .at(0, "L0", 0.0)
+        .at(0, "R2", 0.0)
+        .at_ramp(200, "L0", 1.0, 600)
+        .at_ramp(1400, "L0", 0.0, 500)
+        .at_ramp(200, "R2", 0.6, 800)
+        .at_ramp(1400, "R2", 0.2, 300)
+        .build(),
+    );
+
+    out.push(
+        SpecBuilder::new(
+            "ramp-retarget-midflight",
+            "A new ramped target arrives while the previous ramp is still in flight. This is the \
+             only trace that exercises `ramp_start_value = self.get_value_at(timestamp)` in \
+             V2ChannelState::set_target with a partially-completed ramp — a port that re-anchors \
+             from `current_value` or from the previous target instead of from the interpolated \
+             position produces a visible discontinuity here and nowhere else. A: 0 -> 1.0 over \
+             800ms, retargeted to 0.3 over 400ms at +600ms (mid-ramp), then to 0.9 over 600ms. \
+             B: the same pattern with an inverse curve and shorter ramps.",
+            chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
+            chan(cfg_default_params(link("R2", 0.0, 200.0, CurveType::Inverse))),
+        )
+        .ticks(24)
+        .at(0, "L0", 0.0)
+        .at(0, "R2", 1.0)
+        .at_ramp(200, "L0", 1.0, 800)
+        .at_ramp(600, "L0", 0.3, 400)
+        .at_ramp(1200, "L0", 0.9, 600)
+        .at_ramp(200, "R2", 0.1, 500)
+        .at_ramp(450, "R2", 0.8, 300)
+        .at_ramp(1200, "R2", 0.4, 400)
+        .build(),
+    );
+
+    // --- Oscillation threshold -------------------------------------------
+    out.push(
+        SpecBuilder::new(
+            "oscillation-threshold-boundary",
+            "Straddles downsample_dynamic's OSCILLATION_THRESHOLD of 40 device units, which \
+             switches the algorithm outright: `range < 40` falls back to peak-preserving \
+             forward-fill, `range >= 40` emits the alternating min/max pattern. Each channel \
+             steps through three 500ms phases whose per-window spread is exactly 39, 40 and 41 \
+             device units (axis pairs 0.100/0.295, 0.100/0.300, 0.100/0.305 -> 20/59, 20/60, \
+             20/61), and the two channels run the phases in opposite order so both branches are \
+             live in the same tick. Phase edges land on tick boundaries so no downsampler window \
+             ever mixes two phases. A port with the threshold transcribed as 30 or 50, or with \
+             `<` written as `<=`, diverges on the middle phase only.",
+            chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
+            chan(cfg_default_params(link("R2", 0.0, 200.0, CurveType::Linear))),
+        )
+        .ticks(16)
+        .phased_flick(0, 500, 20, "L0", 0.100, 0.295)
+        .phased_flick(500, 1000, 20, "L0", 0.100, 0.300)
+        .phased_flick(1000, 1500, 20, "L0", 0.100, 0.305)
+        .phased_flick(0, 500, 20, "R2", 0.100, 0.305)
+        .phased_flick(500, 1000, 20, "R2", 0.100, 0.300)
+        .phased_flick(1000, 1500, 20, "R2", 0.100, 0.295)
+        .build(),
+    );
+
     // --- Range clamping ---------------------------------------------------
     out.push(
         SpecBuilder::new(
@@ -630,9 +756,18 @@ fn all_specs() -> Vec<TraceSpec> {
     out.push(
         SpecBuilder::new(
             "sustained-peak-hold-boundary",
-            "Sub-tick transients placed to straddle the 200ms peak-hold window edge: full-scale \
-             pulses at +150ms and +550ms, each only 10ms wide. Pins whether a sample exactly at \
-             the `now - 200` cutoff is inside the hold window (peak_in_last_ms uses >=).",
+            "Two isolated 10ms full-scale pulses (+150ms, +550ms) landing mid-tick rather than on \
+             a tick boundary, so the peak enters the hold buffer from a tick whose own slot \
+             values then immediately return to zero. \
+             \
+             What this does NOT do, despite the pulse offsets looking deliberate: it does not \
+             move the hold-window boundary. `IntensityPeakHold::observe` is called exactly once \
+             per tick with the tick instant, so every sample in the buffer is a tick timestamp at \
+             100ms spacing, and `peak_in_last_ms(now, 200)` with its `>=` cutoff therefore always \
+             spans exactly the current tick plus the two before it. That property is fixed by the \
+             tick grid dividing 200ms evenly and holds in every sustained fixture — editing these \
+             offsets will not change it. Kept because the mid-tick placement still gives the \
+             cleanest single-pulse decay shape of the set.",
             chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
             chan(cfg_default_params(stat(0.0))),
         )
@@ -777,6 +912,25 @@ fn all_specs() -> Vec<TraceSpec> {
     );
 
     // --- No-input behaviour ----------------------------------------------
+    //
+    // `no_input_decay_ms` is 3000, NOT the app default of 1000, and that is
+    // deliberate. The staleness gate is `age_ms > 1000` while decay progress
+    // is `(age_ms / decay_ms).min(1.0)`, so with `decay_ms <= 1000` the Decay
+    // branch is only ever entered once progress has already reached 1.0 —
+    // Decay is then mathematically incapable of returning anything but zero
+    // and its trace is byte-identical to Zero's. At 3000 the ramp is visible.
+    // That interaction is a production defect worth knowing about; these
+    // fixtures are configured to demonstrate the intended behaviour rather
+    // than to enshrine the degenerate case.
+    //
+    // Every linked parameter carries `staticValue` so the Default branch has
+    // something distinguishable to fall back to. Note the semantic trap this
+    // exposes: for a LINKED parameter, `handle_no_input` returns
+    // `static_value` as the *raw, pre-curve, normalized 0..1 input*, which
+    // then runs through the curve and range mapping. On a Static parameter
+    // the same field is the device value verbatim. The frequency link below
+    // uses 0.75, which resolves to lerp(1, 200, 0.75) = 150.25 Hz, not 0.75.
+    const DECAY_MS: u32 = 3000;
     for (behavior, slug, blurb) in [
         (
             NoInputBehavior::Hold,
@@ -786,40 +940,51 @@ fn all_specs() -> Vec<TraceSpec> {
         (
             NoInputBehavior::Zero,
             "zero",
-            "the value snaps to zero once stale",
+            "the value snaps to zero the moment the axis goes stale",
         ),
         (
             NoInputBehavior::Decay,
             "decay",
-            "the value ramps to zero over no_input_decay_ms once stale",
+            "the value ramps toward zero as age_ms/no_input_decay_ms, reaching zero at \
+             age_ms = 3000 (tick 34 here)",
         ),
         (
             NoInputBehavior::Default,
             "default",
-            "the value falls back to the link's static_value (None here, so 0)",
+            "the value falls back to the link's staticValue (0.75 pre-curve on the frequency \
+             link, so 150.25 Hz)",
         ),
     ] {
+        let mut freq = link("L1", 1.0, 200.0, CurveType::Linear);
+        freq.static_value = Some(0.75);
+        let mut int_a = link("L0", 0.0, 200.0, CurveType::Linear);
+        int_a.static_value = Some(0.4);
+        let mut int_b = link("L0", 0.0, 200.0, CurveType::Inverse);
+        int_b.static_value = Some(0.4);
+
         out.push(
             SpecBuilder::new(
                 &format!("no-input-{}", slug),
                 &format!(
-                    "Input on L0 and L1 stops after 300ms and the trace runs on for another 2s, \
-                     crossing the resolver's 1000ms staleness threshold. With no_input_behavior \
-                     = {}, {}. Frequency (linked to L1) shows the effect directly in the B0 \
-                     period bytes; intensity is on the engine path, which holds via the V2 ramp \
-                     regardless of this setting.",
+                    "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, \
+                     crossing the resolver's 1000ms staleness threshold at tick 14 and \
+                     no_input_decay_ms at tick 34. With no_input_behavior = {}, {}. Frequency \
+                     (linked to L1) shows the effect directly in the B0 period bytes. Intensity \
+                     is on the ENGINE path, which holds via the V2 ramp regardless of this \
+                     setting — no_input_behavior does not reach it, so the intensity bytes are \
+                     identical across all four of these fixtures by design.",
                     slug, blurb
                 ),
                 chan(ChannelConfig {
-                    frequency: link("L1", 1.0, 200.0, CurveType::Linear),
+                    frequency: freq,
                     frequency_balance: stat(128.0),
                     intensity_balance: stat(128.0),
-                    intensity: link("L0", 0.0, 200.0, CurveType::Linear),
+                    intensity: int_a,
                 }),
-                chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Inverse))),
+                chan(cfg_default_params(int_b)),
             )
-            .ticks(24)
-            .no_input(behavior, 1000)
+            .ticks(36)
+            .no_input(behavior, DECAY_MS)
             .sweep(0, 50, 7, "L0", 0.2, 0.8)
             .sweep(0, 50, 7, "L1", 0.1, 0.9)
             .build(),
@@ -995,6 +1160,43 @@ mod tests {
                 assert!(tick.b0[2] <= 200 && tick.b0[3] <= 200, "{}: intensity", name);
             }
         }
+    }
+
+    /// The ramp fixtures must actually drive `V2ChannelState`'s interpolation
+    /// body. Without an `interval_ms`, `set_target` collapses the ramp and
+    /// `get_value_at` short-circuits on its first branch — a port could then
+    /// implement `getValueAt` as `return target` and pass everything. Assert
+    /// both that ramped input exists and that it produces at least one tick
+    /// whose four slots are strictly increasing mid-ramp values, which only
+    /// the interpolation branch can generate.
+    #[test]
+    fn ramp_fixtures_exercise_v2_interpolation() {
+        let mut ramped_events = 0usize;
+        let mut saw_interpolated_tick = false;
+
+        for spec in all_specs() {
+            ramped_events += spec.inputs.iter().filter(|e| e.interval_ms.is_some()).count();
+            if !spec.name.starts_with("ramp") {
+                continue;
+            }
+            for tick in run_trace(&spec) {
+                for ch in [&tick.channel_a, &tick.channel_b] {
+                    let v = ch.raw_values;
+                    let strictly_rising = v[0] < v[1] && v[1] < v[2] && v[2] < v[3];
+                    // A mid-ramp tick: every slot strictly between the ramp
+                    // endpoints, so neither a held value nor a settled target.
+                    if strictly_rising && v[0] > 0 && v[3] < 200 {
+                        saw_interpolated_tick = true;
+                    }
+                }
+            }
+        }
+
+        assert!(ramped_events > 0, "no fixture carries interval_ms");
+        assert!(
+            saw_interpolated_tick,
+            "no tick shows V2's ramp interpolation mid-flight"
+        );
     }
 
     /// The peak-hold fixtures must actually exercise the hold: at least one
