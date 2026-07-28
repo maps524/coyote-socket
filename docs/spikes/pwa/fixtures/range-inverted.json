@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "range-inverted",
-  "description": "range_min > range_max on both channels (A: 200..0, B: 150..50). device.rs's scale_intensity returns `min` verbatim whenever max <= min, so the intensity byte pins at range_min regardless of input — an inverted range does NOT invert the output. The resolver's own lerp does honour the inversion, which is visible in `resolved.intensity`; that divergence is real production behaviour on the engine path and a port must reproduce it.",
+  "description": "range_min > range_max on both channels (A: 200..0, B: 150..50). A transposed range is treated as a data-entry mistake, not a request to invert: both device.rs::scale_intensity and ParameterLinkConfig::ordered_range sort the endpoints, so 200..0 behaves exactly like 0..200 and 150..50 like 50..150. Output rises with input and a resting axis sits at the BOTTOM of the range. This fixture previously captured the opposite: scale_intensity returned `min` verbatim whenever max <= min, so channel A emitted 200 — device maximum — from the first tick with the axis at rest, and did so for every input. Use `curve: inverse` to invert; transposing the endpoints does not.",
   "engine": "v2-sustained",
   "peak_fill": "forward",
   "no_input_behavior": "hold",
@@ -454,7 +454,7 @@
       "t": 1000000,
       "channel_a": {
         "raw_intensity": 0,
-        "scaled_intensity": 200,
+        "scaled_intensity": 0,
         "waveform_intensity": [
           100,
           100,
@@ -482,8 +482,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -515,7 +515,7 @@
       },
       "channel_b": {
         "raw_intensity": 0,
-        "scaled_intensity": 150,
+        "scaled_intensity": 50,
         "waveform_intensity": [
           100,
           100,
@@ -543,8 +543,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -577,8 +577,8 @@
       "b0": [
         176,
         15,
-        200,
-        150,
+        0,
+        50,
         10,
         10,
         10,
@@ -601,7 +601,7 @@
       "t": 1000100,
       "channel_a": {
         "raw_intensity": 17,
-        "scaled_intensity": 200,
+        "scaled_intensity": 17,
         "waveform_intensity": [
           0,
           36,
@@ -629,8 +629,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -690,8 +690,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -724,7 +724,7 @@
       "b0": [
         176,
         15,
-        200,
+        17,
         150,
         10,
         10,
@@ -748,7 +748,7 @@
       "t": 1000200,
       "channel_a": {
         "raw_intensity": 39,
-        "scaled_intensity": 200,
+        "scaled_intensity": 39,
         "waveform_intensity": [
           57,
           72,
@@ -776,8 +776,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -837,8 +837,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -871,7 +871,7 @@
       "b0": [
         176,
         15,
-        200,
+        39,
         150,
         10,
         10,
@@ -895,7 +895,7 @@
       "t": 1000300,
       "channel_a": {
         "raw_intensity": 61,
-        "scaled_intensity": 200,
+        "scaled_intensity": 61,
         "waveform_intensity": [
           73,
           82,
@@ -923,8 +923,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -984,8 +984,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1018,7 +1018,7 @@
       "b0": [
         176,
         15,
-        200,
+        61,
         150,
         10,
         10,
@@ -1042,7 +1042,7 @@
       "t": 1000400,
       "channel_a": {
         "raw_intensity": 83,
-        "scaled_intensity": 200,
+        "scaled_intensity": 83,
         "waveform_intensity": [
           81,
           87,
@@ -1070,8 +1070,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1103,7 +1103,7 @@
       },
       "channel_b": {
         "raw_intensity": 178,
-        "scaled_intensity": 150,
+        "scaled_intensity": 139,
         "waveform_intensity": [
           100,
           97,
@@ -1131,8 +1131,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1165,8 +1165,8 @@
       "b0": [
         176,
         15,
-        200,
-        150,
+        83,
+        139,
         10,
         10,
         10,
@@ -1189,7 +1189,7 @@
       "t": 1000500,
       "channel_a": {
         "raw_intensity": 106,
-        "scaled_intensity": 200,
+        "scaled_intensity": 106,
         "waveform_intensity": [
           84,
           89,
@@ -1217,8 +1217,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1250,7 +1250,7 @@
       },
       "channel_b": {
         "raw_intensity": 156,
-        "scaled_intensity": 150,
+        "scaled_intensity": 128,
         "waveform_intensity": [
           100,
           96,
@@ -1278,8 +1278,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1312,8 +1312,8 @@
       "b0": [
         176,
         15,
-        200,
-        150,
+        106,
+        128,
         10,
         10,
         10,
@@ -1336,7 +1336,7 @@
       "t": 1000600,
       "channel_a": {
         "raw_intensity": 128,
-        "scaled_intensity": 200,
+        "scaled_intensity": 128,
         "waveform_intensity": [
           87,
           92,
@@ -1364,8 +1364,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1397,7 +1397,7 @@
       },
       "channel_b": {
         "raw_intensity": 133,
-        "scaled_intensity": 150,
+        "scaled_intensity": 117,
         "waveform_intensity": [
           100,
           94,
@@ -1425,8 +1425,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1459,8 +1459,8 @@
       "b0": [
         176,
         15,
-        200,
-        150,
+        128,
+        117,
         10,
         10,
         10,
@@ -1483,7 +1483,7 @@
       "t": 1000700,
       "channel_a": {
         "raw_intensity": 150,
-        "scaled_intensity": 200,
+        "scaled_intensity": 150,
         "waveform_intensity": [
           89,
           93,
@@ -1511,8 +1511,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1544,7 +1544,7 @@
       },
       "channel_b": {
         "raw_intensity": 111,
-        "scaled_intensity": 150,
+        "scaled_intensity": 106,
         "waveform_intensity": [
           100,
           92,
@@ -1572,8 +1572,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1606,8 +1606,8 @@
       "b0": [
         176,
         15,
-        200,
         150,
+        106,
         10,
         10,
         10,
@@ -1630,7 +1630,7 @@
       "t": 1000800,
       "channel_a": {
         "raw_intensity": 172,
-        "scaled_intensity": 200,
+        "scaled_intensity": 172,
         "waveform_intensity": [
           91,
           94,
@@ -1658,8 +1658,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1691,7 +1691,7 @@
       },
       "channel_b": {
         "raw_intensity": 89,
-        "scaled_intensity": 150,
+        "scaled_intensity": 95,
         "waveform_intensity": [
           100,
           89,
@@ -1719,8 +1719,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1753,8 +1753,8 @@
       "b0": [
         176,
         15,
-        200,
-        150,
+        172,
+        95,
         10,
         10,
         10,
@@ -1777,7 +1777,7 @@
       "t": 1000900,
       "channel_a": {
         "raw_intensity": 194,
-        "scaled_intensity": 200,
+        "scaled_intensity": 194,
         "waveform_intensity": [
           92,
           95,
@@ -1805,8 +1805,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 200,
-        "range_max": 0,
+        "range_min": 0,
+        "range_max": 200,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1838,7 +1838,7 @@
       },
       "channel_b": {
         "raw_intensity": 67,
-        "scaled_intensity": 150,
+        "scaled_intensity": 84,
         "waveform_intensity": [
           100,
           78,
@@ -1866,8 +1866,8 @@
         ],
         "freq_balance": 128,
         "int_balance": 128,
-        "range_min": 150,
-        "range_max": 50,
+        "range_min": 50,
+        "range_max": 150,
         "intensity_is_static": false,
         "resolved": {
           "frequency": {
@@ -1900,8 +1900,8 @@
       "b0": [
         176,
         15,
-        200,
-        150,
+        194,
+        84,
         10,
         10,
         10,

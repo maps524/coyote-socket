@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "ramp-retarget-midflight",
-  "description": "A new ramped target arrives while the previous ramp is still in flight, exercising `ramp_start_value = self.get_value_at(timestamp)` in V2ChannelState::set_target against a partially-completed ramp. A: 0 -> 1.0 over 800ms, retargeted to 0.3 over 400ms at +600ms (mid-ramp), then to 0.9 over 600ms. B: the same pattern with an inverse curve and shorter ramps. Two re-anchor mistakes are worth distinguishing. Anchoring from the PREVIOUS TARGET is caught only here — no other trace retargets mid-ramp. Anchoring from `current_value` is caught here AND by ramped-targets, where `current_value` is only ever assigned for the `duration_ms == 0` command at t=0 and so stays 0 for the whole trace; that port ramps 0 -> 0 at +1400 and emits flat zeros where the fixture has [160,150,140,130]. Note also tick +600: all four sample points fall at or before the new `ramp_start_time`, so `get_value_at` returns the anchor itself and the re-anchor value appears in the output as a bare [100,100,100,100]. A port that computes it wrong fails both on that literal and on the interpolated ramp that follows.",
+  "description": "A new ramped target arrives while the previous ramp is still in flight, exercising `ramp_start_value = self.get_value_at(timestamp)` in V2ChannelState::set_target against a partially-completed ramp. A: 0 -> 1.0 over 800ms, retargeted to 0.3 over 400ms at +600ms (mid-ramp), then to 0.9 over 600ms. B: the same pattern with an inverse curve and shorter ramps. Two re-anchor mistakes are worth distinguishing. Anchoring from the PREVIOUS TARGET is caught only here — no other trace retargets mid-ramp. Anchoring from `current_value` is caught here AND by ramped-targets, where `current_value` is only ever assigned for the `duration_ms == 0` command at t=0 and so stays 0 for the whole trace; that port ramps 0 -> 0 at +1400 and emits flat zeros where the fixture has [160,150,140,130]. Note also tick +600: all four sample points fall at or before the new `ramp_start_time`, so `get_value_at` returns the anchor itself and the re-anchor value appears in the output as a bare [100,100,100,100]. A port that computes it wrong fails both on that literal and on the interpolated ramp that follows. Tick +700 is the retarget's own overshoot check: the new target's sample sits in that window's downsampler, and a port that prefers the downsampler over an in-flight ramp emits a flat [60,60,60,60] — the endpoint of a 400ms ease, 300ms early — where the ramp gives [100,98,95,93].",
   "engine": "v2-sustained",
   "peak_fill": "forward",
   "no_input_behavior": "hold",
@@ -570,19 +570,19 @@
     {
       "t": 1000300,
       "channel_a": {
-        "raw_intensity": 200,
-        "scaled_intensity": 200,
+        "raw_intensity": 19,
+        "scaled_intensity": 19,
         "waveform_intensity": [
-          100,
-          100,
-          100,
+          0,
+          32,
+          69,
           100
         ],
         "raw_values": [
-          200,
-          200,
-          200,
-          200
+          0,
+          6,
+          13,
+          19
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -631,19 +631,19 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 180,
-        "scaled_intensity": 180,
+        "raw_intensity": 27,
+        "scaled_intensity": 27,
         "waveform_intensity": [
-          100,
-          100,
-          100,
+          0,
+          34,
+          67,
           100
         ],
         "raw_values": [
-          180,
-          180,
-          180,
-          180
+          0,
+          9,
+          18,
+          27
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -694,31 +694,31 @@
       "b0": [
         176,
         15,
-        200,
-        180,
+        19,
+        27,
         10,
         10,
         10,
         10,
+        0,
+        32,
+        69,
         100,
-        100,
-        100,
-        100,
         10,
         10,
         10,
         10,
-        100,
-        100,
-        100,
+        0,
+        34,
+        67,
         100
       ]
     },
     {
       "t": 1000400,
       "channel_a": {
-        "raw_intensity": 200,
-        "scaled_intensity": 200,
+        "raw_intensity": 44,
+        "scaled_intensity": 44,
         "waveform_intensity": [
           57,
           71,
@@ -778,8 +778,8 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 180,
-        "scaled_intensity": 180,
+        "raw_intensity": 63,
+        "scaled_intensity": 63,
         "waveform_intensity": [
           58,
           72,
@@ -841,8 +841,8 @@
       "b0": [
         176,
         15,
-        200,
-        180,
+        44,
+        63,
         10,
         10,
         10,
@@ -864,8 +864,8 @@
     {
       "t": 1000500,
       "channel_a": {
-        "raw_intensity": 200,
-        "scaled_intensity": 200,
+        "raw_intensity": 69,
+        "scaled_intensity": 69,
         "waveform_intensity": [
           73,
           82,
@@ -925,19 +925,19 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 180,
-        "scaled_intensity": 180,
+        "raw_intensity": 90,
+        "scaled_intensity": 90,
         "waveform_intensity": [
           100,
           100,
           100,
-          100
+          96
         ],
         "raw_values": [
-          40,
-          40,
-          40,
-          40
+          90,
+          90,
+          90,
+          86
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -988,8 +988,8 @@
       "b0": [
         176,
         15,
-        200,
-        180,
+        69,
+        90,
         10,
         10,
         10,
@@ -1005,7 +1005,7 @@
         100,
         100,
         100,
-        100
+        96
       ]
     },
     {
@@ -1072,8 +1072,8 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 82,
-        "scaled_intensity": 82,
+        "raw_intensity": 90,
+        "scaled_intensity": 90,
         "waveform_intensity": [
           100,
           96,
@@ -1136,7 +1136,7 @@
         176,
         15,
         100,
-        82,
+        90,
         10,
         10,
         10,
@@ -1162,15 +1162,15 @@
         "scaled_intensity": 100,
         "waveform_intensity": [
           100,
-          100,
-          100,
-          100
+          98,
+          95,
+          93
         ],
         "raw_values": [
-          60,
-          60,
-          60,
-          60
+          100,
+          98,
+          95,
+          93
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -1219,8 +1219,8 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 82,
-        "scaled_intensity": 82,
+        "raw_intensity": 90,
+        "scaled_intensity": 90,
         "waveform_intensity": [
           100,
           94,
@@ -1283,15 +1283,15 @@
         176,
         15,
         100,
-        82,
+        90,
         10,
         10,
         10,
         10,
         100,
-        100,
-        100,
-        100,
+        98,
+        95,
+        93,
         10,
         10,
         10,
@@ -1452,8 +1452,8 @@
     {
       "t": 1000900,
       "channel_a": {
-        "raw_intensity": 90,
-        "scaled_intensity": 90,
+        "raw_intensity": 100,
+        "scaled_intensity": 100,
         "waveform_intensity": [
           100,
           98,
@@ -1576,7 +1576,7 @@
       "b0": [
         176,
         15,
-        90,
+        100,
         65,
         10,
         10,
@@ -2040,19 +2040,19 @@
     {
       "t": 1001300,
       "channel_a": {
-        "raw_intensity": 180,
-        "scaled_intensity": 180,
+        "raw_intensity": 75,
+        "scaled_intensity": 75,
         "waveform_intensity": [
-          100,
-          100,
-          100,
+          80,
+          87,
+          94,
           100
         ],
         "raw_values": [
-          180,
-          180,
-          180,
-          180
+          60,
+          65,
+          70,
+          75
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -2101,19 +2101,19 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 120,
-        "scaled_intensity": 120,
+        "raw_intensity": 55,
+        "scaled_intensity": 55,
         "waveform_intensity": [
-          100,
-          100,
-          100,
+          73,
+          82,
+          91,
           100
         ],
         "raw_values": [
-          120,
-          120,
-          120,
-          120
+          40,
+          45,
+          50,
+          55
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -2164,31 +2164,31 @@
       "b0": [
         176,
         15,
-        180,
-        120,
+        75,
+        55,
         10,
         10,
         10,
         10,
+        80,
+        87,
+        94,
         100,
-        100,
-        100,
-        100,
         10,
         10,
         10,
         10,
-        100,
-        100,
-        100,
+        73,
+        82,
+        91,
         100
       ]
     },
     {
       "t": 1001400,
       "channel_a": {
-        "raw_intensity": 180,
-        "scaled_intensity": 180,
+        "raw_intensity": 95,
+        "scaled_intensity": 95,
         "waveform_intensity": [
           85,
           90,
@@ -2248,8 +2248,8 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 120,
-        "scaled_intensity": 120,
+        "raw_intensity": 75,
+        "scaled_intensity": 75,
         "waveform_intensity": [
           80,
           87,
@@ -2311,8 +2311,8 @@
       "b0": [
         176,
         15,
-        180,
-        120,
+        95,
+        75,
         10,
         10,
         10,
@@ -2334,8 +2334,8 @@
     {
       "t": 1001500,
       "channel_a": {
-        "raw_intensity": 180,
-        "scaled_intensity": 180,
+        "raw_intensity": 115,
+        "scaled_intensity": 115,
         "waveform_intensity": [
           87,
           92,
@@ -2395,8 +2395,8 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 120,
-        "scaled_intensity": 120,
+        "raw_intensity": 95,
+        "scaled_intensity": 95,
         "waveform_intensity": [
           85,
           90,
@@ -2458,8 +2458,8 @@
       "b0": [
         176,
         15,
-        180,
-        120,
+        115,
+        95,
         10,
         10,
         10,

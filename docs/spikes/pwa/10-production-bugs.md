@@ -52,6 +52,15 @@ which is a legitimate "hold this channel at a constant".
   inverted range puts **full output at a resting axis** either way. Ordering is the only reading
   under which a mis-entered range fails safe.
 
+**What the regenerated `range-inverted` fixture does and does not prove.** It proves the
+*resolver-side* ordering. It does **not** exercise the `scale_intensity` half: the golden harness
+takes its range from `build_channel_snapshot` (as production does via
+`get_resolved_channel_params`), which orders the endpoints before `scale_intensity` ever sees
+them. Reverting `scale_intensity` to pin-at-min changes zero fixtures — measured, not inferred.
+The device-side ordering is deliberate defence in depth for any future caller that reaches
+`scale_intensity` with a raw config, and the three `device::tests::scale_intensity_*` unit tests
+are the only thing guarding it. Do not delete them on the grounds that the fixtures cover it.
+
 **Why not reject at the configuration boundary:** there is no error path from the tick loop back
 to the UI, and refusing the config would leave the channel running on whatever it had before —
 less predictable than mapping over the span the user actually typed. Ordering also can't be

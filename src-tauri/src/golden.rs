@@ -569,11 +569,17 @@ fn all_specs() -> Vec<TraceSpec> {
         SpecBuilder::new(
             "ramped-targets",
             "Sparse T-Code commands carrying I<ms> ramp durations (600ms up, 500ms down) with \
-             long gaps between them. Note the two-stage response this produces: the tick right \
-             after a command sees the sample in its downsampler window and jumps straight to the \
-             target, then subsequent ticks fall back to V2's ramp interpolation evaluated over \
-             [now-100, now-25] and read LOWER. That non-monotonic shape is real production \
-             behaviour of the engine dispatch in Channel::next_raw_values, not an artefact.",
+             long gaps between them. While a ramp is in flight `Channel::next_raw_values` reads \
+             V2's interpolation over [now-100, now-25] and ignores the downsampler, so each \
+             ramp is monotonic from the tick the command lands to the tick it completes. \
+             \
+             This is the fixture that catches a port dispatching the other way round. \
+             `apply_tcode` also stores the commanded TARGET in the downsampler; letting that \
+             win — as the engine used to — put the tick containing the command straight at the \
+             endpoint and then read back DOWN off the ramp for the next two. A 600ms ease to \
+             full reached full scale after ~100ms and held it, and the ramp ran inverted for \
+             three ticks. The same dispatch dropped ramp-downs early: +1500 read [0,0,0,0] \
+             400ms before the commanded stop instead of [200,190,180,170].",
             chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
             chan(cfg_default_params(link("R2", 0.0, 200.0, CurveType::Linear))),
         )
@@ -606,7 +612,12 @@ fn all_specs() -> Vec<TraceSpec> {
              Note also tick +600: all four sample points fall at or before the new \
              `ramp_start_time`, so `get_value_at` returns the anchor itself and the re-anchor \
              value appears in the output as a bare [100,100,100,100]. A port that computes it \
-             wrong fails both on that literal and on the interpolated ramp that follows.",
+             wrong fails both on that literal and on the interpolated ramp that follows. \
+             \
+             Tick +700 is the retarget's own overshoot check: the new target's sample sits in \
+             that window's downsampler, and a port that prefers the downsampler over an \
+             in-flight ramp emits a flat [60,60,60,60] — the endpoint of a 400ms ease, 300ms \
+             early — where the ramp gives [100,98,95,93].",
             chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
             chan(cfg_default_params(link("R2", 0.0, 200.0, CurveType::Inverse))),
         )
@@ -677,12 +688,16 @@ fn all_specs() -> Vec<TraceSpec> {
     out.push(
         SpecBuilder::new(
             "range-inverted",
-            "range_min > range_max on both channels (A: 200..0, B: 150..50). device.rs's \
-             scale_intensity returns `min` verbatim whenever max <= min, so the intensity byte \
-             pins at range_min regardless of input — an inverted range does NOT invert the \
-             output. The resolver's own lerp does honour the inversion, which is visible in \
-             `resolved.intensity`; that divergence is real production behaviour on the engine \
-             path and a port must reproduce it.",
+            "range_min > range_max on both channels (A: 200..0, B: 150..50). A transposed range \
+             is treated as a data-entry mistake, not a request to invert: both \
+             device.rs::scale_intensity and ParameterLinkConfig::ordered_range sort the \
+             endpoints, so 200..0 behaves exactly like 0..200 and 150..50 like 50..150. Output \
+             rises with input and a resting axis sits at the BOTTOM of the range. \
+             \
+             This fixture previously captured the opposite: scale_intensity returned `min` \
+             verbatim whenever max <= min, so channel A emitted 200 — device maximum — from the \
+             first tick with the axis at rest, and did so for every input. Use `curve: inverse` \
+             to invert; transposing the endpoints does not.",
             chan(cfg_default_params(link("L0", 200.0, 0.0, CurveType::Linear))),
             chan(cfg_default_params(link("R2", 150.0, 50.0, CurveType::Linear))),
         )
@@ -695,8 +710,10 @@ fn all_specs() -> Vec<TraceSpec> {
     out.push(
         SpecBuilder::new(
             "range-degenerate-equal",
-            "range_min == range_max (A: 120..120, B: 0..0). Same max<=min branch as the \
-             inverted case: output pins at the shared value for every input.",
+            "range_min == range_max (A: 120..120, B: 0..0). A zero-width range is a legitimate \
+             way to hold a channel at a constant, so output pins at the shared value for every \
+             input. Unaffected by the transposed-range fix — ordering the endpoints of an \
+             already-equal pair is a no-op, and this trace is byte-identical across it.",
             chan(cfg_default_params(link("L0", 120.0, 120.0, CurveType::Linear))),
             chan(cfg_default_params(link("R2", 0.0, 0.0, CurveType::Linear))),
         )
@@ -933,15 +950,14 @@ fn all_specs() -> Vec<TraceSpec> {
 
     // --- No-input behaviour ----------------------------------------------
     //
-    // `no_input_decay_ms` is 3000, NOT the app default of 1000, and that is
-    // deliberate. The staleness gate is `age_ms > 1000` while decay progress
-    // is `(age_ms / decay_ms).min(1.0)`, so with `decay_ms <= 1000` the Decay
-    // branch is only ever entered once progress has already reached 1.0 —
-    // Decay is then mathematically incapable of returning anything but zero
-    // and its trace is byte-identical to Zero's. At 3000 the ramp is visible.
-    // That interaction is a production defect worth knowing about; these
-    // fixtures are configured to demonstrate the intended behaviour rather
-    // than to enshrine the degenerate case.
+    // `no_input_decay_ms` is 3000, NOT the app default of 1000, purely so the
+    // ramp spans enough ticks to be read by eye. Decay now works at any
+    // `decay_ms`: it measures progress from the instant the axis goes stale
+    // (`STALENESS_THRESHOLD_MS`), not from the last sample, so the ramp starts
+    // at the held value and reaches zero `decay_ms` later. Timing it from the
+    // sample — as this used to — spent the whole staleness threshold before
+    // Decay was even reachable, which made it an exact alias for Zero at the
+    // shipped default of 1000.
     //
     // Every linked parameter carries `staticValue` so the Default branch has
     // something distinguishable to fall back to. Note the semantic trap this
@@ -965,8 +981,8 @@ fn all_specs() -> Vec<TraceSpec> {
         (
             NoInputBehavior::Decay,
             "decay",
-            "the value ramps toward zero as age_ms/no_input_decay_ms, reaching zero at \
-             age_ms = 3000 (tick 34 here)",
+            "the value leaves the held level at the staleness threshold and ramps to zero over \
+             no_input_decay_ms from there, reaching zero at age_ms = 1000 + 3000 (tick 43 here)",
         ),
         (
             NoInputBehavior::Default,
@@ -986,9 +1002,9 @@ fn all_specs() -> Vec<TraceSpec> {
             SpecBuilder::new(
                 &format!("no-input-{}", slug),
                 &format!(
-                    "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, \
-                     crossing the resolver's 1000ms staleness threshold at tick 14 and \
-                     no_input_decay_ms at tick 34. With no_input_behavior = {}, {}. Frequency \
+                    "Input on L0 and L1 stops after 300ms and the trace runs on for another 4.2s, \
+                     crossing the resolver's 1000ms staleness threshold at tick 14 and the end of \
+                     the decay window at tick 43. With no_input_behavior = {}, {}. Frequency \
                      (linked to L1) shows the effect directly in the B0 period bytes. Intensity \
                      is on the ENGINE path, which holds via the V2 ramp regardless of this \
                      setting — no_input_behavior does not reach it, so the intensity bytes are \
@@ -1003,7 +1019,10 @@ fn all_specs() -> Vec<TraceSpec> {
                 }),
                 chan(cfg_default_params(int_b)),
             )
-            .ticks(36)
+            // 46 ticks so the trace outlasts the decay window (which now ends
+            // at STALENESS_THRESHOLD_MS + DECAY_MS after the last sample) and
+            // shows the floor being held afterwards.
+            .ticks(46)
             .no_input(behavior, DECAY_MS)
             .sweep(0, 50, 7, "L0", 0.2, 0.8)
             .sweep(0, 50, 7, "L1", 0.1, 0.9)

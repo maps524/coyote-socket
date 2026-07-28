@@ -266,6 +266,19 @@ impl V2ChannelState {
         interpolated.round().clamp(0.0, 200.0) as u8
     }
 
+    /// True while a ramp with a non-zero duration still has interpolation
+    /// left to do at `timestamp`.
+    ///
+    /// Instant commands — every T-Code command without an `I<ms>` suffix —
+    /// go through `set_target(.., 0, ts)`, which leaves
+    /// `ramp_end_time == ramp_start_time`. Those can never report as
+    /// ramping, and neither can `Default` or a post-`reset` state. That is
+    /// what lets `Channel::next_raw_values` consult this without changing
+    /// the dispatch for any un-ramped input.
+    pub fn is_ramping_at(&self, timestamp: u64) -> bool {
+        self.ramp_end_time > self.ramp_start_time && timestamp < self.ramp_end_time
+    }
+
     /// Generate 4 values for the next 100ms window
     pub fn get_next_four_values(&self, window_start: u64) -> [u8; 4] {
         [
@@ -1318,23 +1331,36 @@ impl Channel {
         now_ms: u64,
         peak_fill: PeakFillStrategy,
     ) -> [u8; 4] {
+        // While a ramp is in flight the ramp — not the downsampler — is the
+        // authority for this window. `apply_tcode` feeds the downsampler the
+        // commanded *target* at the command's own timestamp, so a window
+        // containing a ramped command would otherwise emit the endpoint of a
+        // ramp that has barely started: `L0999I600` reached full scale on the
+        // very next tick and held it, ~500ms early, and the first three ticks
+        // ran the ramp backwards. The error was always toward more output,
+        // sooner.
+        //
+        // `is_ramping_at` is false for every command without an `I<ms>`
+        // suffix, so un-ramped input keeps the exact dispatch it had before.
+        let ramping = self.v2.is_ramping_at(window_start);
+
         match engine {
             ProcessingEngineType::V2Smooth => {
-                if self.downsampler.has_samples_in_window(window_start, now_ms) {
+                if !ramping && self.downsampler.has_samples_in_window(window_start, now_ms) {
                     self.downsampler.downsample_smooth(window_start, now_ms)
                 } else {
                     self.v2.get_next_four_values(window_start)
                 }
             }
             ProcessingEngineType::V2Balanced => {
-                if self.downsampler.has_samples_in_window(window_start, now_ms) {
+                if !ramping && self.downsampler.has_samples_in_window(window_start, now_ms) {
                     self.downsampler.downsample_balanced(window_start, now_ms)
                 } else {
                     self.v2.get_next_four_values(window_start)
                 }
             }
             ProcessingEngineType::V2Detailed => {
-                if self.downsampler.has_samples_in_window(window_start, now_ms) {
+                if !ramping && self.downsampler.has_samples_in_window(window_start, now_ms) {
                     self.downsampler
                         .downsample_detailed(window_start, now_ms, peak_fill)
                 } else {
@@ -1345,7 +1371,7 @@ impl Channel {
                 // V2Sustained shares V2Dynamic's per-slot oscillation logic.
                 // The "sustained" part is applied later in get_next_waveform_data
                 // by overriding the master intensity with a rolling peak-hold.
-                if self.downsampler.has_samples_in_window(window_start, now_ms) {
+                if !ramping && self.downsampler.has_samples_in_window(window_start, now_ms) {
                     self.downsampler.downsample_dynamic(window_start, now_ms)
                 } else {
                     self.v2.get_next_four_values(window_start)
@@ -1885,7 +1911,8 @@ mod tests {
         let commands = parse_tcode("R2750I1000");
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].axis, "R2");
-        assert!((commands[0].value - 0.25).abs() < 0.01);
+        // `750` normalises by digit count: 750/1000 = 0.75.
+        assert!((commands[0].value - 0.75).abs() < 0.01);
         assert_eq!(commands[0].interval_ms, Some(1000));
     }
 
@@ -2092,6 +2119,156 @@ mod tests {
             .expect("post-transform sample stashed");
         assert!((sample.normalized_pre_range - 0.4).abs() < 1e-9);
         assert!((sample.device_value - 80.0).abs() < 1e-9);
+    }
+
+    /// A ramped command must not reach its target before the ramp does.
+    ///
+    /// `apply_tcode` stores the commanded *target* in the downsampler
+    /// while the V2 ramp stores interpolated positions. The dispatch used
+    /// to prefer the downsampler whenever the window held a sample, so the
+    /// first tick after `L0 -> 1.0 over 600ms` emitted full scale — 500ms
+    /// early — and the following ticks read back *down* off the ramp.
+    #[test]
+    fn ramped_command_does_not_overshoot_to_its_target() {
+        let mut ch = Channel::new(ChannelId::A);
+        let t0 = 1_000_000u64;
+        ch.apply_tcode(1.0, Some(600), t0);
+
+        // Tick at t0+100 samples the ramp over [t0, t0+75] — 0/25/50/75ms
+        // into a 600ms ease, i.e. at most 25/600 of the way to 200.
+        let first = ch.next_raw_values(
+            ProcessingEngineType::V2Sustained,
+            t0,
+            t0 + 100,
+            PeakFillStrategy::Forward,
+        );
+        assert!(
+            first.iter().all(|&v| v <= 25),
+            "first tick of a 600ms ramp should still be near the start, got {:?}",
+            first
+        );
+
+        // The ramp must rise monotonically across the whole 600ms rather
+        // than jumping to the target and falling back.
+        let mut previous = 0u8;
+        for tick in 1..=6u64 {
+            let window_start = t0 + (tick - 1) * 100;
+            let values = ch.next_raw_values(
+                ProcessingEngineType::V2Sustained,
+                window_start,
+                window_start + 100,
+                PeakFillStrategy::Forward,
+            );
+            for &v in &values {
+                assert!(
+                    v >= previous,
+                    "ramp went backwards at window_start {}: {:?} after {}",
+                    window_start,
+                    values,
+                    previous
+                );
+                previous = v;
+            }
+            if tick < 6 {
+                assert!(
+                    values.iter().all(|&v| v < 200),
+                    "reached full scale at window_start {} ({}ms into a 600ms ramp): {:?}",
+                    window_start,
+                    window_start - t0,
+                    values
+                );
+            }
+        }
+
+        // Once the ramp is done the target stands.
+        let settled = ch.next_raw_values(
+            ProcessingEngineType::V2Sustained,
+            t0 + 700,
+            t0 + 800,
+            PeakFillStrategy::Forward,
+        );
+        assert_eq!(settled, [200; 4], "ramp should have completed by t0+700");
+    }
+
+    /// The dispatch change must be invisible to commands without an
+    /// `I<ms>` suffix. Those set `ramp_end_time == ramp_start_time`, so
+    /// `is_ramping_at` is always false and the downsampler still wins —
+    /// proved here by comparing against the downsampler directly.
+    #[test]
+    fn unramped_commands_keep_the_downsampler_dispatch() {
+        let t0 = 1_000_000u64;
+        let feed = |ch: &mut Channel| {
+            ch.apply_tcode(0.10, None, t0 + 10);
+            ch.apply_tcode(0.90, Some(0), t0 + 35);
+            ch.apply_tcode(0.30, None, t0 + 60);
+            ch.apply_tcode(0.75, None, t0 + 85);
+        };
+
+        for engine in [
+            ProcessingEngineType::V2Smooth,
+            ProcessingEngineType::V2Balanced,
+            ProcessingEngineType::V2Detailed,
+            ProcessingEngineType::V2Dynamic,
+            ProcessingEngineType::V2Sustained,
+        ] {
+            let mut ch = Channel::new(ChannelId::A);
+            feed(&mut ch);
+            assert!(
+                !ch.v2.is_ramping_at(t0),
+                "{:?}: un-ramped input must never report as ramping",
+                engine
+            );
+            let dispatched = ch.next_raw_values(engine, t0, t0 + 100, PeakFillStrategy::Forward);
+
+            let mut reference = Channel::new(ChannelId::A);
+            feed(&mut reference);
+            let expected = match engine {
+                ProcessingEngineType::V2Smooth => {
+                    reference.downsampler.downsample_smooth(t0, t0 + 100)
+                }
+                ProcessingEngineType::V2Balanced => {
+                    reference.downsampler.downsample_balanced(t0, t0 + 100)
+                }
+                ProcessingEngineType::V2Detailed => reference.downsampler.downsample_detailed(
+                    t0,
+                    t0 + 100,
+                    PeakFillStrategy::Forward,
+                ),
+                _ => reference.downsampler.downsample_dynamic(t0, t0 + 100),
+            };
+            assert_eq!(
+                dispatched, expected,
+                "{:?}: un-ramped dispatch diverged from the downsampler",
+                engine
+            );
+        }
+    }
+
+    #[test]
+    fn is_ramping_at_is_false_for_instant_and_fresh_state() {
+        let t0 = 1_000_000u64;
+
+        let fresh = V2ChannelState::default();
+        assert!(!fresh.is_ramping_at(0));
+        assert!(!fresh.is_ramping_at(t0));
+
+        let mut instant = V2ChannelState::default();
+        instant.set_target(200, 0, t0);
+        assert!(!instant.is_ramping_at(t0));
+        assert!(!instant.is_ramping_at(t0 + 1));
+
+        let mut ramped = V2ChannelState::default();
+        ramped.set_target(200, 600, t0);
+        assert!(ramped.is_ramping_at(t0));
+        assert!(ramped.is_ramping_at(t0 + 599));
+        assert!(
+            !ramped.is_ramping_at(t0 + 600),
+            "a completed ramp is not in flight"
+        );
+
+        // A subsequent instant command ends the ramp's authority.
+        ramped.set_target(50, 0, t0 + 100);
+        assert!(!ramped.is_ramping_at(t0 + 100));
     }
 
     #[test]

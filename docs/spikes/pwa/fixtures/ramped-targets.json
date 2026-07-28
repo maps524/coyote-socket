@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "ramped-targets",
-  "description": "Sparse T-Code commands carrying I<ms> ramp durations (600ms up, 500ms down) with long gaps between them. Note the two-stage response this produces: the tick right after a command sees the sample in its downsampler window and jumps straight to the target, then subsequent ticks fall back to V2's ramp interpolation evaluated over [now-100, now-25] and read LOWER. That non-monotonic shape is real production behaviour of the engine dispatch in Channel::next_raw_values, not an artefact.",
+  "description": "Sparse T-Code commands carrying I<ms> ramp durations (600ms up, 500ms down) with long gaps between them. While a ramp is in flight `Channel::next_raw_values` reads V2's interpolation over [now-100, now-25] and ignores the downsampler, so each ramp is monotonic from the tick the command lands to the tick it completes. This is the fixture that catches a port dispatching the other way round. `apply_tcode` also stores the commanded TARGET in the downsampler; letting that win — as the engine used to — put the tick containing the command straight at the endpoint and then read back DOWN off the ramp for the next two. A 600ms ease to full reached full scale after ~100ms and held it, and the ramp ran inverted for three ticks. The same dispatch dropped ramp-downs early: +1500 read [0,0,0,0] 400ms before the commanded stop instead of [200,190,180,170].",
   "engine": "v2-sustained",
   "peak_fill": "forward",
   "no_input_behavior": "hold",
@@ -558,19 +558,19 @@
     {
       "t": 1000300,
       "channel_a": {
-        "raw_intensity": 200,
-        "scaled_intensity": 200,
+        "raw_intensity": 25,
+        "scaled_intensity": 25,
         "waveform_intensity": [
-          100,
-          100,
-          100,
+          0,
+          32,
+          68,
           100
         ],
         "raw_values": [
-          200,
-          200,
-          200,
-          200
+          0,
+          8,
+          17,
+          25
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -619,19 +619,19 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 120,
-        "scaled_intensity": 120,
+        "raw_intensity": 11,
+        "scaled_intensity": 11,
         "waveform_intensity": [
-          100,
-          100,
-          100,
+          0,
+          37,
+          73,
           100
         ],
         "raw_values": [
-          120,
-          120,
-          120,
-          120
+          0,
+          4,
+          8,
+          11
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -682,31 +682,31 @@
       "b0": [
         176,
         15,
-        200,
-        120,
+        25,
+        11,
         10,
         10,
         10,
         10,
+        0,
+        32,
+        68,
         100,
-        100,
-        100,
-        100,
         10,
         10,
         10,
         10,
-        100,
-        100,
-        100,
+        0,
+        37,
+        73,
         100
       ]
     },
     {
       "t": 1000400,
       "channel_a": {
-        "raw_intensity": 200,
-        "scaled_intensity": 200,
+        "raw_intensity": 58,
+        "scaled_intensity": 58,
         "waveform_intensity": [
           57,
           73,
@@ -766,8 +766,8 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 120,
-        "scaled_intensity": 120,
+        "raw_intensity": 26,
+        "scaled_intensity": 26,
         "waveform_intensity": [
           58,
           74,
@@ -829,8 +829,8 @@
       "b0": [
         176,
         15,
-        200,
-        120,
+        58,
+        26,
         10,
         10,
         10,
@@ -852,8 +852,8 @@
     {
       "t": 1000500,
       "channel_a": {
-        "raw_intensity": 200,
-        "scaled_intensity": 200,
+        "raw_intensity": 92,
+        "scaled_intensity": 92,
         "waveform_intensity": [
           73,
           82,
@@ -913,8 +913,8 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 120,
-        "scaled_intensity": 120,
+        "raw_intensity": 41,
+        "scaled_intensity": 41,
         "waveform_intensity": [
           74,
           83,
@@ -976,8 +976,8 @@
       "b0": [
         176,
         15,
-        200,
-        120,
+        92,
+        41,
         10,
         10,
         10,
@@ -2326,15 +2326,15 @@
         "scaled_intensity": 200,
         "waveform_intensity": [
           100,
-          100,
-          100,
-          100
+          95,
+          90,
+          85
         ],
         "raw_values": [
-          0,
-          0,
-          0,
-          0
+          200,
+          190,
+          180,
+          170
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -2387,15 +2387,15 @@
         "scaled_intensity": 120,
         "waveform_intensity": [
           100,
-          100,
-          100,
-          100
+          95,
+          90,
+          84
         ],
         "raw_values": [
-          40,
-          40,
-          40,
-          40
+          120,
+          113,
+          107,
+          100
         ],
         "frequency_hz": 100.0,
         "freq_slots_hz": [
@@ -2453,17 +2453,17 @@
         10,
         10,
         100,
-        100,
-        100,
-        100,
+        95,
+        90,
+        85,
         10,
         10,
         10,
         10,
         100,
-        100,
-        100,
-        100
+        95,
+        90,
+        84
       ]
     },
     {
@@ -2616,8 +2616,8 @@
     {
       "t": 1001700,
       "channel_a": {
-        "raw_intensity": 160,
-        "scaled_intensity": 160,
+        "raw_intensity": 200,
+        "scaled_intensity": 200,
         "waveform_intensity": [
           100,
           92,
@@ -2677,8 +2677,8 @@
         }
       },
       "channel_b": {
-        "raw_intensity": 93,
-        "scaled_intensity": 93,
+        "raw_intensity": 120,
+        "scaled_intensity": 120,
         "waveform_intensity": [
           100,
           90,
@@ -2740,8 +2740,8 @@
       "b0": [
         176,
         15,
-        160,
-        93,
+        200,
+        120,
         10,
         10,
         10,

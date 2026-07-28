@@ -57,13 +57,13 @@
     {
       "name": "ramped-targets",
       "file": "ramped-targets.json",
-      "description": "Sparse T-Code commands carrying I<ms> ramp durations (600ms up, 500ms down) with long gaps between them. Note the two-stage response this produces: the tick right after a command sees the sample in its downsampler window and jumps straight to the target, then subsequent ticks fall back to V2's ramp interpolation evaluated over [now-100, now-25] and read LOWER. That non-monotonic shape is real production behaviour of the engine dispatch in Channel::next_raw_values, not an artefact.",
+      "description": "Sparse T-Code commands carrying I<ms> ramp durations (600ms up, 500ms down) with long gaps between them. While a ramp is in flight `Channel::next_raw_values` reads V2's interpolation over [now-100, now-25] and ignores the downsampler, so each ramp is monotonic from the tick the command lands to the tick it completes. This is the fixture that catches a port dispatching the other way round. `apply_tcode` also stores the commanded TARGET in the downsampler; letting that win — as the engine used to — put the tick containing the command straight at the endpoint and then read back DOWN off the ramp for the next two. A 600ms ease to full reached full scale after ~100ms and held it, and the ramp ran inverted for three ticks. The same dispatch dropped ramp-downs early: +1500 read [0,0,0,0] 400ms before the commanded stop instead of [200,190,180,170].",
       "tick_count": 24
     },
     {
       "name": "ramp-retarget-midflight",
       "file": "ramp-retarget-midflight.json",
-      "description": "A new ramped target arrives while the previous ramp is still in flight, exercising `ramp_start_value = self.get_value_at(timestamp)` in V2ChannelState::set_target against a partially-completed ramp. A: 0 -> 1.0 over 800ms, retargeted to 0.3 over 400ms at +600ms (mid-ramp), then to 0.9 over 600ms. B: the same pattern with an inverse curve and shorter ramps. Two re-anchor mistakes are worth distinguishing. Anchoring from the PREVIOUS TARGET is caught only here — no other trace retargets mid-ramp. Anchoring from `current_value` is caught here AND by ramped-targets, where `current_value` is only ever assigned for the `duration_ms == 0` command at t=0 and so stays 0 for the whole trace; that port ramps 0 -> 0 at +1400 and emits flat zeros where the fixture has [160,150,140,130]. Note also tick +600: all four sample points fall at or before the new `ramp_start_time`, so `get_value_at` returns the anchor itself and the re-anchor value appears in the output as a bare [100,100,100,100]. A port that computes it wrong fails both on that literal and on the interpolated ramp that follows.",
+      "description": "A new ramped target arrives while the previous ramp is still in flight, exercising `ramp_start_value = self.get_value_at(timestamp)` in V2ChannelState::set_target against a partially-completed ramp. A: 0 -> 1.0 over 800ms, retargeted to 0.3 over 400ms at +600ms (mid-ramp), then to 0.9 over 600ms. B: the same pattern with an inverse curve and shorter ramps. Two re-anchor mistakes are worth distinguishing. Anchoring from the PREVIOUS TARGET is caught only here — no other trace retargets mid-ramp. Anchoring from `current_value` is caught here AND by ramped-targets, where `current_value` is only ever assigned for the `duration_ms == 0` command at t=0 and so stays 0 for the whole trace; that port ramps 0 -> 0 at +1400 and emits flat zeros where the fixture has [160,150,140,130]. Note also tick +600: all four sample points fall at or before the new `ramp_start_time`, so `get_value_at` returns the anchor itself and the re-anchor value appears in the output as a bare [100,100,100,100]. A port that computes it wrong fails both on that literal and on the interpolated ramp that follows. Tick +700 is the retarget's own overshoot check: the new target's sample sits in that window's downsampler, and a port that prefers the downsampler over an in-flight ramp emits a flat [60,60,60,60] — the endpoint of a 400ms ease, 300ms early — where the ramp gives [100,98,95,93].",
       "tick_count": 24
     },
     {
@@ -81,13 +81,13 @@
     {
       "name": "range-inverted",
       "file": "range-inverted.json",
-      "description": "range_min > range_max on both channels (A: 200..0, B: 150..50). device.rs's scale_intensity returns `min` verbatim whenever max <= min, so the intensity byte pins at range_min regardless of input — an inverted range does NOT invert the output. The resolver's own lerp does honour the inversion, which is visible in `resolved.intensity`; that divergence is real production behaviour on the engine path and a port must reproduce it.",
+      "description": "range_min > range_max on both channels (A: 200..0, B: 150..50). A transposed range is treated as a data-entry mistake, not a request to invert: both device.rs::scale_intensity and ParameterLinkConfig::ordered_range sort the endpoints, so 200..0 behaves exactly like 0..200 and 150..50 like 50..150. Output rises with input and a resting axis sits at the BOTTOM of the range. This fixture previously captured the opposite: scale_intensity returned `min` verbatim whenever max <= min, so channel A emitted 200 — device maximum — from the first tick with the axis at rest, and did so for every input. Use `curve: inverse` to invert; transposing the endpoints does not.",
       "tick_count": 10
     },
     {
       "name": "range-degenerate-equal",
       "file": "range-degenerate-equal.json",
-      "description": "range_min == range_max (A: 120..120, B: 0..0). Same max<=min branch as the inverted case: output pins at the shared value for every input.",
+      "description": "range_min == range_max (A: 120..120, B: 0..0). A zero-width range is a legitimate way to hold a channel at a constant, so output pins at the shared value for every input. Unaffected by the transposed-range fix — ordering the endpoints of an already-equal pair is a no-op, and this trace is byte-identical across it.",
       "tick_count": 8
     },
     {
@@ -153,26 +153,26 @@
     {
       "name": "no-input-hold",
       "file": "no-input-hold.json",
-      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = hold, the last value is held indefinitely. Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
-      "tick_count": 36
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 4.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and the end of the decay window at tick 43. With no_input_behavior = hold, the last value is held indefinitely. Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 46
     },
     {
       "name": "no-input-zero",
       "file": "no-input-zero.json",
-      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = zero, the value snaps to zero the moment the axis goes stale. Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
-      "tick_count": 36
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 4.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and the end of the decay window at tick 43. With no_input_behavior = zero, the value snaps to zero the moment the axis goes stale. Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 46
     },
     {
       "name": "no-input-decay",
       "file": "no-input-decay.json",
-      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = decay, the value ramps toward zero as age_ms/no_input_decay_ms, reaching zero at age_ms = 3000 (tick 34 here). Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
-      "tick_count": 36
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 4.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and the end of the decay window at tick 43. With no_input_behavior = decay, the value leaves the held level at the staleness threshold and ramps to zero over no_input_decay_ms from there, reaching zero at age_ms = 1000 + 3000 (tick 43 here). Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 46
     },
     {
       "name": "no-input-default",
       "file": "no-input-default.json",
-      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 3.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and no_input_decay_ms at tick 34. With no_input_behavior = default, the value falls back to the link's staticValue (0.75 pre-curve on the frequency link, so 150.25 Hz). Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
-      "tick_count": 36
+      "description": "Input on L0 and L1 stops after 300ms and the trace runs on for another 4.2s, crossing the resolver's 1000ms staleness threshold at tick 14 and the end of the decay window at tick 43. With no_input_behavior = default, the value falls back to the link's staticValue (0.75 pre-curve on the frequency link, so 150.25 Hz). Frequency (linked to L1) shows the effect directly in the B0 period bytes. Intensity is on the ENGINE path, which holds via the V2 ramp regardless of this setting — no_input_behavior does not reach it, so the intensity bytes are identical across all four of these fixtures by design.",
+      "tick_count": 46
     },
     {
       "name": "no-input-at-all",
