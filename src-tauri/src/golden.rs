@@ -97,8 +97,18 @@ struct TraceSpec {
     no_input_behavior: NoInputBehavior,
     no_input_decay_ms: u32,
     start_time_ms: u64,
+    /// Nominal tick period. Authoritative only when `tick_offsets_ms` is
+    /// absent; either way every `ticks[i].t` carries the absolute instant, so
+    /// a consumer should read that rather than recomputing the grid.
     tick_interval_ms: u64,
     tick_count: usize,
+    /// Explicit, irregular tick timeline as offsets from `start_time_ms`.
+    /// Present only on traces that need a stalled device loop — a real
+    /// 10Hz loop can miss deadlines when the app is backgrounded, and some
+    /// engine behaviour is only reachable through a gap. Omitted (and the
+    /// uniform grid used) for every other fixture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tick_offsets_ms: Option<Vec<u64>>,
     channel_a: ChannelSpec,
     channel_b: ChannelSpec,
     inputs: Vec<InputEvent>,
@@ -191,11 +201,18 @@ fn run_trace(spec: &TraceSpec) -> Vec<TickRecord> {
     inputs.sort_by_key(|e| e.t);
     let mut next_input = 0usize;
 
-    let mut ticks = Vec::with_capacity(spec.tick_count);
+    // Explicit timeline when the trace needs a stalled loop, uniform grid
+    // otherwise.
+    let tick_times: Vec<u64> = match &spec.tick_offsets_ms {
+        Some(offsets) => offsets.iter().map(|o| spec.start_time_ms + o).collect(),
+        None => (0..spec.tick_count)
+            .map(|i| spec.start_time_ms + i as u64 * spec.tick_interval_ms)
+            .collect(),
+    };
 
-    for i in 0..spec.tick_count {
-        let now = spec.start_time_ms + i as u64 * spec.tick_interval_ms;
+    let mut ticks = Vec::with_capacity(tick_times.len());
 
+    for now in tick_times {
         while next_input < inputs.len() && inputs[next_input].t <= now {
             let e = &inputs[next_input];
             state.process_command(&TCodeCommand {
@@ -351,6 +368,7 @@ impl SpecBuilder {
                 start_time_ms: TRACE_EPOCH_MS,
                 tick_interval_ms: TICK_MS,
                 tick_count: 10,
+                tick_offsets_ms: None,
                 channel_a: a,
                 channel_b: b,
                 inputs: Vec::new(),
@@ -360,6 +378,14 @@ impl SpecBuilder {
 
     fn ticks(mut self, n: usize) -> Self {
         self.spec.tick_count = n;
+        self
+    }
+
+    /// Drive the trace from an explicit, irregular tick timeline instead of
+    /// the uniform grid — for simulating a device loop that missed deadlines.
+    fn tick_offsets(mut self, offsets: Vec<u64>) -> Self {
+        self.spec.tick_count = offsets.len();
+        self.spec.tick_offsets_ms = Some(offsets);
         self
     }
 
@@ -921,6 +947,105 @@ fn all_specs() -> Vec<TraceSpec> {
         .sweep(0, 25, 45, "L0", 0.0, 1.0)
         .build()
     });
+
+    out.push({
+        // Intensity carries the composition on A, frequency on B. Those are
+        // the two INDEPENDENT sites where midpoint and curve compose:
+        // `Channel::apply_tcode` (intensity only — it never touches the
+        // resolver) and `resolve_link_at_time` (frequency and both balances).
+        // A port can get one right and the other wrong.
+        let mut a_int = link("L0", 0.0, 200.0, CurveType::Inverse);
+        a_int.midpoint = Some(true);
+        let mut b_freq = link("L0", 1.0, 200.0, CurveType::Inverse);
+        b_freq.midpoint = Some(true);
+
+        SpecBuilder::new(
+            "midpoint-composed-with-inverse",
+            "Pins the ORDER of midpoint and curve, which `midpoint-distance-from-center` cannot: \
+             it uses a linear curve, where the two orders are indistinguishable. \
+             \
+             Composed with `inverse` they disagree everywhere, and maximally. Because midpoint is \
+             symmetric about 0.5 (|x-0.5|*2 == |(1-x)-0.5|*2), swapping the order does not perturb \
+             the output — it INVERTS it. Correct is midpoint-then-curve: 1 - |x-0.5|*2, a tent \
+             peaking at x=0.5. Swapped is curve-then-midpoint, which collapses to |x-0.5|*2, a V. \
+             \
+             The safety case is the axis at rest. x=0.0 -> correct gives normalized 0.0, so \
+             B0[2] = 0 and B0[12..16] = 240 (1 Hz): silence. Swapped gives 1.0, so B0[2] = 200 \
+             and the period bytes drop to 5 (200 Hz): FULL DEVICE OUTPUT WITH THE AXIS PARKED AT \
+             ZERO. That is the failure this whole fixture corpus exists to prevent. \
+             \
+             The trace parks at 0.0 for four ticks, then steps 0.5 (tent peak, 200 vs 0 — the \
+             mirror-image divergence), 0.1, 0.9, 1.0, and returns to rest at 0.0. \
+             \
+             NOTE x=0.25 and x=0.75 are the blind spot: midpoint maps both to 0.5, and 1-0.5 == \
+             0.5, so the two orders agree there. They are included to document that, not to \
+             discriminate. Every OTHER value in this trace is load-bearing — do not reduce it to \
+             the quarter points.",
+            chan(cfg_default_params(a_int)),
+            chan(ChannelConfig {
+                frequency: b_freq,
+                frequency_balance: stat(128.0),
+                intensity_balance: stat(128.0),
+                // Static so B's intensity byte stays constant and the
+                // frequency bytes carry the resolver-site signal alone.
+                intensity: stat(100.0),
+            }),
+        )
+        .ticks(23)
+        .at(0, "L0", 0.0)
+        .at(400, "L0", 0.5)
+        .at(700, "L0", 0.25)
+        .at(1000, "L0", 0.1)
+        .at(1300, "L0", 0.75)
+        .at(1500, "L0", 0.9)
+        .at(1700, "L0", 1.0)
+        .at(1900, "L0", 0.0)
+        .build()
+    });
+
+    // --- Stalled device loop / intensity replay floor ---------------------
+    out.push(
+        SpecBuilder::new(
+            "tick-gap-replay-floor",
+            "The only trace with a non-uniform tick timeline (see `tick_offsets_ms`). A real 10Hz \
+             loop misses deadlines when the tab or app is backgrounded, and one engine behaviour \
+             is reachable only through such a gap: INTENSITY_REPLAY_FLOOR_MS. \
+             \
+             `replay_pending_intensity_samples` feeds axis samples in (after, now], where \
+             `after = max(watermark, now - 200)`. The 200ms floor stops a stale watermark \
+             dragging ancient history into the engine after a stall. Every other fixture ticks \
+             every 100ms, so the watermark is never more than 100ms behind and the floor never \
+             binds — it is unobservable across the entire rest of the corpus. \
+             \
+             Ticks run 0,100,200,300 then JUMP to 900 (a 600ms stall) before resuming at 100ms. \
+             Both channels sit at 0.3 (intensity 60) before the stall, and both receive one \
+             sample during it, placed on opposite sides of the floor: \
+             \
+             A's arrives at +350 — that is 550ms before the resumed tick, outside the 200ms \
+             floor, so it is DROPPED and A must still read 60 at +900. \
+             B's arrives at +750 — 150ms before, inside the floor, so it IS replayed and B must \
+             read 180 at +900. \
+             \
+             Same stall, same timeline, opposite outcomes, so the fixture pins the floor's \
+             BOUNDARY rather than merely its existence. A port with no floor replays both and \
+             emits 200 for A (the axis was commanded to 1.0). A port that discards everything \
+             after any gap replays neither and emits 60 for B. Both mistakes are caught, and A's \
+             is the dangerous direction. \
+             \
+             Input resumes normally at +1150 so the trace also shows the channel is not wedged \
+             by the drop.",
+            chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
+            chan(cfg_default_params(link("R2", 0.0, 200.0, CurveType::Linear))),
+        )
+        .tick_offsets(vec![0, 100, 200, 300, 900, 1000, 1100, 1200, 1300, 1400])
+        .at(0, "L0", 0.3)
+        .at(0, "R2", 0.3)
+        .at(350, "L0", 1.0)
+        .at(750, "R2", 0.9)
+        .at(1150, "L0", 0.8)
+        .at(1150, "R2", 0.5)
+        .build(),
+    );
 
     // --- Channel independence --------------------------------------------
     out.push(

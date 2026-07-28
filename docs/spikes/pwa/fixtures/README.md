@@ -38,7 +38,9 @@ Per the V1 scope doc, the fixtures cover only what V1 ships:
 | `frequency-period-boundaries` | Every branch boundary of `convert_period` |
 | `frequency-per-slot-sweep` | 25ms-cadence frequency input → four different period bytes in one frame |
 | `balance-linked` | Frequency/intensity balance linked across 0..255 |
-| `midpoint-distance-from-center` | `midpoint` on vs off, same input |
+| `midpoint-distance-from-center` | `midpoint` on vs off, same input (linear curve — order-blind) |
+| `midpoint-composed-with-inverse` | The **order** of midpoint and curve, at both sites — see below |
+| `tick-gap-replay-floor` | A stalled device loop; the only trace that reaches `INTENSITY_REPLAY_FLOOR_MS` |
 | `channels-independent` | Fully asymmetric channels driven by unrelated input |
 | `no-input-{hold,zero,decay,default}` | Input stops, trace crosses the staleness threshold and the full decay window |
 | `no-input-at-all` | Everything linked, zero input events — cold start |
@@ -281,6 +283,68 @@ Two re-anchor mistakes are worth telling apart:
 | anchor from the **previous target** | `ramp-retarget-midflight` only — nothing else retargets mid-ramp |
 | anchor from **`current_value`** | both fixtures. `current_value` is assigned only when `duration_ms == 0`, so in `ramped-targets` it stays 0 for the whole trace; that port ramps 0→0 at +1400 and emits flat zeros where the fixture has `[200,190,180,170]` at +1500 |
 
+## Midpoint composed with the inverse curve
+
+`midpoint-distance-from-center` uses a **linear** curve, where midpoint-then-curve and
+curve-then-midpoint give identical output. It cannot catch a transposed order.
+`midpoint-composed-with-inverse` exists to catch it, and the consequence of getting it wrong is
+the worst in the corpus.
+
+Midpoint is symmetric about 0.5 — `|x-0.5|*2 == |(1-x)-0.5|*2` — so composing it with `inverse`
+in the wrong order does not perturb the output, it **inverts** it:
+
+| Order | Formula | Shape |
+|---|---|---|
+| correct — midpoint, then curve | `1 - |x-0.5|*2` | tent, peaking at x=0.5 |
+| swapped — curve, then midpoint | `|x-0.5|*2` | V, zero at x=0.5 |
+
+With the axis **parked at 0**, correct gives normalized 0.0 → `B0[2] = 0` and period bytes 240
+(1 Hz): silence. Swapped gives 1.0 → `B0[2] = 200` and period bytes 5 (200 Hz): **full device
+output from a resting axis.**
+
+**This is two independent sites, and a port can get one right and the other wrong:**
+
+| Site | Covers | Carried by |
+|---|---|---|
+| `Channel::apply_tcode` | intensity only — it never touches the resolver | channel **A**, in `B0[2]` |
+| `resolve_link_at_time` | frequency and both balances | channel **B**, in `B0[12..16]` |
+
+**x=0.25 and x=0.75 are a blind spot** — midpoint maps both to 0.5, and `1 - 0.5 == 0.5`, so the
+two orders agree there. They appear in the trace to document that fact. Every other value is
+load-bearing; do not reduce the trace to the quarter points.
+
+## A stalled device loop
+
+`tick-gap-replay-floor` is the only fixture whose ticks are not evenly spaced. It carries an
+explicit `tick_offsets_ms` array; when that key is present it is authoritative and
+`tick_interval_ms` is nominal. In all cases `ticks[i].t` is the absolute instant — read that and
+you never have to care which form a fixture uses.
+
+`replay_pending_intensity_samples` feeds axis samples in `(after, now]`, where
+`after = max(watermark, now - 200)`. That 200 ms floor stops a stale watermark dragging ancient
+history into the engine after a stall. Every other fixture ticks every 100 ms, so the watermark
+is never more than 100 ms behind and **the floor never binds anywhere else in the corpus.**
+
+Ticks run 0, 100, 200, 300, then jump to **900** — a 600 ms stall — before resuming. Both
+channels sit at 0.3 (intensity 60) beforehand, and each receives one sample during the stall,
+placed on opposite sides of the floor:
+
+| Channel | Sample at | Distance from the resumed tick | Outcome | Reads at +900 |
+|---|---|---|---|---|
+| A | +350 | 550 ms — outside the floor | **dropped** | 60 (unchanged) |
+| B | +750 | 150 ms — inside the floor | **replayed** | 180 |
+
+Same stall, same timeline, opposite outcomes, so this pins the floor's *boundary* rather than
+merely its existence:
+
+- a port with **no floor** replays both and emits **200** for A, because the axis was commanded
+  to 1.0 during the stall — the dangerous direction, and it needs no misconfiguration to reach,
+  just a backgrounded tab;
+- a port that **discards everything after a gap** replays neither and emits 60 for B;
+- a port with the constant transcribed as 100 also drops B's sample.
+
+Input resumes at +1150 so the trace also shows the channel is not wedged by the drop.
+
 ## The oscillation threshold
 
 `downsample_dynamic` switches algorithm outright on a per-window spread of 40 device units:
@@ -324,10 +388,11 @@ still passes, and tests nothing.
   the shipped default of `decay_ms = 1000`. These fixtures use 3000 only so the ramp spans
   enough ticks to read by eye; the trace runs to +4500 so the floor is visible after decay
   completes at +4300.
-- **`delay_ms` is never set**, so the delayed-replay path in
-  `replay_pending_intensity_samples` — including the `INTENSITY_REPLAY_FLOOR_MS = 200` bound
-  on how far a stale watermark can reach back — runs only in its zero-delay form. Per-parameter
-  input delay is out of V1 scope.
+- **`delay_ms` is never set**, so `replay_pending_intensity_samples` runs only in its
+  zero-delay form: `upper` is always `now`, never `now - delay_ms`. Per-parameter input delay
+  is out of V1 scope. Note this is now the *only* untested part of that function —
+  `tick-gap-replay-floor` covers `INTENSITY_REPLAY_FLOOR_MS`, which was previously
+  unobservable too.
 - **The peak-hold buffer's prune cutoff is untested.** `IntensityPeakHold::observe` prunes at
   1000ms while every read uses a 200ms window, so the prune is unobservable: a port that
   prunes at the read window instead agrees on every fixture here. Only a read window longer
