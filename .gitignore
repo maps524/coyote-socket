@@ -44,6 +44,7 @@ yarn-error.log*
 # Rust
 **/*.rs.bk
 Cargo.lock
+bridge/target/
 
 nul
 .playwright-mcp/

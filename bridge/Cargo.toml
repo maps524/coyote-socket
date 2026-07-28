@@ -1,0 +1,29 @@
+[package]
+name = "coyote-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Spike: bridge between a VR player's TCP remote-control port and a phone browser"
+publish = false
+
+[dependencies]
+futures = "0.3.33"
+qrcode = { version = "0.14.1", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util", "fs"] }
+tokio-tungstenite = "0.21"
+
+# Tray is optional so the bridge can be built for a headless home server —
+# which the spike record says is where it will actually live. `--no-default-features`
+# drops the windowing stack entirely.
+tao = { version = "0.35.3", optional = true }
+tray-icon = { version = "0.24.2", optional = true }
+
+[dev-dependencies]
+# `test-util` gives the paused clock, so keepalive-cadence tests assert
+# instead of sleeping.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "test-util"] }
+
+[features]
+default = ["tray"]
+tray = ["dep:tao", "dep:tray-icon"]
