@@ -38,7 +38,9 @@ Per the V1 scope doc, the fixtures cover only what V1 ships:
 | `frequency-period-boundaries` | Every branch boundary of `convert_period` |
 | `frequency-per-slot-sweep` | 25ms-cadence frequency input → four different period bytes in one frame |
 | `balance-linked` | Frequency/intensity balance linked across 0..255 |
-| `midpoint-distance-from-center` | `midpoint` on vs off, same input |
+| `midpoint-distance-from-center` | `midpoint` on vs off, same input (linear curve — order-blind) |
+| `midpoint-composed-with-inverse` | The **order** of midpoint and curve, at both sites — see below |
+| `tick-gap-replay-floor` | A stalled device loop; the only trace that reaches `INTENSITY_REPLAY_FLOOR_MS` |
 | `channels-independent` | Fully asymmetric channels driven by unrelated input |
 | `no-input-{hold,zero,decay,default}` | Input stops, trace crosses the staleness threshold and the full decay window |
 | `no-input-at-all` | Everything linked, zero input events — cold start |
@@ -281,6 +283,100 @@ Two re-anchor mistakes are worth telling apart:
 | anchor from the **previous target** | `ramp-retarget-midflight` only — nothing else retargets mid-ramp |
 | anchor from **`current_value`** | both fixtures. `current_value` is assigned only when `duration_ms == 0`, so in `ramped-targets` it stays 0 for the whole trace; that port ramps 0→0 at +1400 and emits flat zeros where the fixture has `[200,190,180,170]` at +1500 |
 
+## Midpoint composed with the inverse curve
+
+`midpoint-distance-from-center` uses a **linear** curve, where midpoint-then-curve and
+curve-then-midpoint give identical output. It cannot catch a transposed order.
+`midpoint-composed-with-inverse` exists to catch it, and the consequence of getting it wrong is
+the worst in the corpus.
+
+Midpoint is symmetric about 0.5 — `|x-0.5|*2 == |(1-x)-0.5|*2` — so composing it with `inverse`
+in the wrong order does not perturb the output, it **inverts** it:
+
+| Order | Formula | Shape |
+|---|---|---|
+| correct — midpoint, then curve | `1 - |x-0.5|*2` | tent, peaking at x=0.5 |
+| swapped — curve, then midpoint | `|x-0.5|*2` | V, zero at x=0.5 |
+
+With the axis **parked at 0**, correct gives normalized 0.0 → `B0[2] = 0` and period bytes 240
+(1 Hz): silence. Swapped gives 1.0 → `B0[2] = 200` and period bytes 5 (200 Hz): **full device
+output from a resting axis.**
+
+**This is two independent sites, and a port can get one right and the other wrong:**
+
+| Site | Covers | Carried by |
+|---|---|---|
+| `Channel::apply_tcode` | intensity only — it never touches the resolver | channel **A**, in `B0[2]` |
+| `resolve_link_at_time` | frequency and both balances | channel **B**, in `B0[12..16]` |
+
+**x=0.25 and x=0.75 are a blind spot** — midpoint maps both to 0.5, and `1 - 0.5 == 0.5`, so the
+two orders agree there. They appear in the trace to document that fact. Every other value is
+load-bearing; do not reduce the trace to the quarter points. Regenerating under the swap leaves
+1 of 23 ticks identical, and nothing load-bearing sits on it.
+
+**Do not read tick 0 alone.** The resolver half shows immediately, but a sample landing exactly
+on a tick instant is replayed before that tick runs while sitting outside its `[now-100, now)`
+downsampler window, so the engine reports it from the *next* tick. Under the swap `B0[2]` is
+still 0 at tick 0 and 200 from tick 1 onward.
+
+## A stalled device loop
+
+`tick-gap-replay-floor` is the only fixture whose ticks are not evenly spaced. It carries an
+explicit `tick_offsets_ms` array; when that key is present it is authoritative and
+`tick_interval_ms` is nominal. In all cases `ticks[i].t` is the absolute instant — read that and
+you never have to care which form a fixture uses.
+
+`replay_pending_intensity_samples` feeds axis samples in `(after, now]`, where
+`after = max(watermark, now - 200)`. That 200 ms floor stops a stale watermark dragging ancient
+history into the engine after a stall. Every other fixture ticks every 100 ms, so the watermark
+is never more than 100 ms behind and **the floor never binds anywhere else in the corpus.**
+
+The trace contains **two** 600 ms stalls, each delivering one sample per channel on opposite
+sides of the floor. A sample is replayed iff its timestamp is strictly greater than
+`resumed_tick - FLOOR`, so each placement constrains `FLOOR` from one side:
+
+| Stall | Ticks | Channel | Sample | Distance out | Outcome | Constrains |
+|---|---|---|---|---|---|---|
+| 1 | 0,100,200,300 → **900** | A | +350 | 550 ms | dropped, holds 60 | `FLOOR ≤ 550` |
+| 1 | | B | +750 | 150 ms | replayed, reads 180 | `FLOOR > 150` |
+| 2 | 1200,1300 → **1900** | A | +1695 | 205 ms | dropped, holds 160 | `FLOOR ≤ 205` |
+| 2 | | B | +1705 | 195 ms | replayed, reads 30 | `FLOOR > 195` |
+
+### What this establishes, precisely
+
+The four constraints together admit **`FLOOR ∈ [196, 205]`**. This fixture does **not** pin 200 —
+it brackets it to a 10 ms window and pins that a floor exists in that window. Verified by
+sweeping the constant and regenerating:
+
+| `INTENSITY_REPLAY_FLOOR_MS` | Fixture |
+|---|---|
+| 100, 150, 151, 160, 195 | changed |
+| **196, 200, 205** | **identical** |
+| 206, 300, 500, 550, 551, 600, 10⁶ | changed |
+
+Stall 2 exists because stall 1 alone admitted `[151, 550]` — wide enough that a port
+implementing **500 ms** passed byte-for-byte while, on hardware, replaying a 450 ms-old sample
+after a background stall.
+
+**Stall 1 no longer constrains the bracket, and should be kept anyway.** Stall 2's constraints
+strictly imply stall 1's, so only two of the four rows above are active — deleting stall 1's two
+samples and re-sweeping leaves the window at exactly `[196, 205]` (measured, not assumed). Do
+not read the four-row table as four binding constraints. It stays because: its samples still
+change the emitted bytes, so removing it is not free; it is the larger-magnitude demonstration
+of the no-floor mistake (A reads **200**, from an axis commanded to 1.0, against stall 2's 190
+from 0.95); it carries the +1150 recovery; and it establishes the watermark history stall 2
+builds on. Delete it and you lose those four things — you do not lose the bracket.
+
+The mistakes it catches: **no floor at all** (replays everything — A reads 200 after stall 1,
+from an axis commanded to 1.0 mid-stall); **discarding everything after a gap** (replays nothing
+— B reads 60); and the constant transcribed as 100, 150, 500 or anything else outside the
+bracket. Note the error direction on every one of these is *more* output than the Rust produces,
+which is why the bracket was worth narrowing rather than merely noting.
+
+Input resumes at +1150 and +2050 so the trace also shows neither channel is wedged by a drop.
+The +2050 value is deliberately above A's held 160, so the 200 ms peak-hold cannot mask the
+recovery.
+
 ## The oscillation threshold
 
 `downsample_dynamic` switches algorithm outright on a per-window spread of 40 device units:
@@ -324,11 +420,32 @@ still passes, and tests nothing.
   the shipped default of `decay_ms = 1000`. These fixtures use 3000 only so the ramp spans
   enough ticks to read by eye; the trace runs to +4500 so the floor is visible after decay
   completes at +4300.
-- **`delay_ms` is never set**, so the delayed-replay path in
-  `replay_pending_intensity_samples` — including the `INTENSITY_REPLAY_FLOOR_MS = 200` bound
-  on how far a stale watermark can reach back — runs only in its zero-delay form. Per-parameter
-  input delay is out of V1 scope.
+- **`delay_ms` is never set**, so `replay_pending_intensity_samples` runs only in its
+  zero-delay form: `upper` is always `now`, never `now - delay_ms`. Per-parameter input delay
+  is out of V1 scope. Note this is now the *only* untested part of that function —
+  `tick-gap-replay-floor` covers `INTENSITY_REPLAY_FLOOR_MS`, which was previously
+  unobservable too.
 - **The peak-hold buffer's prune cutoff is untested.** `IntensityPeakHold::observe` prunes at
   1000ms while every read uses a 200ms window, so the prune is unobservable: a port that
   prunes at the read window instead agrees on every fixture here. Only a read window longer
   than 200ms would distinguish them, and nothing reads longer.
+- **`INTENSITY_REPLAY_FLOOR_MS` is bracketed to `[196, 205]`, not pinned.** Any value in that
+  window is byte-identical across the corpus. See "A stalled device loop" above for the sweep.
+- **Tick timing is barely varied — unexplored space, but no known risk.** 26 fixtures tick at a
+  uniform 100 ms; one uses `tick_offsets_ms`, with two gaps of the same 600 ms size. Jitter,
+  sub-100 ms ticks, gaps of other sizes, and back-to-back stalls are all uncovered, and a real
+  loop under load produces all of them. To be clear about the status though:
+  `replay_pending_intensity_samples` is the only gap-sensitive path anyone has identified, and
+  it is now bracketed, so this is a coverage gap rather than a suspected defect. Treat it as
+  somewhere to look if a timing bug ever surfaces, not as a known hazard.
+- **`apply_midpoint` does not clamp its input while `apply_curve` does** — but this is safe, and
+  the asymmetry is not reachable as a defect. Checked rather than assumed:
+  `AxisState::update` clamps every bus write to `[0,1]`, so a raw axis value can never leave
+  that interval; `apply_midpoint` is called at exactly two sites (`modulation.rs:482`,
+  `processing.rs:1307`) and both feed `apply_curve` immediately, so its output never escapes
+  unclamped. The one path that can hand it an out-of-range value is
+  `NoInputBehavior::Default` returning a `staticValue` outside `[0,1]` — and even there the two
+  orderings coincide, because midpoint maps everything outside `[0,1]` to `≥ 1` which the
+  downstream clamp folds to 1, while clamping first also yields exactly 1 (`midpoint(0)` and
+  `midpoint(1)` are both 1). A port that adds a defensive clamp inside `applyMidpoint` is
+  therefore provably equivalent, not merely indistinguishable here.

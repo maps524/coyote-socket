@@ -125,6 +125,32 @@ Log format:
 
 Use `log_info!`, `log_warn!`, `log_error!`, `log_debug!` macros in Rust code.
 
+## Do not trust `git diff` through the `rtk` proxy
+
+`rtk` transparently rewrites shell commands, and **`git diff` has been observed returning stale
+output** — a diff whose blob ids matched neither side of the requested range, serving the
+*reverse* of the real change. Read literally, it showed a commit deleting documentation it had
+actually added. That was nearly reported as a serious finding.
+
+`rtk proxy "git diff ..."` is **not** a sufficient workaround; the bad result came from a
+proxied invocation.
+
+**Cheap tell:** if a diff's `index <a>..<b>` blob ids do not match
+`git rev-parse HEAD:<path>`, the diff is stale — discard it.
+
+**Reliable checks**, in order of preference:
+
+1. Read the file in the working tree (`Read`, or `grep` it on disk).
+2. `git show <sha>:<path>` for each side, compared yourself.
+3. `git diff --stat` / `--name-only` for *which* files changed — the file list has not been
+   observed to be wrong, only the hunk content.
+
+Honest status: this has been seen once, by another agent, and a spot-check afterwards returned
+a correct diff — so it is intermittent rather than reproducible on demand. Treat every
+diff-derived claim as unverified until confirmed against the working tree. This matters most
+for `docs/spikes/pwa/fixtures/`, where the whole point is that the committed bytes are the
+contract.
+
 ## Related Documentation
 
 - `docs/plans/` - Feature implementation plans
