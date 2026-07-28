@@ -162,10 +162,7 @@ pub async fn stop_device_loop() {
 /// Send a zero command to immediately stop all output
 /// This is called when pausing to ensure device stops immediately
 pub async fn send_zero_command() {
-    use crate::protocol::{
-        convert_period, frequency_to_period, generate_b0_command, generate_v2_intensity,
-        generate_v2_waveform,
-    };
+    use crate::protocol::{generate_v2_intensity, generate_v2_waveform};
 
     // Get Bluetooth manager
     let manager = match get_bluetooth_manager().await {
@@ -182,31 +179,7 @@ pub async fn send_zero_command() {
 
     match device_version {
         DeviceVersion::V3 => {
-            // Generate a B0 command with zero intensity
-            let period = frequency_to_period(100.0);
-            let period_converted = convert_period(period);
-
-            let command = generate_b0_command(
-                3,
-                3, // interpretation methods
-                0, // zero intensity channel A
-                0, // zero intensity channel B
-                [
-                    period_converted,
-                    period_converted,
-                    period_converted,
-                    period_converted,
-                ],
-                [0, 0, 0, 0], // zero waveform
-                [
-                    period_converted,
-                    period_converted,
-                    period_converted,
-                    period_converted,
-                ],
-                [0, 0, 0, 0], // zero waveform
-            );
-
+            let command = build_zero_b0_frame();
             let _ = manager_guard.write_command(&command).await;
         }
         DeviceVersion::V2 => {
@@ -471,19 +444,12 @@ async fn send_device_update() -> Result<(), String> {
             }
 
             // Per-slot period arrays from sub-100ms freq resolution.
-            let slot_periods_a: [u8; 4] =
-                std::array::from_fn(|i| convert_period(frequency_to_period(freq_slots_a_hz[i])));
-            let slot_periods_b: [u8; 4] =
-                std::array::from_fn(|i| convert_period(frequency_to_period(freq_slots_b_hz[i])));
-
-            let command = generate_b0_command(
-                3,
-                3,
+            let command = build_b0_frame(
                 scaled_a,
                 scaled_b,
-                slot_periods_a,
+                freq_slots_a_hz,
+                freq_slots_b_hz,
                 waveform_a.waveform_intensity,
-                slot_periods_b,
                 waveform_b.waveform_intensity,
             );
 
@@ -591,8 +557,47 @@ async fn send_device_update() -> Result<(), String> {
     }
 }
 
+/// Assemble the V3 B0 frame for one 10Hz tick.
+///
+/// Pure over its arguments — the per-slot Hz values are converted to device
+/// periods here, then handed to `generate_b0_command` with the fixed
+/// interpretation bytes the app always sends (3, 3). Extracted from
+/// `send_device_update` so the golden-trace generator emits bytes from the
+/// same assembly the BLE writer uses, rather than a parallel copy.
+pub(crate) fn build_b0_frame(
+    scaled_a: u8,
+    scaled_b: u8,
+    freq_slots_a_hz: [f64; 4],
+    freq_slots_b_hz: [f64; 4],
+    waveform_a_intensity: [u8; 4],
+    waveform_b_intensity: [u8; 4],
+) -> Vec<u8> {
+    let slot_periods_a: [u8; 4] =
+        std::array::from_fn(|i| convert_period(frequency_to_period(freq_slots_a_hz[i])));
+    let slot_periods_b: [u8; 4] =
+        std::array::from_fn(|i| convert_period(frequency_to_period(freq_slots_b_hz[i])));
+
+    generate_b0_command(
+        3,
+        3,
+        scaled_a,
+        scaled_b,
+        slot_periods_a,
+        waveform_a_intensity,
+        slot_periods_b,
+        waveform_b_intensity,
+    )
+}
+
+/// The all-stop B0 frame: zero intensity on both channels, zero waveform,
+/// 100Hz period in every slot. Sent on pause (`send_zero_command`).
+pub(crate) fn build_zero_b0_frame() -> Vec<u8> {
+    let p = convert_period(frequency_to_period(100.0));
+    generate_b0_command(3, 3, 0, 0, [p; 4], [0; 4], [p; 4], [0; 4])
+}
+
 /// Scale intensity based on range limits
-fn scale_intensity(intensity: u8, min: u8, max: u8) -> u8 {
+pub(crate) fn scale_intensity(intensity: u8, min: u8, max: u8) -> u8 {
     if max <= min {
         return min;
     }

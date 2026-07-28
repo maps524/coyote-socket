@@ -11,6 +11,11 @@ mod buttplug;
 mod device;
 mod diagnostic;
 mod gamepad;
+/// Golden-trace fixture generator. Test-only: it drives the production signal
+/// path over fixed input traces and writes `docs/spikes/pwa/fixtures/*.json`
+/// so a TypeScript port can be verified byte-for-byte against this engine.
+#[cfg(test)]
+mod golden;
 mod logging;
 mod lovense;
 pub(crate) mod input_bus;

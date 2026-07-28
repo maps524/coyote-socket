@@ -155,7 +155,7 @@ pub async fn get_resolved_channel_params() -> (
 /// helper — no global state — so production
 /// (`get_resolved_channel_params`) and the in-crate tests share one
 /// body. Caller holds whatever lock guards the bus + channel.
-fn build_channel_snapshot(
+pub(crate) fn build_channel_snapshot(
     ch: &mut crate::processing::Channel,
     bus: crate::input_bus::InputBusSnapshot<'_>,
     no_input_behavior: &NoInputBehavior,
@@ -307,8 +307,6 @@ fn build_channel_snapshot(
 /// the protocol range 1-200 Hz. Callers feed these through
 /// `frequency_to_period` → `convert_period` for the device command.
 pub async fn get_per_slot_frequencies(window_start: u64) -> ([f64; 4], [f64; 4]) {
-    use crate::modulation::resolve_link_at_time;
-
     let state = get_processing_state().await;
     let mut state_guard = state.write().await;
     let now = current_time_ms();
@@ -316,35 +314,50 @@ pub async fn get_per_slot_frequencies(window_start: u64) -> ([f64; 4], [f64; 4])
     let decay_ms = state_guard.no_input_decay_ms;
 
     let (bus, channels) = state_guard.split_bus_and_channels();
-
-    let resolve_slots = |ch: &mut crate::processing::Channel| -> [f64; 4] {
-        let mut out = [0.0f64; 4];
-        for i in 0..4 {
-            let target = window_start + (i as u64) * 25;
-            let sample = resolve_link_at_time(
-                &ch.config.frequency,
-                &mut ch.link_runtime.frequency,
-                bus,
-                &no_input_behavior,
-                now,
-                decay_ms,
-                target,
-            );
-            out[i] = sample.device_value.clamp(1.0, 200.0);
-            // The latest sub-slot (closest to `now`) is authoritative for
-            // the telemetry snapshot and the V2 scalar frequency. Stash it
-            // so `build_channel_snapshot` consumes it instead of calling
-            // `resolve_link` again — a second, out-of-order advance of a
-            // stateful frequency transform's state.
-            if i == 3 {
-                ch.last_frequency_sample = Some(sample);
-            }
-        }
-        out
-    };
-
     let [a, b] = channels;
-    (resolve_slots(a), resolve_slots(b))
+    (
+        resolve_slot_frequencies(a, bus, &no_input_behavior, decay_ms, now, window_start),
+        resolve_slot_frequencies(b, bus, &no_input_behavior, decay_ms, now, window_start),
+    )
+}
+
+/// Per-channel body of `get_per_slot_frequencies`. Pure over its arguments —
+/// no globals, no clock read — so the golden-trace generator can drive the
+/// same code the device tick runs. Also stashes the latest sub-slot sample on
+/// the channel for `build_channel_snapshot` to consume.
+pub(crate) fn resolve_slot_frequencies(
+    ch: &mut crate::processing::Channel,
+    bus: crate::input_bus::InputBusSnapshot<'_>,
+    no_input_behavior: &NoInputBehavior,
+    decay_ms: u32,
+    now: u64,
+    window_start: u64,
+) -> [f64; 4] {
+    use crate::modulation::resolve_link_at_time;
+
+    let mut out = [0.0f64; 4];
+    for i in 0..4 {
+        let target = window_start + (i as u64) * 25;
+        let sample = resolve_link_at_time(
+            &ch.config.frequency,
+            &mut ch.link_runtime.frequency,
+            bus,
+            no_input_behavior,
+            now,
+            decay_ms,
+            target,
+        );
+        out[i] = sample.device_value.clamp(1.0, 200.0);
+        // The latest sub-slot (closest to `now`) is authoritative for
+        // the telemetry snapshot and the V2 scalar frequency. Stash it
+        // so `build_channel_snapshot` consumes it instead of calling
+        // `resolve_link` again — a second, out-of-order advance of a
+        // stateful frequency transform's state.
+        if i == 3 {
+            ch.last_frequency_sample = Some(sample);
+        }
+    }
+    out
 }
 
 /// Read every axis value with no-input behavior applied. Stale axes
