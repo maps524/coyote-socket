@@ -1,0 +1,857 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>CoyoteSocket — Browser Capability Probe</title>
+<style>
+  :root {
+    --bg: #0F1318; --card: #171C23; --card2: #1E242D;
+    --line: #2B333D; --ink: #E6EAF0; --ink2: #A3AEBC; --ink3: #6F7B8A;
+    --ok: #5CB88F; --warn: #D6A63F; --bad: #E07A78; --accent: #E08B4B;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #EEF1F4; --card: #FFFFFF; --card2: #F4F6F9;
+      --line: #D5DBE2; --ink: #131820; --ink2: #4A5460; --ink3: #7A8592;
+      --ok: #21705A; --warn: #8A6210; --bad: #983331; --accent: #A9541A;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: env(safe-area-inset-top) 0 3rem;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 1rem; display: grid; gap: 0.85rem; }
+  h1 { font-size: 1.05rem; margin: 0.6rem 0 0; letter-spacing: -0.01em; }
+  .sub { color: var(--ink3); font-size: 0.8rem; margin: 0.2rem 0 0.4rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem; }
+  .card h2 {
+    font: 600 0.68rem/1 var(--mono); letter-spacing: 0.13em; text-transform: uppercase;
+    color: var(--ink3); margin: 0 0 0.75rem;
+  }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; padding: 0.3rem 0; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .row .k { color: var(--ink2); font-size: 0.85rem; }
+  .row .v { font-family: var(--mono); font-size: 0.8rem; text-align: right; word-break: break-word; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  button {
+    font: 600 0.9rem/1 system-ui, sans-serif; color: var(--ink);
+    background: var(--card2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 0.75rem 1rem; cursor: pointer;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  }
+  button:active { background: var(--line); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #12161B; }
+  @media (prefers-color-scheme: light) { button.primary { color: #FFF; } }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btns { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+  .btns .full { grid-column: 1 / -1; }
+  .note {
+    font-size: 0.78rem; color: var(--ink3); margin: 0.7rem 0 0;
+    border-left: 2px solid var(--line); padding-left: 0.6rem;
+  }
+  #log {
+    font-family: var(--mono); font-size: 0.72rem; line-height: 1.5;
+    background: var(--card2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 0.6rem; height: 190px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+    color: var(--ink2);
+  }
+  #log b { color: var(--ink3); font-weight: 400; }
+  .pads { display: grid; gap: 0.4rem; }
+  .bar { height: 4px; background: var(--card2); border-radius: 2px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); width: 0; }
+  #qr {
+    background: #FFF; padding: 10px; border-radius: 8px; width: max-content;
+    margin: 0 auto; line-height: 0;
+  }
+  #qr svg { display: block; width: 190px; height: 190px; image-rendering: pixelated; }
+  #banner {
+    position: sticky; top: 0; z-index: 5;
+    font-family: var(--mono); font-size: 0.76rem; line-height: 1.35;
+    background: var(--card2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 0.6rem 0.75rem; color: var(--ink2);
+    word-break: break-word;
+  }
+  #banner.busy { border-color: var(--warn); color: var(--warn); }
+  #banner.good { border-color: var(--ok); color: var(--ok); }
+  #banner.fail { border-color: var(--bad); color: var(--bad); }
+  #qrurl {
+    font-family: var(--mono); font-size: 0.7rem; color: var(--ink3);
+    word-break: break-all; text-align: center; margin: 0.6rem 0 0;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>CoyoteSocket — browser capability probe <span style="font:400 0.7rem var(--mono);color:var(--ink3)">build 14</span></h1>
+  <p class="sub">Answers the Phase&nbsp;0 questions. Safety: this page only ever transmits the app's zero-output command <code style="font-family:var(--mono)">B0 0F 00 00 …</code>. There is no intensity control here and none can be reached.</p>
+
+  <div id="banner">idle</div>
+
+  <div class="card">
+    <h2>0 · This page</h2>
+    <div id="qr"></div>
+    <p id="qrurl"></p>
+    <p class="note">Scan from another device to open this exact page there. On a desktop, point your phone's camera at it.</p>
+  </div>
+
+  <div class="card">
+    <h2>1 · Environment</h2>
+    <div id="env"></div>
+  </div>
+
+  <div class="card">
+    <h2>2 · Bluetooth</h2>
+    <div class="btns">
+      <button class="primary full" id="btn-connect">Connect to Coyote</button>
+      <button class="full" id="btn-scan-all">Scan all devices (diagnostic)</button>
+      <button class="full" id="btn-bare">Bare scan — no options at all</button>
+      <button id="btn-battery" disabled>Read battery</button>
+      <button id="btn-disconnect" disabled>Disconnect</button>
+    </div>
+    <div id="ble" style="margin-top:0.75rem"></div>
+    <p class="note">This page must be a top-level document on an origin you control. Inside an iframe that does not grant <code style="font-family:var(--mono)">allow="bluetooth"</code>, <code style="font-family:var(--mono)">navigator.bluetooth</code> still exists but every call hangs forever.<br><br>Empty list? Don't pair the Coyote in your phone's Bluetooth settings — a BLE peripheral held by the OS stops advertising.</p>
+  </div>
+
+  <div class="card">
+    <h2>3 · 10 Hz loop</h2>
+    <div class="btns">
+      <button class="primary" id="btn-start" disabled>Start</button>
+      <button id="btn-stop" disabled>Stop</button>
+    </div>
+    <div id="loop" style="margin-top:0.75rem"></div>
+    <p class="note">Start it, then lock the screen, switch apps, pull the notification shade. Come back and read the miss count. That is the single most important number on this page.</p>
+  </div>
+
+  <div class="card">
+    <h2>4 · Wake lock &amp; visibility</h2>
+    <div class="btns">
+      <button class="primary" id="btn-wake">Request wake lock</button>
+      <button id="btn-wake-off" disabled>Release</button>
+    </div>
+    <div id="wake" style="margin-top:0.75rem"></div>
+  </div>
+
+  <div class="card">
+    <h2>4b · Keep-awake experiments</h2>
+    <div class="btns">
+      <button class="primary" id="btn-vid">Play silent video</button>
+      <button id="btn-vid-off" disabled>Stop video</button>
+      <button class="primary" id="btn-aud">Play silent audio</button>
+      <button id="btn-aud-off" disabled>Stop audio</button>
+    </div>
+    <video id="keepvid" muted playsinline loop
+           style="width:64px;height:36px;opacity:0.25;margin-top:0.7rem;border-radius:4px"></video>
+    <div id="keep" style="margin-top:0.5rem"></div>
+    <p class="note"><b>Video</b> is the classic anti-auto-lock trick — iOS keeps the screen on while video plays. Start it, then leave the phone untouched past your auto-lock timeout and see if it stays awake.<br><br><b>Audio</b> tests something different: whether looping audio keeps the page running <i>after</i> the screen locks. Watch "ticks while hidden" below.</p>
+  </div>
+
+  <div class="card">
+    <h2>5 · Gamepad</h2>
+    <div id="pads" class="pads"></div>
+    <p class="note">Triggers are buttons 6 and 7 in the standard mapping, and carry an analog <code style="font-family:var(--mono)">.value</code> from 0 to 1. Squeeze them slowly — if intermediate values appear, the label turns green and counts how many distinct levels were seen.</p>
+  </div>
+
+  <div class="card">
+    <h2>6 · Log</h2>
+    <div id="log"></div>
+    <div class="btns" style="margin-top:0.6rem">
+      <button id="btn-copy">Copy results</button>
+      <button id="btn-clear">Clear log</button>
+    </div>
+  </div>
+
+</div>
+
+<!--QRLIB--><script>
+(function () {
+  'use strict';
+
+  // ---------- 0. QR of this page's own URL ----------
+  (function selfQr() {
+    const url = location.href;
+    const urlEl = document.getElementById('qrurl');
+    if (urlEl) urlEl.textContent = url;
+    const box = document.getElementById('qr');
+    if (!box) return;
+    if (typeof qrcode !== 'function') { box.remove(); return; }
+    try {
+      const q = qrcode(0, 'M');
+      q.addData(url);
+      q.make();
+      box.innerHTML = q.createSvgTag({ cellSize: 4, margin: 1, scalable: true });
+    } catch (e) {
+      box.remove();
+    }
+  })();
+
+  // ---------- DG-LAB Coyote V3 ----------
+  const SVC_V3   = '0000180c-0000-1000-8000-00805f9b34fb';
+  const CHR_WRITE= '0000150a-0000-1000-8000-00805f9b34fb';
+  const CHR_BATT = '00001500-0000-1000-8000-00805f9b34fb';
+  const CHR_NOTIFY= '0000150b-0000-1000-8000-00805f9b34fb';
+  const SVC_V2   = '955a180b-0fe2-f5aa-a094-84b8d4f3e8ad';
+
+  // Web Bluetooth will not reveal a service unless it was declared up front,
+  // so ask for everything the Coyote might plausibly expose.
+  const OPTIONAL = [
+    SVC_V3, SVC_V2,
+    '00001800-0000-1000-8000-00805f9b34fb', // generic access
+    '00001801-0000-1000-8000-00805f9b34fb', // generic attribute
+    '0000180a-0000-1000-8000-00805f9b34fb', // device information
+    '0000180f-0000-1000-8000-00805f9b34fb'  // battery service
+  ];
+
+  // Exact zero-output frame from src-tauri/src/device.rs::send_zero_command.
+  // B0 | interp(3,3)=0x0F | intensityA=0 | intensityB=0 | freqA*4 | ampA*4 | freqB*4 | ampB*4
+  const ZERO = new Uint8Array([
+    0xB0, 0x0F, 0x00, 0x00,
+    10, 10, 10, 10,   0, 0, 0, 0,
+    10, 10, 10, 10,   0, 0, 0, 0
+  ]);
+
+  // Chrome hands back canonical 128-bit lowercase UUIDs. Bluefy returns the
+  // short 16-bit form in uppercase ("150A"). Normalise before comparing, or
+  // every characteristic lookup silently misses.
+  function canon(uuid) {
+    const u = String(uuid).toLowerCase();
+    if (/^[0-9a-f]{4}$/.test(u)) return '0000' + u + '-0000-1000-8000-00805f9b34fb';
+    if (/^[0-9a-f]{8}$/.test(u)) return u + '-0000-1000-8000-00805f9b34fb';
+    return u;
+  }
+
+  const $ = (id) => document.getElementById(id);
+  const logEl = $('log');
+  const lines = [];
+
+  const bannerEl = $('banner');
+
+  // Everything important also lands in the sticky banner — on a phone the log
+  // card is well below the fold and a silent failure looks like nothing at all.
+  function banner(msg, kind) {
+    bannerEl.textContent = msg;
+    bannerEl.className = kind || '';
+  }
+
+  function log(msg, kind) {
+    const t = new Date().toISOString().slice(11, 23);
+    lines.push(t + '  ' + msg);
+    logEl.insertAdjacentHTML('beforeend', '<b>' + t + '</b>  ' + esc(msg) + '\n');
+    logEl.scrollTop = logEl.scrollHeight;
+    if (kind) banner(msg, kind);
+  }
+
+  // A GATT call that never settles is indistinguishable from a dead page.
+  function withTimeout(promise, ms, what) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(what + ' timed out after ' + ms + ' ms')), ms))
+    ]);
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+  }
+  function rows(el, pairs) {
+    el.innerHTML = pairs.map(([k, v, cls]) =>
+      '<div class="row"><span class="k">' + esc(k) + '</span>' +
+      '<span class="v ' + (cls || '') + '">' + esc(v) + '</span></div>'
+    ).join('');
+  }
+  function yn(v) { return v ? ['yes', 'ok'] : ['no', 'bad']; }
+
+  // ---------- 1. environment ----------
+  const env = {
+    secureContext: window.isSecureContext,
+    webBluetooth: !!navigator.bluetooth,
+    wakeLock: !!navigator.wakeLock,
+    gamepad: !!navigator.getGamepads,
+    worker: typeof Worker !== 'undefined',
+    ua: navigator.userAgent
+  };
+  (function renderEnv() {
+    const s = [];
+    const sc = yn(env.secureContext);
+    s.push(['Secure context', sc[0], sc[1]]);
+    const wb = yn(env.webBluetooth);
+    s.push(['navigator.bluetooth', wb[0], wb[1]]);
+    const wl = yn(env.wakeLock);
+    s.push(['navigator.wakeLock', wl[0], wl[1]]);
+    const gp = yn(env.gamepad);
+    s.push(['getGamepads()', gp[0], gp[1]]);
+    const wk = yn(env.worker);
+    s.push(['Web Worker', wk[0], wk[1]]);
+    s.push(['User agent', env.ua.length > 64 ? env.ua.slice(0, 64) + '…' : env.ua]);
+    rows($('env'), s);
+  })();
+
+  // Nothing should fail silently on a phone with no devtools.
+  window.addEventListener('error', (e) => log('uncaught: ' + e.message, 'fail'));
+  window.addEventListener('unhandledrejection', (e) =>
+    log('unhandled rejection: ' + ((e.reason && e.reason.message) || e.reason), 'fail'));
+
+  if (!env.secureContext) log('NOT a secure context — Bluetooth and Gamepad will be unavailable. Serve over HTTPS or localhost.');
+  if (!env.webBluetooth) log('navigator.bluetooth missing. On iOS Safari this is expected — try Bluefy.');
+  log('probe ready');
+
+  // ---------- 2. bluetooth ----------
+  let device = null, server = null, writeChar = null, battChar = null, notifyChar = null;
+  let writeMode = 'unknown';
+
+  const bleState = { connected: false, name: '-', battery: '-' };
+  function renderBle() {
+    rows($('ble'), [
+      ['Status', bleState.connected ? 'connected' : 'disconnected', bleState.connected ? 'ok' : ''],
+      ['Device', bleState.name],
+      ['Write mode', writeMode],
+      ['Battery', bleState.battery]
+    ]);
+  }
+  renderBle();
+
+  // Bluefy is known to treat filters differently from Chrome — a device named
+  // 47L121000 can fail a namePrefix:'47L' match that Chrome honours. Try a
+  // single name filter here; if it comes up empty, use Scan all devices.
+  $('btn-connect').addEventListener('click', function () {
+    return pickAndConnect({
+      filters: [{ namePrefix: '47L' }],
+      optionalServices: OPTIONAL
+    }, 'namePrefix 47L');
+  });
+
+  // Shows every advertising device and connects to whichever you pick, then
+  // enumerates what it actually exposes. This is the path that works when
+  // filtering does not.
+  $('btn-scan-all').addEventListener('click', function () {
+    return pickAndConnect({ acceptAllDevices: true, optionalServices: OPTIONAL }, 'scan-all');
+  });
+
+  // Absolute minimum request. If even this hangs, the browser's chooser is at
+  // fault; if it returns, something in our options list is being rejected.
+  // Without optionalServices no services are reachable, so this only proves
+  // that requestDevice + gatt.connect work at all.
+  $('btn-bare').addEventListener('click', function () {
+    return pickAndConnect({ acceptAllDevices: true }, 'bare');
+  });
+
+  async function pickAndConnect(options, label) {
+    if (!navigator.bluetooth) { log('no Web Bluetooth in this browser'); return; }
+    // requestDevice must be called synchronously inside the click handler —
+    // awaiting anything first can spend the user-activation token and make the
+    // chooser open empty or throw SecurityError.
+    if (navigator.bluetooth.getAvailability) {
+      navigator.bluetooth.getAvailability().then(
+        (a) => log('adapter available: ' + a),
+        (e) => log('getAvailability failed: ' + e.message)
+      );
+    }
+    try {
+      log('requesting device (' + label + ')…', 'busy');
+      // Known failure: if the device is not connectable at the moment you
+      // confirm the chooser, the promise never settles and the page must be
+      // reloaded. Time it out so that state is at least visible.
+      device = await withTimeout(navigator.bluetooth.requestDevice(options), 45000,
+        'requestDevice() — chooser confirmed but never returned');
+      log('picked: ' + (device.name || '(unnamed)') + ' id=' + device.id, 'busy');
+      device.addEventListener('gattserverdisconnected', function () {
+        bleState.connected = false; writeChar = null; battChar = null; notifyChar = null;
+        stopLoop('device disconnected');
+        renderBle(); setButtons();
+        log('gattserverdisconnected');
+      });
+
+      const t0 = performance.now();
+      log('connecting to GATT server…', 'busy');
+      server = await withTimeout(device.gatt.connect(), 20000, 'gatt.connect()');
+      log('GATT connected in ' + Math.round(performance.now() - t0) + ' ms', 'busy');
+
+      // Enumerate everything reachable rather than assuming the V3 layout —
+      // this is what tells us whether the device matches src-tauri's UUIDs.
+      let services = [];
+      try {
+        log('enumerating services…', 'busy');
+        services = await withTimeout(server.getPrimaryServices(), 15000, 'getPrimaryServices()');
+        log('services exposed: ' + services.length, 'busy');
+      } catch (e) {
+        log('getPrimaryServices failed: ' + e.message + ' — trying V3 directly');
+        try {
+          services = [await withTimeout(server.getPrimaryService(SVC_V3), 15000, 'getPrimaryService(180c)')];
+        } catch (e2) { log('V3 service absent: ' + e2.message); }
+      }
+
+      for (const svc of services) {
+        log('service ' + svc.uuid);
+        let chars = [];
+        try { chars = await svc.getCharacteristics(); }
+        catch (e) { log('   characteristics unreadable: ' + e.message); continue; }
+        for (const ch of chars) {
+          const p = ch.properties;
+          const flags = [
+            p.read && 'read', p.write && 'write',
+            p.writeWithoutResponse && 'writeNoResp',
+            p.notify && 'notify', p.indicate && 'indicate'
+          ].filter(Boolean).join(',');
+          log('   char ' + ch.uuid + '  [' + flags + ']');
+          if (canon(ch.uuid) === CHR_WRITE) {
+            writeChar = ch;
+            writeMode = p.writeWithoutResponse ? 'writeWithoutResponse' : 'write (with response)';
+          }
+          if (canon(ch.uuid) === CHR_BATT) battChar = ch;
+          if (canon(ch.uuid) === CHR_NOTIFY) notifyChar = ch;
+        }
+      }
+
+      // 150B is the device's own notify channel. Inbound packets can only
+      // arrive over a live link, so counting them while hidden is the
+      // strongest available evidence that backgrounding really works.
+      if (notifyChar) {
+        try {
+          await notifyChar.startNotifications();
+          notifyChar.addEventListener('characteristicvaluechanged', function () {
+            stats.notifs++;
+            if (document.visibilityState === 'hidden') stats.hiddenNotifs++;
+          });
+          log('subscribed to device notifications on 150B');
+        } catch (e) { log('could not subscribe to 150B: ' + e.message); }
+      }
+
+      if (writeChar) log('MATCH — V3 instruction characteristic present, ' + writeMode, 'good');
+      else log('no 0000150a characteristic found — this device does not speak the V3 protocol we expect', 'fail');
+
+      bleState.connected = true;
+      bleState.name = device.name || '(unnamed)';
+      renderBle(); setButtons();
+    } catch (e) {
+      log('connect failed: ' + (e.name || 'Error') + ' — ' + e.message, 'fail');
+      if (/never returned/.test(e.message)) {
+        log('The chooser found the device but the pick never completed. This happens when the');
+        log('device is not connectable at the moment you confirm. Try, in order:');
+        log('  1. iOS Settings > Bluetooth > forget 47L… — a bonded device is held by the OS');
+        log('  2. force-quit Bluefy from the app switcher, reopen, reload this page');
+        log('  3. power-cycle the Coyote, make sure the DG-LAB app is closed');
+      }
+      if (e.name === 'NotFoundError') {
+        log('NotFoundError means you cancelled, or nothing matched. If the list was empty:');
+        log('  1. forget the Coyote in iOS Bluetooth settings — pairing there stops it advertising');
+        log('  2. check Settings > Bluefy > Bluetooth is allowed');
+        log('  3. close the DG-LAB app, power-cycle the Coyote, retry');
+      }
+    }
+  }
+
+  $('btn-battery').addEventListener('click', async function () {
+    if (!battChar) { log('no battery characteristic'); return; }
+    try {
+      const v = await battChar.readValue();
+      bleState.battery = v.getUint8(0) + '%';
+      log('battery = ' + bleState.battery);
+      renderBle();
+    } catch (e) { log('battery read failed: ' + e.message); }
+  });
+
+  $('btn-disconnect').addEventListener('click', function () {
+    stopLoop('manual disconnect');
+    if (device && device.gatt.connected) device.gatt.disconnect();
+  });
+
+  function setButtons() {
+    $('btn-battery').disabled = !battChar;
+    $('btn-disconnect').disabled = !bleState.connected;
+    $('btn-start').disabled = !bleState.connected || running;
+    $('btn-stop').disabled = !running;
+  }
+
+  // ---------- 3. 10 Hz loop ----------
+  const PERIOD = 100;
+  let running = false, worker = null, fallbackTimer = null;
+  let lastTick = 0;
+  const stats = {
+    ticks: 0, writes: 0, errors: 0, misses: 0, worst: 0, intervals: [],
+    startedAt: 0, driver: '-',
+    // Ticks that fire while document.visibilityState === 'hidden' are the whole
+    // question: can this run at all with the screen off?
+    hiddenTicks: 0, hiddenWorst: 0,
+    // A tick firing proves the timer survived. It does not prove the BLE write
+    // landed — iOS can keep JS running while refusing GATT traffic.
+    hiddenWrites: 0, hiddenErrors: 0,
+    // writeWithoutResponse is fire-and-forget: it resolves once queued locally
+    // and never confirms delivery. Reads and notifications need a real round
+    // trip, so only these prove the radio link is actually alive.
+    reads: 0, readFails: 0, hiddenReads: 0, hiddenReadFails: 0,
+    notifs: 0, hiddenNotifs: 0
+  };
+
+  function renderLoop() {
+    const iv = stats.intervals;
+    let p50 = '-', p95 = '-';
+    if (iv.length) {
+      const s = iv.slice().sort(function (a, b) { return a - b; });
+      p50 = s[Math.floor(s.length * 0.5)].toFixed(0) + ' ms';
+      p95 = s[Math.floor(s.length * 0.95)].toFixed(0) + ' ms';
+    }
+    const secs = stats.startedAt ? (performance.now() - stats.startedAt) / 1000 : 0;
+    rows($('loop'), [
+      ['Driver', stats.driver],
+      ['Running', running ? 'yes' : 'no', running ? 'ok' : ''],
+      ['Elapsed', secs.toFixed(0) + ' s'],
+      ['Ticks', String(stats.ticks)],
+      ['Writes ok', String(stats.writes)],
+      ['Write errors', String(stats.errors), stats.errors ? 'bad' : ''],
+      ['Missed ticks (>150ms)', String(stats.misses), stats.misses ? 'warn' : 'ok'],
+      ['Worst gap', stats.worst.toFixed(0) + ' ms', stats.worst > 1000 ? 'bad' : (stats.worst > 250 ? 'warn' : 'ok')],
+      ['Interval p50 / p95', p50 + ' / ' + p95]
+    ]);
+  }
+  renderLoop();
+
+  async function onTick() {
+    const now = performance.now();
+    if (lastTick) {
+      const gap = now - lastTick;
+      stats.intervals.push(gap);
+      if (stats.intervals.length > 4000) stats.intervals.shift();
+      if (gap > stats.worst) stats.worst = gap;
+      if (gap > 150) {
+        stats.misses++;
+        if (gap > 1000) log('STALL ' + gap.toFixed(0) + ' ms — a real session would have ramped to zero here');
+      }
+    }
+    lastTick = now;
+    stats.ticks++;
+    const hidden = document.visibilityState === 'hidden';
+    if (hidden) stats.hiddenTicks++;
+
+    if (writeChar) {
+      try {
+        if (writeChar.properties.writeWithoutResponse && writeChar.writeValueWithoutResponse) {
+          await writeChar.writeValueWithoutResponse(ZERO);
+        } else {
+          await writeChar.writeValue(ZERO);
+        }
+        stats.writes++;
+        if (hidden) stats.hiddenWrites++;
+      } catch (e) {
+        stats.errors++;
+        if (hidden) stats.hiddenErrors++;
+        if (stats.errors < 5) log('write error: ' + e.message);
+      }
+    }
+    // Every 5 s, force a real round trip. If these keep succeeding while the
+    // page is hidden, the radio link is genuinely alive — not just the timer.
+    if (battChar && stats.ticks % 50 === 0) {
+      battChar.readValue().then(
+        (v) => {
+          stats.reads++;
+          if (hidden) stats.hiddenReads++;
+          bleState.battery = v.getUint8(0) + '%';
+        },
+        () => { stats.readFails++; if (hidden) stats.hiddenReadFails++; }
+      );
+    }
+
+    if (stats.ticks % 10 === 0) { renderLoop(); renderKeep(); }
+  }
+
+  function startLoop() {
+    if (running) return;
+    running = true;
+    lastTick = 0;
+    stats.ticks = 0; stats.writes = 0; stats.errors = 0; stats.misses = 0;
+    stats.worst = 0; stats.intervals = []; stats.startedAt = performance.now();
+
+    const src = 'let h=null;onmessage=e=>{if(e.data.go){h=setInterval(()=>postMessage(1),e.data.ms)}else{clearInterval(h)}}';
+    try {
+      worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+      worker.onmessage = onTick;
+      worker.postMessage({ go: true, ms: PERIOD });
+      stats.driver = 'Web Worker';
+      log('loop started (Web Worker)');
+    } catch (e) {
+      fallbackTimer = setInterval(onTick, PERIOD);
+      stats.driver = 'main thread (worker failed)';
+      log('Worker unavailable (' + e.message + ') — using main thread');
+    }
+    renderLoop(); setButtons();
+  }
+
+  function stopLoop(why) {
+    if (!running) return;
+    running = false;
+    if (worker) { worker.postMessage({ go: false }); worker.terminate(); worker = null; }
+    if (fallbackTimer) { clearInterval(fallbackTimer); fallbackTimer = null; }
+    log('loop stopped — ' + (why || 'manual') +
+        ' | ticks=' + stats.ticks + ' misses=' + stats.misses + ' worst=' + stats.worst.toFixed(0) + 'ms');
+    renderLoop(); setButtons();
+  }
+
+  $('btn-start').addEventListener('click', startLoop);
+  $('btn-stop').addEventListener('click', function () { stopLoop('manual'); });
+
+  // ---------- 4. wake lock & visibility ----------
+  let sentinel = null;
+  let hiddenAt = 0;
+  const wakeState = { held: false, visibility: document.visibilityState, hides: 0, lost: 0 };
+  function renderWake() {
+    rows($('wake'), [
+      ['Wake lock held', wakeState.held ? 'yes' : 'no', wakeState.held ? 'ok' : ''],
+      ['Visibility', wakeState.visibility, wakeState.visibility === 'visible' ? 'ok' : 'warn'],
+      ['Times hidden', String(wakeState.hides)],
+      ['Locks lost', String(wakeState.lost), wakeState.lost ? 'warn' : '']
+    ]);
+  }
+  renderWake();
+
+  $('btn-wake').addEventListener('click', async function () {
+    if (!navigator.wakeLock) { log('wakeLock API unavailable'); return; }
+    try {
+      sentinel = await navigator.wakeLock.request('screen');
+      wakeState.held = true;
+      log('wake lock acquired');
+      sentinel.addEventListener('release', function () {
+        wakeState.held = false; wakeState.lost++;
+        log('wake lock released by system');
+        renderWake();
+      });
+      $('btn-wake-off').disabled = false;
+      renderWake();
+    } catch (e) { log('wake lock failed: ' + e.name + ' — ' + e.message); }
+  });
+
+  $('btn-wake-off').addEventListener('click', async function () {
+    if (sentinel) { await sentinel.release(); sentinel = null; }
+    wakeState.held = false; $('btn-wake-off').disabled = true; renderWake();
+  });
+
+  document.addEventListener('visibilitychange', function () {
+    wakeState.visibility = document.visibilityState;
+    if (document.visibilityState === 'hidden') {
+      wakeState.hides++;
+      hiddenAt = performance.now();
+      log('page hidden — the shipping app would ramp to zero here; this probe keeps writing so we can measure what survives');
+    } else {
+      if (hiddenAt) {
+        const away = performance.now() - hiddenAt;
+        if (away > stats.hiddenWorst) stats.hiddenWorst = away;
+        log('back after ' + Math.round(away / 1000) + ' s hidden — ' +
+            stats.hiddenTicks + ' ticks, ' + stats.hiddenWrites + ' writes landed, ' +
+            stats.hiddenErrors + ' write errors, ' +
+            stats.hiddenReads + ' round-trip reads ok (' + stats.hiddenReadFails + ' failed), ' +
+            stats.hiddenNotifs + ' notifications',
+            stats.hiddenWrites > 0 ? 'good' : 'fail');
+        hiddenAt = 0;
+        renderKeep();
+      }
+      log('page visible again');
+      if (sentinel === null && wakeState.lost > 0) log('wake lock needs re-requesting after returning');
+    }
+    renderWake();
+  });
+
+  // ---------- 4b. keep-awake experiments ----------
+  // Two different questions:
+  //   video — does playback stop iOS auto-locking the screen? (NoSleep.js trick)
+  //   audio — does looping audio keep the page running once the screen IS locked?
+  const keepState = { video: false, audio: false };
+
+  function renderKeep() {
+    rows($('keep'), [
+      ['Video playing', keepState.video ? 'yes' : 'no', keepState.video ? 'ok' : ''],
+      ['Audio playing', keepState.audio ? 'yes' : 'no', keepState.audio ? 'ok' : ''],
+      ['Ticks while hidden', String(stats.hiddenTicks), stats.hiddenTicks ? 'ok' : ''],
+      ['Writes landed while hidden', String(stats.hiddenWrites), stats.hiddenWrites ? 'ok' : 'bad'],
+      ['Write errors while hidden', String(stats.hiddenErrors), stats.hiddenErrors ? 'bad' : ''],
+      ['Round-trip reads while hidden', stats.hiddenReads + ' ok / ' + stats.hiddenReadFails + ' failed',
+        stats.hiddenReads ? 'ok' : (stats.hiddenReadFails ? 'bad' : '')],
+      ['Device notifications while hidden', String(stats.hiddenNotifs), stats.hiddenNotifs ? 'ok' : ''],
+      ['Longest time hidden', (stats.hiddenWorst / 1000).toFixed(0) + ' s']
+    ]);
+  }
+
+  // A canvas capture stream is a real playing video with no asset to ship.
+  let vidStream = null, vidTimer = null;
+  $('btn-vid').addEventListener('click', async function () {
+    const v = $('keepvid');
+    try {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 36;
+      const cx = c.getContext('2d');
+      let f = 0;
+      // The stream must actually produce frames or iOS treats it as idle.
+      vidTimer = setInterval(function () {
+        f = (f + 1) % 60;
+        cx.fillStyle = 'hsl(24,60%,' + (12 + (f < 30 ? f : 60 - f) / 4) + '%)';
+        cx.fillRect(0, 0, 64, 36);
+      }, 100);
+      vidStream = c.captureStream(10);
+      v.srcObject = vidStream;
+      await v.play();
+      keepState.video = true;
+      log('silent video playing — leave the phone untouched to test auto-lock', 'good');
+      $('btn-vid-off').disabled = false;
+    } catch (e) {
+      log('video keep-awake failed: ' + e.name + ' — ' + e.message, 'fail');
+    }
+    renderKeep();
+  });
+
+  $('btn-vid-off').addEventListener('click', function () {
+    const v = $('keepvid');
+    v.pause(); v.srcObject = null;
+    if (vidTimer) { clearInterval(vidTimer); vidTimer = null; }
+    if (vidStream) { vidStream.getTracks().forEach((t) => t.stop()); vidStream = null; }
+    keepState.video = false;
+    $('btn-vid-off').disabled = true;
+    log('video stopped');
+    renderKeep();
+  });
+
+  // Silent looping WAV, generated rather than shipped.
+  let audioEl = null;
+  function silentWavUrl(seconds) {
+    const rate = 8000, n = rate * seconds;
+    const buf = new ArrayBuffer(44 + n * 2);
+    const dv = new DataView(buf);
+    const put = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+    put(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); put(8, 'WAVE');
+    put(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
+    dv.setUint16(22, 1, true); dv.setUint32(24, rate, true);
+    dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+    put(36, 'data'); dv.setUint32(40, n * 2, true);
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  }
+
+  $('btn-aud').addEventListener('click', async function () {
+    try {
+      if (!audioEl) {
+        audioEl = new Audio(silentWavUrl(5));
+        audioEl.loop = true;
+        audioEl.volume = 1; // silent samples, not a muted element — muted audio is ignored
+      }
+      await audioEl.play();
+      keepState.audio = true;
+      log('silent audio looping — now lock the screen and watch ticks while hidden', 'good');
+      $('btn-aud-off').disabled = false;
+    } catch (e) {
+      log('audio keep-awake failed: ' + e.name + ' — ' + e.message, 'fail');
+    }
+    renderKeep();
+  });
+
+  $('btn-aud-off').addEventListener('click', function () {
+    if (audioEl) audioEl.pause();
+    keepState.audio = false;
+    $('btn-aud-off').disabled = true;
+    log('audio stopped');
+    renderKeep();
+  });
+
+  renderKeep();
+
+  // ---------- 5. gamepad ----------
+  const padsEl = $('pads');
+  window.addEventListener('gamepadconnected', function (e) { log('gamepad connected: ' + e.gamepad.id); });
+  window.addEventListener('gamepaddisconnected', function (e) { log('gamepad disconnected: ' + e.gamepad.id); });
+
+  // Proof of analogue-ness: a binary trigger only ever reports 0 or 1, so any
+  // intermediate value settles the question.
+  const trigStats = { lt: { max: 0, analog: false, steps: {} }, rt: { max: 0, analog: false, steps: {} } };
+  function noteTrigger(key, v) {
+    const s = trigStats[key];
+    if (v > s.max) s.max = v;
+    if (v > 0 && v < 1) s.analog = true;
+    if (v > 0) s.steps[v.toFixed(2)] = 1;
+  }
+
+  (function pollPads() {
+    const list = navigator.getGamepads ? Array.prototype.slice.call(navigator.getGamepads()) : [];
+    const pads = list.filter(Boolean);
+    if (!pads.length) {
+      padsEl.innerHTML = '<div class="row"><span class="k">Controllers</span><span class="v">none detected</span></div>';
+    } else {
+      padsEl.innerHTML = pads.map(function (p) {
+        // Standard mapping: buttons 6 and 7 are the analog triggers. Their
+        // .value is a float 0..1 — the boolean .pressed throws that away.
+        const trig = [6, 7].map(function (i, n) {
+          const b = p.buttons[i];
+          if (!b) return '';
+          const v = typeof b.value === 'number' ? b.value : (b.pressed ? 1 : 0);
+          noteTrigger(n ? 'rt' : 'lt', v);
+          const s = trigStats[n ? 'rt' : 'lt'];
+          return '<div class="row"><span class="k"><b>' + (n ? 'RT' : 'LT') + '</b> · button ' + i +
+                 (s.analog ? ' <span class="ok">analog ✓ ' + Object.keys(s.steps).length + ' levels</span>' : '') + '</span>' +
+                 '<span class="v">' + v.toFixed(3) + '</span></div>' +
+                 '<div class="bar"><i style="width:' + (v * 100).toFixed(1) + '%"></i></div>';
+        }).join('');
+
+        const axes = p.axes.map(function (a, i) {
+          return '<div class="row"><span class="k">axis ' + i + '</span><span class="v">' + a.toFixed(3) + '</span></div>' +
+                 '<div class="bar"><i style="width:' + ((a + 1) / 2 * 100).toFixed(1) + '%"></i></div>';
+        }).join('');
+
+        // Every other button, so a non-standard pad's analog inputs still show up.
+        const rest = p.buttons.map(function (b, i) {
+          if (i === 6 || i === 7) return '';
+          const v = typeof b.value === 'number' ? b.value : (b.pressed ? 1 : 0);
+          if (v === 0) return '';
+          return '<div class="row"><span class="k">button ' + i + '</span><span class="v">' +
+                 v.toFixed(3) + (b.pressed ? ' ●' : '') + '</span></div>' +
+                 '<div class="bar"><i style="width:' + (v * 100).toFixed(1) + '%"></i></div>';
+        }).join('');
+
+        return '<div class="row"><span class="k">' + esc(p.id.slice(0, 40)) + '</span>' +
+               '<span class="v ok">' + esc(p.mapping || 'non-standard') + '</span></div>' +
+               '<div class="row"><span class="k">buttons / axes</span><span class="v">' +
+               p.buttons.length + ' / ' + p.axes.length + '</span></div>' +
+               trig + axes + rest;
+      }).join('');
+    }
+    requestAnimationFrame(pollPads);
+  })();
+
+  // ---------- 6. results ----------
+  $('btn-clear').addEventListener('click', function () { lines.length = 0; logEl.textContent = ''; });
+
+  $('btn-copy').addEventListener('click', async function () {
+    const out = {
+      when: new Date().toISOString(),
+      env: env,
+      bluetooth: {
+        connected: bleState.connected, device: bleState.name,
+        writeMode: writeMode, battery: bleState.battery
+      },
+      loop: {
+        driver: stats.driver, ticks: stats.ticks, writes: stats.writes,
+        errors: stats.errors, misses: stats.misses, worstGapMs: Math.round(stats.worst),
+        hiddenTicks: stats.hiddenTicks, hiddenWrites: stats.hiddenWrites, hiddenErrors: stats.hiddenErrors, reads: stats.reads, readFails: stats.readFails, hiddenReads: stats.hiddenReads, hiddenReadFails: stats.hiddenReadFails, notifs: stats.notifs, hiddenNotifs: stats.hiddenNotifs, longestHiddenMs: Math.round(stats.hiddenWorst)
+      },
+      wake: wakeState,
+      keepAwake: keepState,
+      gamepads: (navigator.getGamepads ? Array.prototype.slice.call(navigator.getGamepads()) : [])
+        .filter(Boolean).map(function (p) { return { id: p.id, mapping: p.mapping, axes: p.axes.length, buttons: p.buttons.length }; }),
+      triggers: {
+        lt: { max: trigStats.lt.max, analog: trigStats.lt.analog, distinctLevels: Object.keys(trigStats.lt.steps).length },
+        rt: { max: trigStats.rt.max, analog: trigStats.rt.analog, distinctLevels: Object.keys(trigStats.rt.steps).length }
+      },
+      log: lines
+    };
+    const text = JSON.stringify(out, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      log('results copied to clipboard');
+    } catch (e) {
+      log('clipboard blocked — results printed below');
+      log(text);
+    }
+  });
+
+  window.addEventListener('pagehide', function () { stopLoop('pagehide'); });
+})();
+</script>
+</body>
+</html>
