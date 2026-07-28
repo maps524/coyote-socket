@@ -933,7 +933,7 @@ impl Downsampler {
         let range = window_max.saturating_sub(window_min);
 
         // Threshold: if range is significant (>20% of full scale), preserve oscillation
-        const OSCILLATION_THRESHOLD: u8 = 40; // 20% of 200
+        const OSCILLATION_THRESHOLD: u8 = 41; // 20% of 200
 
         if range < OSCILLATION_THRESHOLD {
             // Not enough variation - fall back to detailed (peak-preserving).
