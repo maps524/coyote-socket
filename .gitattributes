@@ -1,0 +1,7 @@
+# The golden-trace fixtures are byte-compared against freshly generated
+# output in CI (see .github/workflows/test.yml). The generator always
+# writes LF, so pin the checked-out files to LF on every platform —
+# otherwise a Windows checkout with core.autocrlf=true reports every
+# fixture as modified the moment they are regenerated.
+docs/spikes/pwa/fixtures/*.json text eol=lf
+docs/spikes/pwa/fixtures/*.md   text eol=lf
