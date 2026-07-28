@@ -974,6 +974,12 @@ fn all_specs() -> Vec<TraceSpec> {
              and the period bytes drop to 5 (200 Hz): FULL DEVICE OUTPUT WITH THE AXIS PARKED AT \
              ZERO. That is the failure this whole fixture corpus exists to prevent. \
              \
+             One timing detail: the resolver half is visible on the FIRST frame, but the \
+             intensity half is not. A sample landing exactly on a tick instant is replayed \
+             before that tick runs yet sits outside its [now-100, now) downsampler window, so \
+             the engine reports it from the next tick on. Under the swap B0[2] is therefore \
+             still 0 at tick 0 and 200 from tick 1 onward. Do not read tick 0 alone. \
+             \
              The trace parks at 0.0 for four ticks, then steps 0.5 (tent peak, 200 vs 0 — the \
              mirror-image divergence), 0.1, 0.9, 1.0, and returns to rest at 0.0. \
              \
@@ -1017,33 +1023,55 @@ fn all_specs() -> Vec<TraceSpec> {
              every 100ms, so the watermark is never more than 100ms behind and the floor never \
              binds — it is unobservable across the entire rest of the corpus. \
              \
-             Ticks run 0,100,200,300 then JUMP to 900 (a 600ms stall) before resuming at 100ms. \
-             Both channels sit at 0.3 (intensity 60) before the stall, and both receive one \
-             sample during it, placed on opposite sides of the floor: \
+             TWO stalls, each 600ms, each delivering one sample per channel on opposite sides of \
+             the floor. A sample is replayed iff its timestamp is strictly greater than \
+             `resumed_tick - FLOOR`, so each placement constrains FLOOR from one side: \
              \
-             A's arrives at +350 — that is 550ms before the resumed tick, outside the 200ms \
-             floor, so it is DROPPED and A must still read 60 at +900. \
-             B's arrives at +750 — 150ms before, inside the floor, so it IS replayed and B must \
-             read 180 at +900. \
+             Stall 1 (ticks 0,100,200,300 then 900). Both channels sit at 0.3 (intensity 60). \
+             A's sample at +350 is 550ms out — dropped, A still reads 60 (needs FLOOR <= 550). \
+             B's sample at +750 is 150ms out — replayed, B reads 180 (needs FLOOR > 150). \
              \
-             Same stall, same timeline, opposite outcomes, so the fixture pins the floor's \
-             BOUNDARY rather than merely its existence. A port with no floor replays both and \
-             emits 200 for A (the axis was commanded to 1.0). A port that discards everything \
-             after any gap replays neither and emits 60 for B. Both mistakes are caught, and A's \
-             is the dangerous direction. \
+             Stall 2 (ticks 1200,1300 then 1900), the tight bracket. \
+             A's sample at +1695 is 205ms out — dropped, A holds 160 (needs FLOOR <= 205). \
+             B's sample at +1705 is 195ms out — replayed, B reads 30 (needs FLOOR > 195). \
              \
-             Input resumes normally at +1150 so the trace also shows the channel is not wedged \
-             by the drop.",
+             WHAT THIS ESTABLISHES, precisely: the four constraints together admit exactly \
+             FLOOR in [196, 205]. The fixture does not pin 200 — it brackets it to a 10ms window \
+             and pins that a floor exists there. Verified by sweeping the constant and \
+             regenerating: 195 and below change these bytes, 206 and above change them, \
+             196..=205 are byte-identical. Before stall 2 was added the admissible window was \
+             [151, 550], wide enough that a port implementing 500 passed byte-for-byte while \
+             replaying 450ms-old input on hardware. \
+             \
+             The mistakes it does catch: no floor at all (replays everything — A reads 200 after \
+             stall 1, from an axis commanded to 1.0 mid-stall); discarding everything after a \
+             gap (replays nothing — B reads 60); and the constant transcribed as 100 or 150. \
+             Note the error direction on every one of these is MORE output than the Rust \
+             produces, which is why the bracket is worth narrowing rather than merely noting. \
+             \
+             Input resumes at +1150 and +2050 so the trace also shows neither channel is wedged \
+             by a drop.",
             chan(cfg_default_params(link("L0", 0.0, 200.0, CurveType::Linear))),
             chan(cfg_default_params(link("R2", 0.0, 200.0, CurveType::Linear))),
         )
-        .tick_offsets(vec![0, 100, 200, 300, 900, 1000, 1100, 1200, 1300, 1400])
+        .tick_offsets(vec![
+            0, 100, 200, 300, 900, 1000, 1100, 1200, 1300, 1900, 2000, 2100,
+        ])
         .at(0, "L0", 0.3)
         .at(0, "R2", 0.3)
+        // Stall 1: 550ms out (dropped) / 150ms out (replayed).
         .at(350, "L0", 1.0)
         .at(750, "R2", 0.9)
         .at(1150, "L0", 0.8)
         .at(1150, "R2", 0.5)
+        // Stall 2: 205ms out (dropped) / 195ms out (replayed). Both wrong
+        // answers here leave MORE output than the Rust: A replaying 1695
+        // jumps 160 -> 190, B failing to replay 1705 holds 100 instead of 30.
+        .at(1695, "L0", 0.95)
+        .at(1705, "R2", 0.15)
+        // Above A's held 160 so the 200ms peak-hold cannot mask the recovery.
+        .at(2050, "L0", 0.9)
+        .at(2050, "R2", 0.6)
         .build(),
     );
 

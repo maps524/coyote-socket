@@ -311,7 +311,13 @@ output from a resting axis.**
 
 **x=0.25 and x=0.75 are a blind spot** — midpoint maps both to 0.5, and `1 - 0.5 == 0.5`, so the
 two orders agree there. They appear in the trace to document that fact. Every other value is
-load-bearing; do not reduce the trace to the quarter points.
+load-bearing; do not reduce the trace to the quarter points. Regenerating under the swap leaves
+1 of 23 ticks identical, and nothing load-bearing sits on it.
+
+**Do not read tick 0 alone.** The resolver half shows immediately, but a sample landing exactly
+on a tick instant is replayed before that tick runs while sitting outside its `[now-100, now)`
+downsampler window, so the engine reports it from the *next* tick. Under the swap `B0[2]` is
+still 0 at tick 0 and 200 from tick 1 onward.
 
 ## A stalled device loop
 
@@ -325,25 +331,42 @@ you never have to care which form a fixture uses.
 history into the engine after a stall. Every other fixture ticks every 100 ms, so the watermark
 is never more than 100 ms behind and **the floor never binds anywhere else in the corpus.**
 
-Ticks run 0, 100, 200, 300, then jump to **900** — a 600 ms stall — before resuming. Both
-channels sit at 0.3 (intensity 60) beforehand, and each receives one sample during the stall,
-placed on opposite sides of the floor:
+The trace contains **two** 600 ms stalls, each delivering one sample per channel on opposite
+sides of the floor. A sample is replayed iff its timestamp is strictly greater than
+`resumed_tick - FLOOR`, so each placement constrains `FLOOR` from one side:
 
-| Channel | Sample at | Distance from the resumed tick | Outcome | Reads at +900 |
-|---|---|---|---|---|
-| A | +350 | 550 ms — outside the floor | **dropped** | 60 (unchanged) |
-| B | +750 | 150 ms — inside the floor | **replayed** | 180 |
+| Stall | Ticks | Channel | Sample | Distance out | Outcome | Constrains |
+|---|---|---|---|---|---|---|
+| 1 | 0,100,200,300 → **900** | A | +350 | 550 ms | dropped, holds 60 | `FLOOR ≤ 550` |
+| 1 | | B | +750 | 150 ms | replayed, reads 180 | `FLOOR > 150` |
+| 2 | 1200,1300 → **1900** | A | +1695 | 205 ms | dropped, holds 160 | `FLOOR ≤ 205` |
+| 2 | | B | +1705 | 195 ms | replayed, reads 30 | `FLOOR > 195` |
 
-Same stall, same timeline, opposite outcomes, so this pins the floor's *boundary* rather than
-merely its existence:
+### What this establishes, precisely
 
-- a port with **no floor** replays both and emits **200** for A, because the axis was commanded
-  to 1.0 during the stall — the dangerous direction, and it needs no misconfiguration to reach,
-  just a backgrounded tab;
-- a port that **discards everything after a gap** replays neither and emits 60 for B;
-- a port with the constant transcribed as 100 also drops B's sample.
+The four constraints together admit **`FLOOR ∈ [196, 205]`**. This fixture does **not** pin 200 —
+it brackets it to a 10 ms window and pins that a floor exists in that window. Verified by
+sweeping the constant and regenerating:
 
-Input resumes at +1150 so the trace also shows the channel is not wedged by the drop.
+| `INTENSITY_REPLAY_FLOOR_MS` | Fixture |
+|---|---|
+| 100, 150, 151, 160, 195 | changed |
+| **196, 200, 205** | **identical** |
+| 206, 300, 500, 550, 551, 600, 10⁶ | changed |
+
+Stall 2 exists because stall 1 alone admitted `[151, 550]` — wide enough that a port
+implementing **500 ms** passed byte-for-byte while, on hardware, replaying a 450 ms-old sample
+after a background stall.
+
+The mistakes it catches: **no floor at all** (replays everything — A reads 200 after stall 1,
+from an axis commanded to 1.0 mid-stall); **discarding everything after a gap** (replays nothing
+— B reads 60); and the constant transcribed as 100, 150, 500 or anything else outside the
+bracket. Note the error direction on every one of these is *more* output than the Rust produces,
+which is why the bracket was worth narrowing rather than merely noting.
+
+Input resumes at +1150 and +2050 so the trace also shows neither channel is wedged by a drop.
+The +2050 value is deliberately above A's held 160, so the 200 ms peak-hold cannot mask the
+recovery.
 
 ## The oscillation threshold
 
@@ -397,3 +420,20 @@ still passes, and tests nothing.
   1000ms while every read uses a 200ms window, so the prune is unobservable: a port that
   prunes at the read window instead agrees on every fixture here. Only a read window longer
   than 200ms would distinguish them, and nothing reads longer.
+- **`INTENSITY_REPLAY_FLOOR_MS` is bracketed to `[196, 205]`, not pinned.** Any value in that
+  window is byte-identical across the corpus. See "A stalled device loop" above for the sweep.
+- **Tick timing is barely varied.** 26 fixtures tick at a uniform 100 ms; one uses
+  `tick_offsets_ms`, with two gaps of the same 600 ms size. The mechanism for irregular
+  timelines now exists, but jitter, sub-100 ms ticks, gaps of other sizes, and back-to-back
+  stalls are all uncovered. A real loop under load produces all of them.
+- **`apply_midpoint` does not clamp its input while `apply_curve` does** — but this is safe, and
+  the asymmetry is not reachable as a defect. Checked rather than assumed:
+  `AxisState::update` clamps every bus write to `[0,1]`, so a raw axis value can never leave
+  that interval; `apply_midpoint` is called at exactly two sites (`modulation.rs:482`,
+  `processing.rs:1307`) and both feed `apply_curve` immediately, so its output never escapes
+  unclamped. The one path that can hand it an out-of-range value is
+  `NoInputBehavior::Default` returning a `staticValue` outside `[0,1]` — and even there the two
+  orderings coincide, because midpoint maps everything outside `[0,1]` to `≥ 1` which the
+  downstream clamp folds to 1, while clamping first also yields exactly 1 (`midpoint(0)` and
+  `midpoint(1)` are both 1). A port that adds a defensive clamp inside `applyMidpoint` is
+  therefore provably equivalent, not merely indistinguishable here.
