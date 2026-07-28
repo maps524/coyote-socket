@@ -1911,7 +1911,8 @@ mod tests {
         let commands = parse_tcode("R2750I1000");
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].axis, "R2");
-        assert!((commands[0].value - 0.25).abs() < 0.01);
+        // `750` normalises by digit count: 750/1000 = 0.75.
+        assert!((commands[0].value - 0.75).abs() < 0.01);
         assert_eq!(commands[0].interval_ms, Some(1000));
     }
 
