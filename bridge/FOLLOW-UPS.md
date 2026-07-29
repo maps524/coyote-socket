@@ -511,8 +511,25 @@ trust and nothing else.
 
 - **Token exposure on the first hop.** The QR points at plain HTTP by
   necessity, so the pairing token is readable by anyone on the LAN at that
-  moment. `/pair/rotate` narrows the window to "until the phone finishes
-  pairing" and does not close it.
+  moment. Per-device credentials narrow what that buys — a sniffer can pair a
+  device of their own, which is visible in the clients panel and individually
+  revocable, rather than silently becoming the same principal as the phone —
+  but it does not close it.
+
+- **Whether iOS partitions the Home Screen cookie jar. UNTESTED, and it decides
+  a real behaviour.** If an installed web app gets storage separate from the
+  Safari tab that paired, launching from the home screen arrives with no
+  credential and must pair again.
+
+  The obvious fix — putting the token in the manifest's `start_url` — was built
+  and then **deliberately removed**, because it lets a revoked device silently
+  re-pair itself on its next launch. That defeats the revocation the whole
+  per-device design exists to provide, and a speculative convenience is not
+  worth a hole in a security property. If partitioning turns out to be real, the
+  answer is to make the home-screen launch pair explicitly and visibly, not to
+  hide a standing token in the manifest.
+
+  Testing it costs one home-screen install on the handset that already works.
 - **Renewal has never been observed.** The re-issue path is exercised by unit
   tests against synthetic timestamps, not by a bridge that has run for a year or
   had its DHCP lease move underneath it.

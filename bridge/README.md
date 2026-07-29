@@ -275,6 +275,40 @@ serves the public certificate from `/install`. The phone installs it once.
 - **Both listeners stay up.** Everything except Web Bluetooth works over plain
   HTTP and it is far easier to debug.
 
+### Pair once, then never present the token again
+
+The QR carries the pairing token. It is used **exactly once**, at
+`/pair/exchange` on the HTTPS origin, which trades it for a per-device
+credential in a cookie and redirects so the token leaves the address bar.
+Everything afterwards — the app, `/healthz`, the WebSocket — authorises on that
+cookie.
+
+**Why the exchange has to happen there.** Pairing starts on
+`http://coyote.local:8787` and the app runs on `https://coyote.local:8443`.
+Different scheme *and* different port means different origin, so **nothing in
+browser storage crosses** — no `localStorage`, no cookies, nothing. An earlier
+design expected the token to survive that jump and it could not: the socket was
+refused, which a browser reports as close code 1006 with no reason, which the
+app could only render as "bridge unreachable". The origin change is the point of
+the flow and it is also what loses the token, so the token crosses on the URL,
+once, into the endpoint built to catch it.
+
+**Why a cookie rather than `localStorage`.** Cookies ride the WebSocket upgrade
+automatically. `localStorage` does not, so every socket would need JavaScript to
+read the value and append it — a second code path that can be wrong, in the one
+place where being wrong looks like a dead network. `HttpOnly` then comes free,
+and it is most of the value: no script can read the credential.
+
+**Why per-device.** One shared token makes revocation all-or-nothing: rotate it
+and every paired device stops, which is why auto-rotation was rejected — pairing
+a tablet would silently un-pair the phone. Per-device credentials make revoke
+mean *"stop trusting the tablet"*. Secrets are stored hashed, so the credential
+file cannot be replayed as a cookie if it ends up in a bug report.
+
+A credential identifies **a browser storage partition**, not a handset and not a
+person. Two browsers on one phone are two devices here; a phone that clears its
+cookies is a new one.
+
 ### You will need two browsers on iOS, and that is not a bug
 
 - **Install the certificate in Safari.** It is the only iOS browser that offers
