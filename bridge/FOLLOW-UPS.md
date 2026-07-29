@@ -333,6 +333,44 @@ The counter-question matches the one above: not *"does this line exist?"* or
 *"did this test pass?"* but **"what would have to be true for this to run, and
 is that what it measured?"**
 
+### And the third failure mode: not a wrong resolution, an absent one
+
+A hunk was silently dropped during a rebase. The `stale()` doc comment kept
+describing the write-based liveness check that ping/pong had replaced — the
+*code* and the *body copy* both survived, and only the comment reverted. Nothing
+failed, nothing conflicted, and nothing looked wrong.
+
+That is the third way a merge goes wrong, and the other two at least leave
+something to find:
+
+| | What arrives | What tells you |
+|---|---|---|
+| Wrong resolution | the wrong side | a conflict marker, if you look |
+| Semantically-wrong clean merge | both sides, incoherently | nothing — but the text is there to read |
+| **Lost hunk** | **nothing** | **nothing at all** |
+
+**A conflict-free rebase is not evidence that everything arrived.** A diff shows
+what changed, and an absent hunk is not a change — there is no line to review,
+no marker to notice, and a green suite says only that whatever *did* arrive is
+consistent.
+
+The check that finds it is not reading the diff. It is **grepping the rebased
+tree for phrases you know you wrote** — the doc sentence, the comment, the
+distinctive identifier — and confirming each is still there. Cheap, and it is
+the only method that can detect an absence.
+
+Both merges in this week's three-branch sequence were checked this way. The
+client-tracking rebase had lost the comment above; the TLS rebase — five
+commits, manual resolution in three, the profile that loses things quietly —
+turned out to be clean across sixteen checked phrases. **Neither was known until
+someone looked**, and "the tests pass" had already been offered for both.
+
+Its limitation is worth stating, because it is the reason this is a second check
+and not the only one: **it can only find what you remember writing.** It is
+strongest immediately after a rebase you performed, weakest on someone else's
+merge, and useless for a hunk you have forgotten. That is still better than the
+alternative, which detects nothing at all.
+
 ---
 
 ## 0b. Misattributed failure
