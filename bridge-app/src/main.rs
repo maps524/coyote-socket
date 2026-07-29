@@ -143,7 +143,7 @@ impl AppState {
     }
 
     pub fn save_settings(&self) {
-        if let Ok(settings) = self.settings.lock() {
+        if let Ok(mut settings) = self.settings.lock() {
             settings.save(&self.settings_path);
         }
     }
@@ -335,7 +335,10 @@ fn serve_http(
     let on_token_rotated: Box<dyn Fn(&auth::Token) + Send + Sync> =
         Box::new(move |fresh: &auth::Token| {
             if let Ok(mut settings) = rotate_state.settings.lock() {
-                settings.token = Some(fresh.as_str().to_string());
+                // `set_token` rather than assigning the field: it also claims
+                // the right to write this token, which is what stops another
+                // instance's stale copy overwriting the revocation.
+                settings.set_token(fresh);
             }
             rotate_state.save_settings();
         });

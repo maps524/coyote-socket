@@ -43,15 +43,29 @@ The fix is the same each time: make "not yet known" a state of its own, and set
 the success state only after the runtime has confirmed it. Three values, not
 two.
 
-### Where the fifth one probably is
+### The fifth, predicted and then found
 
-Stated as a prediction so it can be checked rather than rediscovered:
+Predicting it was cheap; checking took a minute and turned it from a guess into
+a defect with a safety consequence, so it was fixed rather than filed.
 
-- **The settings file has one writer.** Two instances of the desktop app both
-  read `bridge-settings.json` at startup and both write it — on connect, on
-  static-dir change, on token rotation. Last writer wins with no merge and no
-  detection. Rotate the token in one and the other clobbers it back, so a
-  revoked credential returns from the dead. This is unfixed.
+**The settings file had one writer.** `Settings::save` was a whole-file
+overwrite with no locking. Two instances each hold their own copy in memory:
+instance A revokes a token it believes has leaked, and instance B — which read
+the old token at startup — later saves for an unrelated reason and writes the
+revoked token back. **The credential returns from the dead and nothing tells
+anyone.** That is not untidiness; it is the revoke button silently not working,
+and revocation a race can undo is worse than no revoke button, on the same
+reasoning that retired the QR advertising a revoked token.
+
+Fixed with an exclusive advisory lock (`File::lock`, released by the OS even on
+a crash — a hand-rolled lockfile would trade this race for a worse one), a
+read-modify-write merge where only the instance that minted or rotated a token
+may write it, and a temp-file-plus-rename so a torn write cannot leave a file
+that parses as defaults and mints a fresh token. The resurrection test was
+confirmed to fail against the old implementation before the fix went in.
+
+### Still open
+
 - **The relay accepts many clients but the command channel is one queue.** Two
   phones both issuing `seek` will fight, and neither will be told. Harmless
   today because there is one phone; not harmless once pairing works.
