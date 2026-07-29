@@ -49,6 +49,10 @@ use settings::Settings;
 pub const EVENT_PLAYER: &str = "player-state";
 pub const EVENT_WIRE: &str = "wire-event";
 pub const EVENT_LOG: &str = "log-line";
+/// Emitted when a client connects, disconnects or says who it is. Not on a
+/// timer: the registry deliberately does not wake on the once-a-second
+/// keepalive, so this fires on change and nothing else.
+pub const EVENT_CLIENTS: &str = "clients";
 
 /// Backlog the wire tap keeps for a UI that is busy rendering. Large enough to
 /// cover a burst of packets on connect without dropping the very frames the
@@ -85,6 +89,13 @@ pub struct AppState {
     /// anything that needs the current pairing URL asks here rather than
     /// caching a copy that revocation cannot reach.
     pub http_ctx: Mutex<Option<Arc<http::Ctx>>>,
+    /// Who is connected to the phone-facing WebSocket.
+    ///
+    /// Created here rather than inside the serving context, and for the same
+    /// reason `http_status` is three-valued: the window has to be able to say
+    /// "nothing is connected" before the port is bound, and that is a different
+    /// statement from having nothing to say.
+    pub clients: Arc<coyote_bridge::clients::ClientRegistry>,
 }
 
 /// Whether the phone can actually reach us.
@@ -324,6 +335,7 @@ fn main() {
                 // below once the answer is actually known.
                 tls_status: Mutex::new(TlsStatus::Starting),
                 http_ctx: Mutex::new(None),
+                clients: Arc::new(coyote_bridge::clients::ClientRegistry::new()),
             });
             app.manage(Arc::clone(&state));
 
@@ -333,6 +345,7 @@ fn main() {
             // real player is the only evidence of its kind anyone has, and
             // losing it to a ring buffer would be an avoidable loss.
             capture_wire(&tap, config_dir.join("wire-capture.jsonl"));
+            forward_clients(app.handle().clone(), Arc::clone(&state));
 
             serve_http(
                 app.handle().clone(),
@@ -370,6 +383,8 @@ fn main() {
             commands::send_player_command,
             commands::pairing_qr,
             commands::rotate_token,
+            commands::revoke_device,
+            commands::revoke_all_devices,
             commands::log_history,
             commands::start_fake_player,
             commands::stop_fake_player,
@@ -462,6 +477,26 @@ fn serve_http(
     let devices = Arc::clone(&state.devices);
     let snapshot_rx = state.bridge.snapshot_rx.clone();
     let cmd_tx = state.bridge.cmd_tx.clone();
+    let clients = Arc::clone(&state.clients);
+
+    // Turn the credential store into identity.
+    //
+    // The only line connecting "this request is authorised" to "this is which
+    // device". Without it every paired phone authorises normally and then
+    // renders on the clients panel as one we could not identify — the panel at
+    // its least useful for exactly the devices it should be best at.
+    // `serve_conn` logs when it sees that disagreement, but installing this is
+    // what makes the log unnecessary.
+    let credential_store = Arc::clone(&state.devices);
+    clients.set_credential_resolver(Arc::new(move |cookie: Option<&str>| {
+        credential_store
+            .verify(cookie)
+            .map(|d| coyote_bridge::clients::Credential {
+                id: d.id,
+                label: d.label,
+                created_ms: Some(d.created_ms),
+            })
+    }));
 
     // Persist a rotated token, so a rotation performed over TLS survives a
     // restart rather than silently reverting to the cleartext one it replaced.
@@ -541,6 +576,7 @@ fn serve_http(
                     on_token_rotated: Some(on_token_rotated),
                     tls: https.as_ref().map(|(_, p)| Arc::clone(&p.public)),
                     devices,
+                    clients,
                 });
                 // Published before serving starts, so anything asking for the
                 // current pairing URL gets the live token rather than a copy.
@@ -593,6 +629,23 @@ fn serve_http(
                 if let Ok(mut slot) = state.http_status.lock() {
                     *slot = HttpStatus::Failed { detail: message };
                 }
+            }
+        }
+    });
+}
+
+/// Push the client list to the window whenever it changes.
+///
+/// A separate pump from [`forward_events`] because it is driven by a different
+/// channel and starts earlier — the registry exists before the listener binds,
+/// so the panel can be correct during startup rather than blank.
+fn forward_clients(app: tauri::AppHandle, state: Arc<AppState>) {
+    let mut changes = state.clients.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let _ = app.emit(EVENT_CLIENTS, state.clients.view());
+            if changes.changed().await.is_err() {
+                return;
             }
         }
     });

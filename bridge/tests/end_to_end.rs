@@ -247,6 +247,7 @@ async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>,
         // secure context. `/install` correctly reports nothing to install.
         tls: None,
         devices: test_device_store(),
+        clients: Default::default(),
     });
     tokio::spawn(http::run(listener, ctx));
 
@@ -423,6 +424,7 @@ async fn traversal_outside_the_static_root_is_refused() {
             on_token_rotated: None,
             tls: None,
         devices: test_device_store(),
+        clients: Default::default(),
         }),
     ));
 
@@ -594,6 +596,7 @@ async fn the_relay_keeps_talking_while_the_player_says_nothing() {
             // the secure context. `/install` correctly reports nothing to install.
             tls: None,
         devices: test_device_store(),
+        clients: Default::default(),
         }),
     ));
 
@@ -668,6 +671,7 @@ async fn a_paused_player_keeps_the_relay_talking() {
             // the secure context. `/install` correctly reports nothing to install.
             tls: None,
         devices: test_device_store(),
+        clients: Default::default(),
         }),
     ));
 
@@ -759,6 +763,7 @@ async fn spawn_library_stack(root: std::path::PathBuf) -> (String, Token) {
             on_token_rotated: None,
             tls: None,
             devices: test_device_store(),
+        clients: Default::default(),
         }),
     ));
     (base, token)
@@ -1095,4 +1100,382 @@ fn test_device_store() -> std::sync::Arc<coyote_bridge::devices::DeviceStore> {
     ));
     let _ = std::fs::remove_file(&path);
     std::sync::Arc::new(coyote_bridge::devices::DeviceStore::load(path))
+}
+
+// ---------------------------------------------------------------------------
+// Who is connected
+// ---------------------------------------------------------------------------
+//
+// The unit tests in `clients.rs` cover the counting rules. These check the two
+// things only the real surface can prove: that a live WebSocket actually
+// registers, and that `/healthz` carries the answer — which is the headless
+// build's only way to see it.
+
+/// A bridge whose registry and snapshot channel the test keeps hold of.
+///
+/// `spawn_full_stack` hands both to a fake player and keeps neither, which is
+/// right for the tests that came before. These need to install a credential
+/// resolver and to drive the snapshot channel directly.
+struct Stack {
+    base: String,
+    token: Token,
+    clients: std::sync::Arc<coyote_bridge::clients::ClientRegistry>,
+    snapshots: watch::Sender<PlayerSnapshot>,
+}
+
+async fn spawn_stack(
+    resolver: Option<coyote_bridge::clients::CredentialResolver>,
+) -> Stack {
+    let (snapshot_tx, snapshot_rx) = watch::channel(PlayerSnapshot::new("127.0.0.1:23554".into()));
+    let (cmd_tx, _cmd_rx) = mpsc::channel(16);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base = format!("http://127.0.0.1:{port}");
+    let token = Token::generate();
+
+    let clients = std::sync::Arc::new(coyote_bridge::clients::ClientRegistry::new());
+    if let Some(resolver) = resolver {
+        clients.set_credential_resolver(resolver);
+    }
+
+    tokio::spawn(http::run(
+        listener,
+        std::sync::Arc::new(http::Ctx {
+            snapshot_rx,
+            cmd_tx,
+            static_dir: None,
+            pairing_base: base.clone(),
+            token: std::sync::RwLock::new(token.clone()),
+            allowed_hosts: vec![format!("127.0.0.1:{port}")],
+            on_token_rotated: None,
+            library: None,
+            tls: None,
+            devices: test_device_store(),
+            clients: std::sync::Arc::clone(&clients),
+        }),
+    ));
+
+    Stack {
+        base,
+        token,
+        clients,
+        snapshots: snapshot_tx,
+    }
+}
+
+/// The contract of the identity seam, driven over a real HTTP request.
+///
+/// **This test is the seam.** Everything else about per-device credentials is a
+/// type signature and an agreement in a message; without a resolver installed
+/// and a real `Cookie` header on a real upgrade, "the credential decides who
+/// this is" is asserted rather than demonstrated. It also pins the shape
+/// `bridge-tls` must satisfy: the resolver is handed the **cookie header and
+/// nothing else**, so a credential arriving as a query parameter or a
+/// `Sec-WebSocket-Protocol` value would need this signature changed.
+#[tokio::test]
+async fn a_verified_credential_decides_who_a_client_is() {
+    use coyote_bridge::clients::Credential;
+
+    let stack = spawn_stack(Some(std::sync::Arc::new(|cookie: Option<&str>| {
+        // Stands in for `DeviceStore::verify`, which does the same job with a
+        // hashed secret behind it.
+        cookie
+            .is_some_and(|c| c.contains("coyote_device=known-device-secret"))
+            .then(|| Credential {
+                id: "dev-abc123".into(),
+                label: Some("Sara's phone".into()),
+                created_ms: Some(1_700_000_000_000),
+            })
+    })))
+    .await;
+    let (base, token) = (stack.base.clone(), stack.token.clone());
+
+    // The client also volunteers an id. The credential must win: one of the two
+    // was checked.
+    let ws_url = format!(
+        "{}/ws?t={token}&c=self-chosen-id",
+        base.replace("http://", "ws://")
+    );
+    let request = ws_request_with_cookie(&ws_url, &base, "coyote_device=known-device-secret");
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let _ = next_text(&mut ws).await;
+
+    let view = clients_until(&base, &token, |v| v["connections"] == 1).await;
+    let row = &view["clients"][0];
+    assert_eq!(row["provenance"], "credential");
+    assert_eq!(row["id"], "dev-abc123", "not the id the client chose");
+    assert_eq!(row["label"], "Sara's phone");
+    assert_eq!(row["createdMs"], 1_700_000_000_000u64);
+    assert_eq!(row["revocable"], true);
+    assert_eq!(view["credentialsAvailable"], true);
+    assert_eq!(view["browsers"]["state"], "reported");
+    assert_eq!(view["browsers"]["provenance"], "credential");
+}
+
+/// An unrecognised cookie is not an identity. The resolver refusing must not
+/// silently fall through to trusting whatever the client said instead — that
+/// would make a forged cookie a *downgrade* to self-reported rather than a
+/// refusal, which is a distinction worth having a test for.
+#[tokio::test]
+async fn an_unrecognised_cookie_falls_back_to_self_reported_and_says_so() {
+    let stack = spawn_stack(Some(std::sync::Arc::new(|_: Option<&str>| None))).await;
+    let (base, token) = (stack.base.clone(), stack.token.clone());
+
+    let ws_url = format!(
+        "{}/ws?t={token}&c=self-chosen-id",
+        base.replace("http://", "ws://")
+    );
+    let request = ws_request_with_cookie(&ws_url, &base, "coyote_device=forged");
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let _ = next_text(&mut ws).await;
+
+    let view = clients_until(&base, &token, |v| v["connections"] == 1).await;
+    assert_eq!(view["clients"][0]["provenance"], "selfReported");
+    assert_eq!(view["clients"][0]["revocable"], false);
+    // The count must not read as though these were verified devices.
+    assert_eq!(view["browsers"]["provenance"], "selfReported");
+}
+
+/// Revocation must beat a busy relay.
+///
+/// `tokio::select!` polls its arms in a **random** order unless the block opens
+/// with `biased;`. Both the revoke signal and a pending snapshot are ready at
+/// once here, so without bias the relay wins the coin toss about half the time
+/// and sends state to a socket the user has just revoked.
+///
+/// # Why it is staged rather than simply flooding
+///
+/// The obvious version — flood the snapshot channel, revoke, count what
+/// arrives — measures the wrong thing, and did: it counted **996** frames that
+/// the relay had generated *before* the revoke and left sitting in the client's
+/// receive buffer while the test slept. Backlog is not a race. So the channel
+/// is held quiet until the relay is parked at the `select!`, and only then are
+/// both arms made ready in the same instant.
+///
+/// Biased, the count is deterministically zero. Unbiased it is not: measured
+/// against a build with `biased` removed, the relay leaks state frames on
+/// roughly one round in five. Thirty rounds puts a false pass near one in a
+/// thousand — the round count is calibration, not superstition, and reducing it
+/// weakens the test rather than speeding it up.
+#[tokio::test]
+async fn a_revoked_socket_closes_before_the_relay_sends_more_state() {
+    use coyote_bridge::clients::Credential;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let stack = spawn_stack(Some(std::sync::Arc::new(|cookie: Option<&str>| {
+        cookie.is_some_and(|c| c.contains("dev=1")).then(|| Credential {
+            id: "dev-revoke".into(),
+            label: None,
+            created_ms: None,
+        })
+    })))
+    .await;
+    let ws_url = format!(
+        "{}/ws?t={}",
+        stack.base.replace("http://", "ws://"),
+        stack.token
+    );
+
+    // Quiet until released, so the relay is parked with nothing ready.
+    let flooding = std::sync::Arc::new(AtomicBool::new(false));
+    let snapshots = stack.snapshots.clone();
+    let gate = std::sync::Arc::clone(&flooding);
+    let spam = tokio::spawn(async move {
+        loop {
+            if gate.load(Ordering::Relaxed) {
+                snapshots.send_modify(|s| s.packets += 1);
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let mut frames_after_revoke = 0usize;
+    for _ in 0..30 {
+        let request = ws_request_with_cookie(&ws_url, &stack.base, "dev=1");
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        // Drain the startup burst by *waiting for silence* rather than by
+        // counting messages. Counting was wrong within a day: the library work
+        // added a third opening frame, and a test that expected two then
+        // attributed the third to the race it was measuring — reporting
+        // exactly one leaked frame per round, deterministically, which looks
+        // nothing like the random loss it was built to catch.
+        loop {
+            match tokio::time::timeout(Duration::from_millis(150), ws.next()).await {
+                Ok(Some(Ok(_))) => continue,
+                Err(_) => break, // silence: the relay is parked at the select
+                other => panic!("websocket ended during startup: {other:?}"),
+            }
+        }
+
+        // Both arms become ready together: the revoke signal, and a snapshot
+        // channel that will not stop changing.
+        assert_eq!(stack.clients.revoke("dev-revoke"), 1);
+        flooding.store(true, Ordering::Relaxed);
+
+        loop {
+            match tokio::time::timeout(SETTLE, ws.next()).await {
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))) => {
+                    frames_after_revoke += 1;
+                }
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(frame)))) => {
+                    let frame = frame.expect("the close must say why");
+                    assert_eq!(u16::from(frame.code), coyote_bridge::http::WS_CLOSE_REVOKED);
+                    assert_eq!(frame.reason, "revoked");
+                    break;
+                }
+                Ok(Some(Ok(_))) => continue,
+                other => panic!("expected a close frame, got {other:?}"),
+            }
+        }
+        flooding.store(false, Ordering::Relaxed);
+    }
+    spam.abort();
+
+    assert_eq!(
+        frames_after_revoke, 0,
+        "a revoked socket received {frames_after_revoke} more state frames across \
+         thirty rounds; `biased` is missing from the relay's select"
+    );
+}
+
+/// Build a WebSocket upgrade carrying a `Cookie` header, as a browser sends it.
+///
+/// `connect_async` takes a URL and sends neither cookies nor an `Origin`; a
+/// browser sends both, and the distinction is load-bearing. `authorised`
+/// refuses any request that presents a cookie without an `Origin`, because
+/// `SameSite=Lax` attaches the cookie to cross-site top-level navigations and
+/// those carry no `Origin` — so accepting them would let a drive-by page act
+/// with the credential.
+///
+/// A test that omitted the header would therefore be refused, and reading that
+/// 401 as "my credential is wrong" rather than "my test is not a browser" is
+/// exactly the misattribution this suite exists to prevent.
+fn ws_request_with_cookie(
+    url: &str,
+    origin: &str,
+    cookie: &str,
+) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url.into_client_request().expect("a valid ws url");
+    request
+        .headers_mut()
+        .insert("Cookie", cookie.parse().expect("a valid cookie header"));
+    request
+        .headers_mut()
+        .insert("Origin", origin.parse().expect("a valid origin"));
+    request
+}
+
+/// Poll `/healthz` until the client view satisfies `done`, or give up.
+///
+/// The relay reads a client message between snapshots, so identification is
+/// not synchronous with the send that caused it.
+async fn clients_until(
+    base: &str,
+    token: &Token,
+    done: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..60 {
+        let (_, body) = get(&format!("{base}/healthz?t={token}")).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        last = v["clients"].clone();
+        if done(&last) {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the client view never settled; last was {last}");
+}
+
+/// A connected client is visible in `/healthz`, and the snapshot's own keys are
+/// untouched beside it. The addition has to be additive: a consumer reading
+/// `positionS` off the top level predates this field.
+#[tokio::test]
+async fn healthz_reports_a_connected_client_without_disturbing_the_snapshot() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+
+    let (_, body) = get(&format!("{base}/healthz?t={token}")).await;
+    let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(before["clients"]["connections"], 0);
+    assert_eq!(before["clients"]["browsers"]["state"], "reported");
+    assert_eq!(before["clients"]["browsers"]["count"], 0);
+
+    let ws_url = format!(
+        "{}/ws?t={token}&c=phone-aaaaaaaa",
+        base.replace("http://", "ws://")
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let hello: serde_json::Value = serde_json::from_str(&next_text(&mut ws).await).unwrap();
+    assert_eq!(hello["type"], "hello");
+    // A client cannot present an id it was never told about.
+    assert_eq!(hello["identify"]["param"], "c");
+
+    let after = clients_until(&base, &token, |v| v["connections"] == 1).await;
+    assert_eq!(after["browsers"]["state"], "reported");
+    assert_eq!(after["browsers"]["count"], 1);
+    assert_eq!(after["clients"][0]["id"], "phone-aaaaaaaa");
+    assert_eq!(after["clients"][0]["connected"], true);
+
+    // Everything the snapshot said before is still where it was.
+    let (_, body) = get(&format!("{base}/healthz?t={token}")).await;
+    let whole: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(whole["type"], "player");
+    assert!(whole.get("positionS").is_some());
+    assert_eq!(whole["endpoint"], before["endpoint"]);
+}
+
+/// A client that presents nothing is reported as unidentified, and the device
+/// count degrades to a floor rather than guessing. This is today's default —
+/// no client sends an id yet.
+#[tokio::test]
+async fn a_client_that_does_not_identify_makes_the_count_a_floor() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+    let ws_url = format!("{}/ws?t={token}", base.replace("http://", "ws://"));
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let _ = next_text(&mut ws).await;
+
+    let view = clients_until(&base, &token, |v| v["connections"] == 1).await;
+    assert_eq!(view["browsers"]["state"], "atLeast");
+    assert_eq!(view["browsers"]["unidentified"], 1);
+    assert_eq!(view["anyUnidentified"], true);
+    assert_eq!(view["clients"][0]["identified"], false);
+}
+
+/// A `hello` sent after the socket opened claims it, and leaves no second row.
+#[tokio::test]
+async fn a_hello_over_the_socket_identifies_the_client() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+    let ws_url = format!("{}/ws?t={token}", base.replace("http://", "ws://"));
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let _ = next_text(&mut ws).await;
+
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"type":"hello","clientId":"phone-bbbbbbbb","label":"Test phone"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let view = clients_until(&base, &token, |v| v["browsers"]["state"] == "reported").await;
+    assert_eq!(view["browsers"]["count"], 1);
+    assert_eq!(view["clients"].as_array().unwrap().len(), 1, "no ghost row");
+    assert_eq!(view["clients"][0]["label"], "Test phone");
+}
+
+/// A dropped socket stops counting as connected. It leaves a row saying it was
+/// here, which is what makes a reconnect readable rather than inferred.
+#[tokio::test]
+async fn a_disconnect_stops_counting_but_leaves_a_trace() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+    let ws_url = format!(
+        "{}/ws?t={token}&c=phone-cccccccc",
+        base.replace("http://", "ws://")
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let _ = next_text(&mut ws).await;
+    ws.close(None).await.unwrap();
+
+    let view = clients_until(&base, &token, |v| v["connections"] == 0).await;
+    assert_eq!(view["clients"][0]["connected"], false);
+    assert!(view["clients"][0]["disconnectedAtMs"].is_number());
 }

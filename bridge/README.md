@@ -181,6 +181,58 @@ matches them against the `path` it gets in every snapshot.
 
 Details — path handling, the freshness contract, and what a 10,000-file
 directory costs — are in `src/library.rs`'s module documentation.
+## Who is connected
+
+`/healthz` carries a `clients` object beside the player snapshot — every
+existing key is where it was, so a consumer reading `positionS` off the top
+level is unaffected. The desktop window renders the same thing in its Clients
+panel. `src/clients.rs` is the whole of it.
+
+```jsonc
+"clients": {
+  "connections": 2,                 // open sockets — measured, not inferred
+  "browsers": { "state": "atLeast", "count": 1, "unidentified": 1 },
+  "anyUnidentified": true,
+  "credentialsAvailable": false,
+  "clients": [ /* one row per identity, connected first */ ]
+}
+```
+
+**Read `browsers` carefully — it is the point of the feature.** A phone that
+roams between access points drops its socket and opens a new one, and *nothing
+the bridge can observe on its own tells that apart from a second phone*. The
+address is not identity (NAT, DHCP, a fresh ephemeral port every time), and the
+pairing token is shared by every device by design. So:
+
+- `{"state": "reported", "count": n}` — every connected client presented an id,
+  and `n` is how many distinct ones. Still not certainty: a browser that cleared
+  its storage counts as new.
+- `{"state": "atLeast", …}` — at least one connection presented nothing, so
+  `count` is a **floor**. The window renders a range and the reason, never a
+  number. A count that silently merges a roam, or splits one, is worse than no
+  count.
+
+Identity comes in two grades, on `provenance`:
+
+| `provenance` | What it is | Worth |
+|---|---|---|
+| `credential` | A per-device credential the bridge verified. | Survives a roam, a restart and someone trying to forge it. |
+| `selfReported` | `?c=<id>` on `/ws`, or `{"type":"hello","clientId":…,"label":…}`. | Better than nothing; anyone with the token can send any id. |
+| absent | Nothing presented. | The connection stands alone and is never merged with anything. |
+
+The two never merge — the provenance is part of the grouping key, so a client
+cannot claim its way onto someone else's credentialed row.
+
+**Even a credential identifies a browser storage partition, not a handset and
+not a person.** Safari and a home-screen install on one phone may hold two and
+show as two. That is why the field says `browsers`.
+
+Revocation is split deliberately: the credential store deletes the credential
+(so it cannot be presented again), then calls `ClientRegistry::revoke(id)`,
+which closes that device's **live** sockets with close code `4001` and reason
+`revoked`. Both halves must fire. Closing without deleting lets the device
+reconnect; deleting without closing leaves a revoked phone driving hardware
+until its socket happens to drop.
 
 ## Where the framing came from
 

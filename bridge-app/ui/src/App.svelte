@@ -9,6 +9,7 @@
 -->
 <script lang="ts">
   import { bridge } from './lib/bridge.svelte'
+  import ClientsPanel from './lib/ClientsPanel.svelte'
   import ConnectionPanel from './lib/ConnectionPanel.svelte'
   import CrossCheckPanel from './lib/CrossCheckPanel.svelte'
   import PairingPanel from './lib/PairingPanel.svelte'
@@ -64,8 +65,11 @@
         <PlayerPanel />
         <CrossCheckPanel />
       </div>
+      <!-- Next to the QR, because "I scanned it" and "something connected" are
+           the two halves of one question. -->
       <div class="col">
         <PairingPanel />
+        <ClientsPanel />
       </div>
     </div>
 

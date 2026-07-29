@@ -123,6 +123,124 @@ export type TlsStatus =
   | { state: 'notConfigured'; detail: string }
   | { state: 'failed'; detail: string }
 
+/**
+ * Where a row's identity came from.
+ *
+ * `credential` is a per-device credential the bridge verified — the thing that
+ * actually tells a roam from a second device. `selfReported` is a string the
+ * client chose, worth exactly what it costs to forge. The panel shows which,
+ * because treating them as equal is how an identity panel gets trusted further
+ * than it deserves.
+ */
+export type Provenance = 'selfReported' | 'credential'
+
+/**
+ * How many distinct browsers are connected — or why the bridge will not say.
+ *
+ * Browsers, not devices: a credential lives in one browser's storage
+ * partition, so Safari and a home-screen install on one phone can be two, and
+ * a cleared browser is a new one.
+ *
+ * Two-valued for the same reason `HttpStatus` is three-valued: a bare number
+ * would be a field promising knowledge nobody confirmed. `reported` is still
+ * not certainty — it is a count of ids presented, which is why it is not
+ * called `known`.
+ */
+export type BrowserCount =
+  | { state: 'reported'; count: number; provenance: Provenance }
+  | { state: 'atLeast'; count: number; unidentified: number }
+
+/** One identity group: a client, or a connection we cannot attribute. */
+export interface ClientView {
+  /** Stable while the row exists. For keying the list, not for identity. */
+  key: string
+  identified: boolean
+  /** Where that identity came from. Null when there is none. */
+  provenance: Provenance | null
+  /** The identity. For a credential this is the non-secret half. */
+  id: string | null
+  /** User-set on a credential; client-chosen on a self-reported row. */
+  label: string | null
+  /** When this device first paired, when the credential store records it. */
+  createdMs: number | null
+  /**
+   * This row volunteers an id that a verified credential also holds.
+   *
+   * The two never merge, so the counts are right without this. But both render
+   * the same id string, and the panel is what someone reads before choosing
+   * which row to revoke.
+   */
+  impersonating: boolean
+  /**
+   * Whether "revoke this device" is coherent here. Only a verified credential
+   * that has not already been revoked: revoking a self-reported id closes a
+   * socket that reconnects a second later under any id it likes.
+   */
+  revocable: boolean
+  /**
+   * When this device was revoked, if it was, during this run.
+   *
+   * The row outlives its sockets by minutes — exactly the minutes someone
+   * spends checking the revoke worked — so it says what happened rather than
+   * sitting there still tagged "verified".
+   */
+  revokedAtMs: number | null
+  /**
+   * A revoked device reconnected with a credential that still verifies.
+   *
+   * A detector, not a state: it can only happen when the credential was never
+   * deleted, so the revoke closed a socket and nothing more. Rendered as a
+   * fault, because the alternative is a row reading "revoked" with a live
+   * phone attached to it.
+   */
+  revokeContested: boolean
+  connected: boolean
+  /** Open sockets. Two tabs on one phone is two sockets, one device. */
+  sockets: number
+  /** Connections during this bridge run. Above one means it reconnected. */
+  connections: number
+  firstSeenMs: number
+  connectedAtMs: number
+  disconnectedAtMs: number | null
+  /**
+   * When the bridge last succeeded in writing to this client. The relay writes
+   * at least once a second, so a much older value means the socket is wedged
+   * and the client has probably already gone.
+   */
+  lastHeardMs: number
+  address: string
+  /** Earlier addresses. Non-empty on an identified row means it roamed. */
+  previousAddresses: string[]
+  agent: string | null
+  /**
+   * A guess, rendered as one: a gone row from the same address and agent that
+   * dropped moments ago. Never folded into `devices`.
+   */
+  maybeSameAs: string | null
+}
+
+export interface ClientsView {
+  /** Open sockets. The one number here that is measured, not inferred. */
+  connections: number
+  browsers: BrowserCount
+  clients: ClientView[]
+  anyUnidentified: boolean
+  /**
+   * Whether this bridge can verify a device at all.
+   *
+   * True once a credential resolver is installed — which the app and the
+   * headless binary both do at startup, now that pairing exists. False
+   * therefore no longer means "this feature was never built"; it means the
+   * wiring is missing on this build, and the log says so on the first
+   * credentialed connection.
+   *
+   * Stated rather than left to be inferred from an absence: without it, a
+   * bridge whose resolver failed to install is indistinguishable from one
+   * where nobody has paired.
+   */
+  credentialsAvailable: boolean
+}
+
 export interface Status {
   snapshot: PlayerSnapshot
   urls: Urls
@@ -141,4 +259,6 @@ export interface Status {
   libraryDir: string | null
   fakePlayer: string | null
   version: string
+  /** Who is connected. Also pushed on change as the `clients` event. */
+  clients: ClientsView
 }

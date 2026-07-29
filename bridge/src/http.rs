@@ -62,6 +62,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
 
 use crate::auth::{self, Token};
+use crate::clients::{self, ClientRegistry};
 use crate::library::{self, Library};
 use crate::state::{PlayerCommand, PlayerSnapshot};
 use crate::{log_debug, log_info, log_warn, qr};
@@ -117,6 +118,17 @@ pub struct Ctx {
     /// so it does not go away — it simply stops being presented by devices that
     /// have already paired.
     pub devices: Arc<crate::devices::DeviceStore>,
+    /// Who is connected to [`ws_relay`], and how much of that we know.
+    ///
+    /// Owned by whoever starts the listener rather than created here, so the
+    /// desktop window can render an empty-but-correct panel before the port is
+    /// bound — the same reason [`crate::http`]'s bind result is three-valued.
+    ///
+    /// Holds the credential resolver that turns `devices` into identity. The
+    /// two are separate fields on purpose: `devices` is the store, and this is
+    /// the only thing that decides *who a connection is*. One question, one
+    /// answer.
+    pub clients: Arc<ClientRegistry>,
 }
 
 impl Ctx {
@@ -320,9 +332,45 @@ where
             return;
         }
 
+        // Read before `head` is moved into `Prefixed`. Who this client *is* is
+        // decided in one place — `ClientRegistry::identity_for` — so that
+        // improving it (a verified per-device credential rather than a string
+        // the client chose) is a change there and nowhere else. Neither the
+        // address nor the agent is identity; `clients.rs` sets out why.
+        //
+        // Reuses the binding `authorised` already took: two lookups of the same
+        // header invite the two answers to drift.
+        let identity = ctx.clients.identity_for(target, cookie);
+
+        // Authorisation and identity must not disagree about the same cookie.
+        //
+        // They are computed by different code — `authorised` asks the store
+        // directly, this asks the registry's resolver — and the resolver is
+        // installed at startup by the process. If nobody installs it, every
+        // route still works and every credentialed device silently renders as
+        // "we could not establish who this is": the panel at its least useful
+        // precisely for the devices it should be best at, with nothing
+        // anywhere saying why.
+        //
+        // Keyed on the condition rather than on the category, so it fires for
+        // any future way the two can diverge and not merely for a missing
+        // resolver. Costs one hash comparison on connections that carry a
+        // cookie at all.
+        if ctx.devices.verify(cookie).is_some()
+            && !matches!(identity, clients::ConnectingIdentity::Credential(_))
+        {
+            log_warn!(
+                "[ws] {addr} authorised by a device credential but resolved as \
+                 unidentified — the credential resolver is not installed, so the \
+                 clients panel cannot tell verified devices apart"
+            );
+        }
+
+        let user_agent = header_value(&head, "user-agent").map(|ua| ua.to_string());
+
         let stream = Prefixed::new(head, stream);
         match accept_hdr_async(stream, |_req: &_, res| Ok(res)).await {
-            Ok(ws) => ws_relay(ws, addr, ctx).await,
+            Ok(ws) => ws_relay(ws, addr, ctx, identity, user_agent.as_deref()).await,
             Err(e) => log_warn!("[http] {addr} websocket handshake failed: {e}"),
         }
         return;
@@ -478,7 +526,17 @@ async fn route<W>(
                 .await
             } else {
                 let snap = ctx.snapshot_rx.borrow().clone();
-                let body = serde_json::to_vec_pretty(&snap).unwrap_or_default();
+                // The snapshot's own keys are left exactly where they were and
+                // `clients` is added beside them, so a consumer that reads
+                // `positionS` off the top level is unaffected. A headless
+                // bridge has no window, and this is the only place it can
+                // answer "is my phone actually talking to this?".
+                let mut body = serde_json::to_value(&snap).unwrap_or_default();
+                if let Some(object) = body.as_object_mut() {
+                    let clients = serde_json::to_value(ctx.clients.view()).unwrap_or_default();
+                    object.insert("clients".into(), clients);
+                }
+                let body = serde_json::to_vec_pretty(&body).unwrap_or_default();
                 respond(stream, Status::OK, "application/json; charset=utf-8", &body).await
             }
         }
@@ -1176,6 +1234,22 @@ where
 /// player is doing — including nothing.
 pub const RELAY_KEEPALIVE: std::time::Duration = std::time::Duration::from_millis(1000);
 
+/// Close code sent to a client whose device credential was revoked.
+///
+/// In the 4000–4999 application range. A distinct code exists so the phone can
+/// say "this device was un-paired from the bridge" rather than showing the
+/// generic drop it would otherwise be indistinguishable from — the same
+/// reasoning that makes 1006 unsafe to render as "the bridge is unreachable".
+pub const WS_CLOSE_REVOKED: u16 = 4001;
+
+/// How long a revoked client gets to accept its close frame before the socket
+/// is dropped from under it.
+///
+/// Short on purpose. The only thing waiting buys is a client learning *why* it
+/// was disconnected, and the cost of waiting too long is the bridge continuing
+/// to report a revoked device as connected. Those are not close in weight.
+pub const REVOKE_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Relay player state to one client, and accept commands back.
 ///
 /// The message format is a stub, but an honest one: it carries exactly the
@@ -1247,10 +1321,16 @@ pub(crate) async fn ws_relay<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     addr: SocketAddr,
     ctx: Arc<Ctx>,
+    identity: clients::ConnectingIdentity,
+    user_agent: Option<&str>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     log_info!("[ws] {addr} connected");
+    // Registered before the first byte, and deregistered by `Drop` — so an
+    // early return below, or a socket torn off a roaming phone, cannot leave a
+    // client on the panel that is not there.
+    let mut client = ctx.clients.connect(addr, user_agent, identity);
     let (mut tx, mut rx) = ws.split();
     let mut snapshots = ctx.snapshot_rx.clone();
 
@@ -1268,6 +1348,16 @@ pub(crate) async fn ws_relay<S>(
         "version": env!("CARGO_PKG_VERSION"),
         "carries": ["position", "playing", "duration", "media", "library"],
         "accepts": ["seek", "play", "pause"],
+        // How a client may say which device it is, so a reconnect is not shown
+        // as a second phone. Nothing here is authentication — see
+        // `clients.rs` — and a client that ignores it simply appears as
+        // "unidentified", which the window states rather than guesses around.
+        "identify": {
+            "param": clients::CLIENT_ID_PARAM,
+            "message": "hello",
+            "fields": ["clientId", "label"],
+            "note": "clientId must be stable per device and at least 8 characters",
+        },
         "note": "spike build — message shape is not stable",
     });
     if tx.send(Message::Text(hello.to_string())).await.is_err() {
@@ -1312,6 +1402,53 @@ pub(crate) async fn ws_relay<S>(
 
     loop {
         tokio::select! {
+            // `biased` is load-bearing, not tidiness. Without it `select!`
+            // polls its arms in a **random** order on every iteration, so a
+            // revoked socket with a busy snapshot channel loses the race about
+            // three times in four and keeps receiving state it should not.
+            //
+            // An earlier version of this comment asserted that arms are polled
+            // in order and there was no `biased`. It read as a deliberate
+            // decision and was simply wrong, which is why the ordering now has
+            // a test — the property is invisible at the call site and the
+            // failure is probabilistic.
+            biased;
+
+            _ = client.revoked() => {
+                log_info!("[ws] {addr} closed: the device was revoked");
+                // Say why — a silent drop is byte-identical to a dead router —
+                // but never wait indefinitely to say it.
+                //
+                // This send is to a peer we have every reason to think may not
+                // be reading. The wedged half-open socket is not a hypothetical
+                // here: it is the case the panel's staleness detector exists
+                // for, and "the user revoked a device that had wandered off" is
+                // an ordinary way to arrive at this line. An unbounded await
+                // would then hang this task forever, so the handle would never
+                // drop, so the registry would go on reporting the revoked
+                // device as connected — the panel confidently vouching for a
+                // device the user has just cut off, which is the worst
+                // available outcome in this whole module and is reached by
+                // being polite about the close frame.
+                //
+                // So: a short grace period for the courtesy, then go regardless.
+                // Dropping the stream closes the socket; the client sees a 1006
+                // rather than a reason, which is worse for them and much better
+                // than a lie on our side.
+                let close = tx.send(Message::Close(Some(
+                    tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: WS_CLOSE_REVOKED.into(),
+                        reason: "revoked".into(),
+                    },
+                )));
+                if tokio::time::timeout(REVOKE_CLOSE_GRACE, close).await.is_err() {
+                    log_warn!(
+                        "[ws] {addr} did not accept the close frame within {REVOKE_CLOSE_GRACE:?}; \
+                         dropping the socket anyway"
+                    );
+                }
+                break;
+            }
             changed = snapshots.changed() => {
                 if changed.is_err() {
                     break; // bridge shutting down
@@ -1333,6 +1470,18 @@ pub(crate) async fn ws_relay<S>(
                 // the snapshot is current either way.
                 let snap = snapshots.borrow().clone();
                 if send_snapshot(&mut tx, &snap).await.is_err() {
+                    break;
+                }
+                // Ask the client to prove it is still there.
+                //
+                // A successful write proves nothing about the peer — it means
+                // the local TCP stack took the bytes. A phone carried out of
+                // range holds a half-open socket, and 200-byte snapshots at
+                // 1 Hz would take minutes to fill the send buffer, so a
+                // write-based liveness check could not detect the case it
+                // existed for. Every browser answers a Ping with a Pong
+                // automatically, so this is the client's own signal.
+                if tx.send(Message::Ping(Vec::new())).await.is_err() {
                     break;
                 }
             }
@@ -1363,7 +1512,13 @@ pub(crate) async fn ws_relay<S>(
             incoming = rx.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        if let Some(cmd) = parse_client_command(&text) {
+                        client.heard();
+                        if let Some(claim) = clients::parse_hello(&text) {
+                            // The client saying which device it is. Advisory,
+                            // unauthenticated, and used for nothing except
+                            // telling a reconnect from a second device.
+                            client.identify(claim);
+                        } else if let Some(cmd) = parse_client_command(&text) {
                             // Never block the relay on a full queue: dropping a
                             // stale seek is better than stalling state updates.
                             if ctx.cmd_tx.try_send(cmd).is_err() {
@@ -1374,8 +1529,12 @@ pub(crate) async fn ws_relay<S>(
                         }
                     }
                     Some(Ok(Message::Ping(p))) => {
+                        client.heard();
                         if tx.send(Message::Pong(p)).await.is_err() { break; }
                     }
+                    // The answer to our keepalive Ping, and the ordinary way a
+                    // live client stays fresh on the panel.
+                    Some(Ok(Message::Pong(_))) => client.heard(),
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(e)) => {
                         log_debug!("[ws] {addr} error: {e}");
@@ -1843,6 +2002,7 @@ mod tests {
                     std::process::id()
                 )),
             )),
+            clients: Default::default(),
         }
     }
 
