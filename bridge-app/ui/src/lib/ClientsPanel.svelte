@@ -19,6 +19,9 @@
 
   const view = $derived(bridge.clients)
 
+  /** Which row is asking "are you sure?". Only one at a time. */
+  let confirming = $state<string | null>(null)
+
   /**
    * A display clock, so "connected 4s ago" ages without a round trip.
    *
@@ -110,12 +113,17 @@
   }
 
   /**
-   * Whether a connection looks wedged.
+   * Whether a connection has stopped answering.
    *
-   * The relay writes to every client at least once a second, so a client we
-   * have not managed to write to for several seconds is probably already gone
-   * — a phone carried out of range holds a half-open socket for a while. A
-   * bare "connected" would keep vouching for it.
+   * The relay pings every client each second and browsers answer
+   * automatically, so a client silent for several seconds is not responding.
+   * This used to be measured from our own last *write*, which proved only that
+   * the local TCP stack accepted bytes — a phone carried out of range would
+   * have looked healthy for minutes.
+   *
+   * Stale here is real evidence. Fresh means the browser is reachable, which is
+   * not quite the same as the page being healthy: a Pong comes from the
+   * browser, not from the app's script.
    */
   const STALE_AFTER_MS = 5000
   function stale(client: ClientView): boolean {
@@ -279,6 +287,43 @@
           >
             {client.id}
           </p>
+        {/if}
+
+        <!--
+          Offered only where it means something. `revocable` is true for a
+          verified credential that has not already been revoked — there is a
+          durable record to delete and deleting it stops the device coming
+          back. It is deliberately absent on self-reported rows: revoking one
+          would close a socket that reconnects a second later under any id it
+          likes, and a button that appears to work and does not is the failure
+          this whole panel exists to stop shipping.
+        -->
+        {#if client.revocable}
+          <div class="row actions">
+            {#if confirming === client.key}
+              <span class="small warn">
+                {client.connected
+                  ? 'Disconnects it now and it must scan the QR again.'
+                  : 'It must scan the QR again to return.'}
+              </span>
+              <button class="small-btn" onclick={() => (confirming = null)}>
+                Cancel
+              </button>
+              <button
+                class="small-btn danger"
+                onclick={async () => {
+                  confirming = null
+                  await bridge.revokeDevice(client.id!)
+                }}
+              >
+                Un-pair
+              </button>
+            {:else}
+              <button class="small-btn" onclick={() => (confirming = client.key)}>
+                Un-pair this device
+              </button>
+            {/if}
+          </div>
         {/if}
 
         {#if client.impersonating}
@@ -479,6 +524,25 @@
 
   .bad {
     color: var(--bad);
+  }
+
+  .actions {
+    margin-top: 0.4rem;
+  }
+
+  .small-btn {
+    font-size: 0.8rem;
+    padding: 0.2rem 0.5rem;
+  }
+
+  .danger {
+    border-color: var(--bad);
+    color: var(--bad);
+  }
+
+  .danger:hover {
+    background: var(--bad);
+    color: #1a0505;
   }
 
   .footnote {

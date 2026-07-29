@@ -383,6 +383,8 @@ fn main() {
             commands::send_player_command,
             commands::pairing_qr,
             commands::rotate_token,
+            commands::revoke_device,
+            commands::revoke_all_devices,
             commands::log_history,
             commands::start_fake_player,
             commands::stop_fake_player,
@@ -476,6 +478,25 @@ fn serve_http(
     let snapshot_rx = state.bridge.snapshot_rx.clone();
     let cmd_tx = state.bridge.cmd_tx.clone();
     let clients = Arc::clone(&state.clients);
+
+    // Turn the credential store into identity.
+    //
+    // The only line connecting "this request is authorised" to "this is which
+    // device". Without it every paired phone authorises normally and then
+    // renders on the clients panel as one we could not identify — the panel at
+    // its least useful for exactly the devices it should be best at.
+    // `serve_conn` logs when it sees that disagreement, but installing this is
+    // what makes the log unnecessary.
+    let credential_store = Arc::clone(&state.devices);
+    clients.set_credential_resolver(Arc::new(move |cookie: Option<&str>| {
+        credential_store
+            .verify(cookie)
+            .map(|d| coyote_bridge::clients::Credential {
+                id: d.id,
+                label: d.label,
+                created_ms: Some(d.created_ms),
+            })
+    }));
 
     // Persist a rotated token, so a rotation performed over TLS survives a
     // restart rather than silently reverting to the cleartext one it replaced.

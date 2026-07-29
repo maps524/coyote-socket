@@ -223,6 +223,70 @@ pub fn rotate_token(state: Shared) -> Result<String, String> {
     qr::to_svg(&state.pairing_url()).map_err(|e| e.to_string())
 }
 
+/// Un-pair one device: delete its credential, then close its live sockets.
+///
+/// # Both halves, in this order, always
+///
+/// Deleting the record stops the **next** connection. It does nothing to the
+/// socket that is open right now, and that socket is what is driving hardware.
+/// Closing the socket without deleting the record stops nothing at all — the
+/// device reconnects a second later with a credential that still verifies.
+///
+/// A caller that does one and not the other produces the worst outcome
+/// available here: the panel says revoked, the user believes the device is cut
+/// off, and it is not. Store first, so a connection racing the gap is refused
+/// rather than re-admitted.
+///
+/// The count returned is how many sockets were closed *now*. **It is not the
+/// success signal** — zero is the ordinary result for a device that was
+/// offline, and for one paired before this bridge started, since the registry
+/// remembers only the current run. Success is the store's answer.
+#[tauri::command]
+pub fn revoke_device(id: String, state: Shared) -> Result<RevokeOutcome, String> {
+    let existed = state.devices.revoke(&id)?;
+    let closed = state.clients.revoke(&id);
+    log_info!(
+        "[app] device {id} un-paired by the user; {closed} live socket(s) closed. \
+         It must scan the QR again to return."
+    );
+    Ok(RevokeOutcome { existed, closed })
+}
+
+/// Un-pair **every** device, and close every one of their sockets.
+///
+/// The companion to rotating the token, and neither implies the other:
+/// rotation stops the QR minting *new* credentials, while this invalidates the
+/// ones it has already produced. A UI offering only rotation promises something
+/// it does not deliver, because a credential obtained before a rotation still
+/// authorises afterwards.
+#[tauri::command]
+pub fn revoke_all_devices(state: Shared) -> Result<RevokeOutcome, String> {
+    let ids = state.devices.revoke_all()?;
+    // Every id the store just forgot, so no live socket outlives its record.
+    let closed: usize = ids.iter().map(|id| state.clients.revoke(id)).sum();
+    log_info!(
+        "[app] all {} paired device(s) un-paired by the user; {closed} live socket(s) closed",
+        ids.len()
+    );
+    Ok(RevokeOutcome {
+        existed: !ids.is_empty(),
+        closed,
+    })
+}
+
+/// What a revoke actually did, kept as two facts rather than one.
+///
+/// `existed` is whether there was a credential to delete — the store's answer,
+/// and the one that says whether the revoke *worked*. `closed` is how many live
+/// sockets were cut, which is a different question and is zero in the perfectly
+/// ordinary case of an offline device.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeOutcome {
+    pub existed: bool,
+    pub closed: usize,
+}
+
 /// The whole ring buffer, for the copy button.
 #[tauri::command]
 pub fn log_history() -> Vec<String> {

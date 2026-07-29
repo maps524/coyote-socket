@@ -208,6 +208,32 @@ class Bridge {
     if (svg) this.qrSvg = svg
   }
 
+  /**
+   * Un-pair one device: its credential is deleted and its live sockets close.
+   *
+   * `closed` is how many sockets were cut, which is *not* whether it worked —
+   * zero is the ordinary answer for a device that was simply offline. The
+   * backend takes success from the store; this only reports.
+   */
+  async revokeDevice(id: string) {
+    await this.run(() =>
+      invoke<{ existed: boolean; closed: number }>('revoke_device', { id }),
+    )
+  }
+
+  /**
+   * Un-pair every device.
+   *
+   * The companion to rotating the token, and neither implies the other:
+   * rotation stops the QR minting new credentials, this invalidates the ones it
+   * has already produced.
+   */
+  async revokeAllDevices() {
+    await this.run(() =>
+      invoke<{ existed: boolean; closed: number }>('revoke_all_devices'),
+    )
+  }
+
   async open(url: string) {
     await this.run(() => invoke('open_external', { url }))
   }

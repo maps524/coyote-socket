@@ -1100,6 +1100,8 @@ fn test_device_store() -> std::sync::Arc<coyote_bridge::devices::DeviceStore> {
     ));
     let _ = std::fs::remove_file(&path);
     std::sync::Arc::new(coyote_bridge::devices::DeviceStore::load(path))
+}
+
 // ---------------------------------------------------------------------------
 // Who is connected
 // ---------------------------------------------------------------------------
@@ -1147,6 +1149,8 @@ async fn spawn_stack(
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
             library: None,
+            tls: None,
+            devices: test_device_store(),
             clients: std::sync::Arc::clone(&clients),
         }),
     ));
@@ -1192,7 +1196,7 @@ async fn a_verified_credential_decides_who_a_client_is() {
         "{}/ws?t={token}&c=self-chosen-id",
         base.replace("http://", "ws://")
     );
-    let request = ws_request_with_cookie(&ws_url, "coyote_device=known-device-secret");
+    let request = ws_request_with_cookie(&ws_url, &base, "coyote_device=known-device-secret");
     let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     let _ = next_text(&mut ws).await;
 
@@ -1221,7 +1225,7 @@ async fn an_unrecognised_cookie_falls_back_to_self_reported_and_says_so() {
         "{}/ws?t={token}&c=self-chosen-id",
         base.replace("http://", "ws://")
     );
-    let request = ws_request_with_cookie(&ws_url, "coyote_device=forged");
+    let request = ws_request_with_cookie(&ws_url, &base, "coyote_device=forged");
     let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     let _ = next_text(&mut ws).await;
 
@@ -1287,7 +1291,7 @@ async fn a_revoked_socket_closes_before_the_relay_sends_more_state() {
 
     let mut frames_after_revoke = 0usize;
     for _ in 0..30 {
-        let request = ws_request_with_cookie(&ws_url, "dev=1");
+        let request = ws_request_with_cookie(&ws_url, &stack.base, "dev=1");
         let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
         // Drain the startup burst by *waiting for silence* rather than by
         // counting messages. Counting was wrong within a day: the library work
@@ -1334,12 +1338,21 @@ async fn a_revoked_socket_closes_before_the_relay_sends_more_state() {
     );
 }
 
-/// Build a WebSocket upgrade carrying a `Cookie` header.
+/// Build a WebSocket upgrade carrying a `Cookie` header, as a browser sends it.
 ///
-/// `connect_async` takes a URL and sends no cookies; the credential rides the
-/// upgrade automatically in a browser, and a test has to do it by hand.
+/// `connect_async` takes a URL and sends neither cookies nor an `Origin`; a
+/// browser sends both, and the distinction is load-bearing. `authorised`
+/// refuses any request that presents a cookie without an `Origin`, because
+/// `SameSite=Lax` attaches the cookie to cross-site top-level navigations and
+/// those carry no `Origin` — so accepting them would let a drive-by page act
+/// with the credential.
+///
+/// A test that omitted the header would therefore be refused, and reading that
+/// 401 as "my credential is wrong" rather than "my test is not a browser" is
+/// exactly the misattribution this suite exists to prevent.
 fn ws_request_with_cookie(
     url: &str,
+    origin: &str,
     cookie: &str,
 ) -> tokio_tungstenite::tungstenite::handshake::client::Request {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -1347,6 +1360,9 @@ fn ws_request_with_cookie(
     request
         .headers_mut()
         .insert("Cookie", cookie.parse().expect("a valid cookie header"));
+    request
+        .headers_mut()
+        .insert("Origin", origin.parse().expect("a valid origin"));
     request
 }
 
