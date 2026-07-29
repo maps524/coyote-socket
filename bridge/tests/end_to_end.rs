@@ -1146,6 +1146,7 @@ async fn spawn_stack(
             token: std::sync::RwLock::new(token.clone()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
+            library: None,
             clients: std::sync::Arc::clone(&clients),
         }),
     ));
@@ -1288,11 +1289,19 @@ async fn a_revoked_socket_closes_before_the_relay_sends_more_state() {
     for _ in 0..30 {
         let request = ws_request_with_cookie(&ws_url, "dev=1");
         let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        let _ = next_text(&mut ws).await; // hello
-        let _ = next_text(&mut ws).await; // the initial snapshot
-
-        // Let the relay reach the select with every arm pending.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Drain the startup burst by *waiting for silence* rather than by
+        // counting messages. Counting was wrong within a day: the library work
+        // added a third opening frame, and a test that expected two then
+        // attributed the third to the race it was measuring — reporting
+        // exactly one leaked frame per round, deterministically, which looks
+        // nothing like the random loss it was built to catch.
+        loop {
+            match tokio::time::timeout(Duration::from_millis(150), ws.next()).await {
+                Ok(Some(Ok(_))) => continue,
+                Err(_) => break, // silence: the relay is parked at the select
+                other => panic!("websocket ended during startup: {other:?}"),
+            }
+        }
 
         // Both arms become ready together: the revoke signal, and a snapshot
         // channel that will not stop changing.
