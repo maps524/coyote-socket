@@ -110,8 +110,14 @@ fn surface<R: Runtime>(app: &AppHandle<R>) {
 /// string to the OS shell-execute API as a single opaque argument, so there is
 /// no command line to escape.
 pub fn open_url(url: &str) {
-    coyote_bridge::log_info!("[tray] opening {url}");
+    // Redacted: the tray can be asked to open URLs that carry the token.
+    coyote_bridge::log_info!("[tray] opening {}", coyote_bridge::auth::redact_url(url));
     if let Err(e) = tauri_plugin_opener::open_url(url, None::<&str>) {
-        coyote_bridge::log_warn!("[tray] could not open browser: {e}. Open {url} manually.");
+        // Redacted on the error path too — that is exactly when someone
+        // copies the log.
+        coyote_bridge::log_warn!(
+            "[tray] could not open browser: {e}. Open {} manually.",
+            coyote_bridge::auth::redact_url(url)
+        );
     }
 }

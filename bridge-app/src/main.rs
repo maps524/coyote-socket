@@ -170,7 +170,12 @@ fn main() {
             forward_events(app.handle().clone(), bridge, wire_rx);
             tray::install(app.handle(), &urls)?;
 
-            log_info!("[app] bridge window ready; phone should open {}", urls.pairing);
+            // Redacted: this line ends up in the window's log pane, which has
+            // a button that copies it for pasting into bug reports.
+            log_info!(
+                "[app] bridge window ready; phone should open {}",
+                auth::redact_url(&urls.pairing)
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

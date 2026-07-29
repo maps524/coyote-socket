@@ -27,7 +27,7 @@ use crate::{log_info, log_warn};
 /// Must be called from the process's main thread: on Windows the tray icon
 /// needs a message pump on the thread that created it, and on macOS the event
 /// loop is main-thread-only.
-pub fn run(pairing_url: String, local_url: String) -> ! {
+pub fn run(pairing_url: String, local_url: String, status_url: String) -> ! {
     let event_loop = EventLoopBuilder::new().build();
 
     let menu = Menu::new();
@@ -42,7 +42,10 @@ pub fn run(pairing_url: String, local_url: String) -> ! {
 
     let _tray = match TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip(format!("CoyoteSocket bridge — {pairing_url}"))
+        .with_tooltip(format!(
+            "CoyoteSocket bridge — {}",
+            crate::auth::redact_url(&pairing_url)
+        ))
         .with_icon(bolt_icon())
         .build()
     {
@@ -94,7 +97,8 @@ pub fn run(pairing_url: String, local_url: String) -> ! {
         while let Ok(action) = rx.try_recv() {
             match action {
                 Action::ShowPairing => open_url(&format!("{local_url}/pair")),
-                Action::ShowStatus => open_url(&format!("{local_url}/healthz")),
+                // Carries the token: /healthz is gated, so a bare URL would 401.
+                Action::ShowStatus => open_url(&status_url),
                 Action::Quit => {
                     log_info!("[tray] quit requested");
                     *control_flow = ControlFlow::Exit;
@@ -112,12 +116,18 @@ enum Action {
 
 /// Open `url` in the default browser without pulling in a crate for it.
 fn open_url(url: &str) {
-    log_info!("[tray] opening {url}");
+    // Redacted: the tray can be asked to open URLs that carry the token, and
+    // this log is routinely shared.
+    log_info!("[tray] opening {}", crate::auth::redact_url(url));
     let result = if cfg!(target_os = "windows") {
-        // `start` is a cmd builtin, and the empty "" is the window title —
-        // without it cmd treats a quoted URL as the title and opens nothing.
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
+        // Not `cmd /C start`. `cmd` re-parses its argument as a command line,
+        // so `&`, `|` and `^` in a URL become shell operators — one quoting
+        // mistake from executing rather than opening. `rundll32` receives the
+        // URL as a plain argument with no shell in the path. (The Tauri build
+        // uses the `opener` plugin; this crate has no such dependency and is
+        // not about to grow one for a tray.)
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", url])
             .spawn()
     } else if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(url).spawn()
@@ -126,7 +136,12 @@ fn open_url(url: &str) {
     };
 
     if let Err(e) = result {
-        log_warn!("[tray] could not open browser: {e}. Open {url} manually.");
+        // Redacted here too: an error path is exactly when someone copies the
+        // log.
+        log_warn!(
+            "[tray] could not open browser: {e}. Open {} manually.",
+            crate::auth::redact_url(url)
+        );
     }
 }
 

@@ -51,9 +51,22 @@
   // A reconnect is a discontinuity: the epoch changing means the position
   // before and after are unrelated. Abandon any drag in flight rather than
   // letting its release seek the new connection.
+  //
+  // Compared against a captured value rather than left to effect granularity.
+  // `snap` is a fresh object on every packet, and `$effect` tracks the signal
+  // rather than the property path — so `void snap.epoch` re-ran about once a
+  // second and cleared `scrubbing` mid-drag. `oninput` put it back on every
+  // pointer move, which hid the bug while the finger was moving and exposed it
+  // the moment someone held still: the thumb snapped to the playhead under
+  // their finger. That is precisely the behaviour `scrubbing` exists to
+  // prevent, reintroduced by the fix for something else.
+  let lastEpoch = $state(0)
   $effect(() => {
-    void snap.epoch
-    scrubbing = false
+    if (snap.epoch !== lastEpoch) {
+      lastEpoch = snap.epoch
+      scrubbing = false
+      dragMedia = null
+    }
   })
 </script>
 

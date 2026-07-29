@@ -131,6 +131,20 @@ pub fn with_token(url: &str, token: &Token) -> String {
     format!("{url}{separator}{TOKEN_PARAM}={token}")
 }
 
+/// A URL with its query string removed, safe to log or display.
+///
+/// **Use this for anything that reaches the log.** The log file, the ring
+/// buffer, stderr and the window's log pane are all one stream, and the
+/// window has a button that copies that stream for pasting into a bug report.
+/// A pairing URL logged verbatim is a persistent, password-equivalent
+/// credential published to wherever that paste lands.
+pub fn redact_url(url: &str) -> String {
+    match url.split_once('?') {
+        Some((base, _)) => format!("{base}?<redacted>"),
+        None => url.to_string(),
+    }
+}
+
 /// Whether a WebSocket upgrade's `Origin` is one we are willing to serve.
 ///
 /// Browsers set `Origin` on WebSocket handshakes and forbid pages from

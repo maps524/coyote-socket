@@ -16,15 +16,29 @@
 //!
 //! # Framing is now observed, not reasoned
 //!
-//! The capture records the four length bytes **before decoding**. For all 418
-//! inbound frames, the prefix read little-endian equals the payload's UTF-8
-//! byte count:
+//! The capture records the four length bytes **before decoding**:
 //!
 //! ```text
 //!   prefix  c6 00 00 00
-//!   little-endian ->            198   payload is 198 UTF-8 bytes  ok
+//!   little-endian ->            198   payload is 198 UTF-8 bytes
 //!   big-endian    -> 3 321 888 768   absurd
 //! ```
+//!
+//! Be careful about which half of that is evidence. "Little-endian equals the
+//! payload length" is a **post-condition of our own reader** — `read_frame_raw`
+//! allocates exactly `from_le_bytes(prefix)` bytes and reads exactly that many,
+//! so it holds for any capture our code produced, whatever the peer sent. An
+//! earlier version of this file billed it as the strong test. It is not.
+//!
+//! Two things here *are* evidence, because the peer controls them:
+//!
+//! 1. **No recorded prefix is readable as big-endian.** All 418 of them are
+//!    either non-positive or wildly over the frame cap when read that way.
+//! 2. **418 consecutive frames were read with no framing error.** A wrong byte
+//!    order does not degrade gracefully — the first frame would be misread as
+//!    a ~3-billion-byte length, rejected, and the connection torn down.
+//!    Fourteen minutes of clean reading is only possible if every length was
+//!    right.
 //!
 //! That is the difference between evidence and inference. Byte order was
 //! previously argued from MultiFunPlayer calling `BitConverter` on a
@@ -298,41 +312,96 @@ mod tests {
         assert_eq!(connects, 3, "three connections");
     }
 
-    /// **The non-circular test.** Real bytes off a real player, checked against
-    /// our byte-order assumption without our encoder in the loop.
+    /// **The non-circular test.** Every recorded prefix is nonsense read
+    /// big-endian.
+    ///
+    /// This is the assertion the peer controls. It says something about the
+    /// bytes DeoVR chose to send, and it would fail against a big-endian
+    /// sender no matter what our code did with them.
+    ///
+    /// Its sibling below — that the little-endian reading equals the payload
+    /// length — is *not* independent evidence, though an earlier version of
+    /// this file billed it as the strong one. `read_frame_raw` allocates
+    /// exactly `i32::from_le_bytes(prefix)` bytes and reads exactly that many,
+    /// so the equality is a post-condition of our own reader and holds for any
+    /// capture it produced. It is kept as a fixture-integrity check, which is
+    /// what it actually is.
     #[test]
-    fn every_recorded_prefix_is_little_endian() {
+    fn no_recorded_prefix_is_readable_as_big_endian() {
         let capture = Capture::deovr_quest();
         let inbound = capture.inbound();
-        assert!(!inbound.is_empty());
+        assert_eq!(inbound.len(), 418, "the whole capture, not a sample");
 
         for event in &inbound {
             let prefix = event.prefix_bytes().expect("an inbound frame has a prefix");
-            let payload_bytes = event.text.as_deref().unwrap().len();
-            let le = i32::from_le_bytes(prefix) as usize;
-            assert_eq!(
-                le, payload_bytes,
-                "prefix {} decodes little-endian to {le} but the payload is {payload_bytes} bytes",
+            let be = i64::from(i32::from_be_bytes(prefix));
+            let payload = event.text.as_deref().unwrap().len() as i64;
+
+            assert_ne!(
+                be, payload,
+                "prefix {} is a valid big-endian length for its payload",
+                event.prefix_hex
+            );
+            // Read big-endian, each frame is either non-positive — dismissed
+            // as a heartbeat, with its payload then read as a length prefix —
+            // or wildly over the frame cap. Neither is survivable, so a
+            // big-endian sender could not have produced a stream we read for
+            // fourteen minutes without a single framing error.
+            assert!(
+                be <= 0 || be > i64::from(crate::codec::MAX_FRAME_BYTES),
+                "prefix {} is a plausible big-endian length ({be})",
                 event.prefix_hex
             );
         }
     }
 
-    /// The same evidence stated as a falsification: big-endian is not merely
-    /// worse, it is absurd. If someone ever "fixes" the byte order, this says
-    /// what they would be claiming.
+    /// The strongest single fact, and the one that needs no byte arithmetic:
+    /// **418 consecutive frames were read with no framing error.**
+    ///
+    /// A wrong byte order does not degrade gracefully. The first frame would
+    /// be misread as a ~3-billion-byte length, rejected by the cap, and the
+    /// connection torn down. Reading 418 in a row is only possible if each
+    /// length was right, which is only possible if the byte order was right.
     #[test]
-    fn big_endian_would_be_nonsense_on_the_real_capture() {
+    fn the_recorded_stream_was_read_without_a_single_framing_error() {
         let capture = Capture::deovr_quest();
-        let event = capture.inbound()[0];
-        let prefix = event.prefix_bytes().unwrap();
-        let be = i64::from(i32::from_be_bytes(prefix));
-        let payload = event.text.as_deref().unwrap().len() as i64;
-        assert_ne!(be, payload);
-        // Read big-endian this frame is either non-positive — dismissed as a
-        // heartbeat, with its payload then read as a length prefix — or wildly
-        // over the frame cap. Neither is survivable.
-        assert!(be <= 0 || be > i64::from(crate::codec::MAX_FRAME_BYTES));
+        let framing_errors: Vec<_> = capture
+            .events
+            .iter()
+            .filter(|e| {
+                e.kind == "error"
+                    && e.text
+                        .as_deref()
+                        .is_some_and(|t| t.contains("prefix") || t.contains("desync"))
+            })
+            .collect();
+        assert!(
+            framing_errors.is_empty(),
+            "the capture contains framing errors: {framing_errors:?}"
+        );
+        assert_eq!(capture.inbound().len(), 418);
+    }
+
+    /// Fixture integrity: the recorded `len` and `prefixHex` agree with the
+    /// recorded payload.
+    ///
+    /// Not evidence about DeoVR — it is a post-condition of the reader that
+    /// wrote the capture (see above). It earns its place by catching a fixture
+    /// that has been hand-edited or re-serialised into inconsistency.
+    #[test]
+    fn the_fixture_is_internally_consistent() {
+        let capture = Capture::deovr_quest();
+        for event in capture.inbound() {
+            let prefix = event.prefix_bytes().expect("an inbound frame has a prefix");
+            let payload_bytes = event.text.as_deref().unwrap().len();
+            let le = i32::from_le_bytes(prefix) as usize;
+            assert_eq!(
+                le, payload_bytes,
+                "prefix {} says {le} bytes but the payload is {payload_bytes}",
+                event.prefix_hex
+            );
+            assert_eq!(event.len as usize, payload_bytes, "recorded len disagrees");
+        }
     }
 
     #[test]

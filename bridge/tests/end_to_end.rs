@@ -479,6 +479,40 @@ async fn a_websocket_without_a_token_cannot_open() {
     );
 }
 
+/// **The token must never reach the log.**
+///
+/// The log file, the ring buffer, stderr and the desktop window's log pane are
+/// one stream, and the window has a "Copy all" button whose stated purpose is
+/// assembling a block of text to paste into a bug report. A request line logged
+/// with its query string put a persistent, password-equivalent credential into
+/// exactly the thing users are encouraged to share.
+///
+/// This asserts the property rather than the fix, so a future call site that
+/// logs a URL fails here rather than shipping.
+#[tokio::test]
+async fn the_token_never_appears_in_the_log() {
+    coyote_bridge::logging::init(Some(std::env::temp_dir().join("coyote-bridge-log-test")));
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+
+    // Exercise every route that takes a token, plus a refusal.
+    let _ = get(&format!("{base}/healthz?t={token}")).await;
+    let _ = get(&format!("{base}/healthz?t=wrong")).await;
+    let _ = get(&format!("{base}/pair")).await;
+    let _ = get(&format!("{base}/pair/rotate?t={token}")).await;
+
+    let history = coyote_bridge::logging::history().join("\n");
+    assert!(
+        !history.contains(token.as_str()),
+        "the pairing token reached the log:\n{history}"
+    );
+    // And the redaction should be visible rather than silent, so a reader can
+    // tell "no query" from "query withheld".
+    assert!(
+        history.contains("<redacted>"),
+        "expected a redaction marker in:\n{history}"
+    );
+}
+
 /// The pairing page has to stay reachable: it is how a phone *obtains* the
 /// token, so gating it would be a bootstrap that cannot start.
 #[tokio::test]

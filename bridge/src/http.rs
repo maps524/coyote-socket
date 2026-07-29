@@ -1,12 +1,22 @@
 //! HTTP + WebSocket surface: serves the PWA and relays player state to it.
 //!
-//! One `TcpListener` handles both, using the peek-then-route trick lifted from
-//! `src-tauri/src/net.rs` — `TcpStream::peek` does not advance the read
-//! pointer, so the bytes are still there for whichever handler wins. That is
-//! how the desktop app already separates a Lovense HTTP request from a T-Code
-//! WebSocket upgrade on one port, and it is the reason this needs no HTTP
-//! framework: the dependency list stays a subset of what `src-tauri` already
-//! builds, which matters because these two crates are meant to merge.
+//! One listener handles both. The request head is read into a buffer, routed
+//! on, and then replayed to whichever handler wins via [`Prefixed`] — see that
+//! type for why buffering rather than peeking.
+//!
+//! This originally used the peek-then-route trick from `src-tauri/src/net.rs`,
+//! where `TcpStream::peek` leaves the bytes in the kernel buffer so the socket
+//! can be handed on untouched. That is how the desktop app separates a Lovense
+//! HTTP request from a T-Code WebSocket upgrade on one port. It was replaced
+//! because peeking is a TCP-only facility and this surface has to work over
+//! TLS: Web Bluetooth needs a secure context, and a secure page cannot open an
+//! insecure socket, so the WebSocket must be able to run inside TLS or the
+//! phone cannot use it at all. The routing decision is unchanged; only where
+//! the bytes are held has moved.
+//!
+//! Either way there is no HTTP framework here, which is the point: the
+//! dependency list stays a subset of what `src-tauri` already builds, and
+//! these two crates are meant to merge.
 //!
 //! Serving the PWA from the bridge (rather than hosting it centrally) is a
 //! decision from the spike record: no version skew between bridge and app,
@@ -18,8 +28,13 @@
 //!   secure context, so the phone will need `https://` — via a certificate or
 //!   a tunnel — before this is usable for real. `localhost` is exempt, which
 //!   is why the desktop-browser path works today and the phone path does not.
-//! - **Auth.** Anything on the LAN can connect. Fine for a spike, not for a
-//!   thing that drives hardware.
+//! - **Auth.** `/healthz` and `/ws` require a bearer token carried on the
+//!   pairing URL; `/pair`, `/qr.svg` and the static app do not, because they
+//!   are how a phone *obtains* the token. Read [`crate::auth`] for what that
+//!   does and does not cover — in particular it is not confidentiality, since
+//!   the token travels in a URL in cleartext, and it is not a substitute for
+//!   TLS. It stops a page you visited from opening a WebSocket and driving
+//!   your player, which is a real attack that no CORS setting prevents.
 //! - **T-Code ingest.** `net.rs`'s protocol auto-detection is not carried over
 //!   here; the LAN T-Code listener the desktop app provides is a separate
 //!   port and a separate job.
@@ -112,12 +127,27 @@ impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if self.consumed < self.head.len() {
+        // A zero-capacity poll must not be answered with "ready, nothing
+        // filled" while head bytes are still pending — that is how an
+        // `AsyncRead` signals EOF, so a caller polling with a full buffer
+        // would conclude the stream had ended and drop the rest of the head.
+        // Nothing in this crate polls that way and tungstenite does not
+        // either, but this type is a building block for the TLS listener and
+        // a wrapper that lies about EOF under an unusual poll is a bad thing
+        // to hand someone.
+        if self.consumed < self.head.len() && buf.remaining() > 0 {
             let remaining = &self.head[self.consumed..];
             let take = remaining.len().min(buf.remaining());
             buf.put_slice(&remaining[..take]);
             self.consumed += take;
             return Poll::Ready(Ok(()));
+        }
+        if self.consumed < self.head.len() {
+            // Buffer has no room and we still owe head bytes. Pending, with an
+            // immediate self-wake: returning Pending without arranging a wake
+            // would hang the task forever, since no external event is coming.
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
         }
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
@@ -195,8 +225,27 @@ where
 {
     let mut stream = stream;
     let head = match read_request_head(&mut stream).await {
-        Ok(head) if !head.is_empty() => head,
-        _ => return,
+        Ok(Head::Complete(head)) => head,
+        Ok(Head::TooLarge) => {
+            // Say so, on the wire and in the log. The previous behaviour —
+            // stop reading, write, close on a still-full socket — sent RST and
+            // destroyed the response in flight, so the phone saw an
+            // unexplained failure and there was nothing on either side to
+            // explain it.
+            log_warn!("[http] {addr} request head exceeded {MAX_HEAD_BYTES} bytes");
+            drain_briefly(&mut stream).await;
+            let _ = respond(
+                &mut stream,
+                431,
+                "text/plain; charset=utf-8",
+                b"request header fields too large",
+            )
+            .await;
+            return;
+        }
+        // Nothing usable arrived. A port scan and a client that hung up
+        // mid-request both land here, and neither is worth a response.
+        Ok(Head::Incomplete) | Err(_) => return,
     };
 
     if is_websocket_upgrade(&head) {
@@ -227,7 +276,13 @@ where
         let _ = respond(&mut stream, 400, "text/plain; charset=utf-8", b"bad request").await;
         return;
     };
-    log_debug!("[http] {addr} {method} {path}");
+    // Log the path *without* its query string. The query carries the pairing
+    // token, and this line reaches the ring buffer, the log file, stderr and
+    // the broadcast channel the desktop window renders — which is also what
+    // the "Copy all" button assembles for pasting into a bug report. Logging
+    // the full target turned a credential into something the UI actively
+    // encourages users to hand out.
+    log_debug!("[http] {addr} {method} {}", redact_query(&path));
 
     let origin = header_value(&head, "origin").map(|o| o.to_string());
     let mut stream = Prefixed::new(head, stream);
@@ -244,6 +299,19 @@ where
     }
 
     route(&mut stream, &path, origin.as_deref(), secure, &ctx).await;
+}
+
+/// Strip the query string from a request target before it is logged.
+///
+/// Everything secret in a request to this server lives in the query. Rather
+/// than redacting the token by name — which fails the moment a second secret
+/// parameter appears — drop the query wholesale and keep a marker so a reader
+/// can tell "no query" from "query withheld".
+fn redact_query(target: &str) -> String {
+    match target.split_once('?') {
+        Some((path, _)) => format!("{path}?<redacted>"),
+        None => target.to_string(),
+    }
 }
 
 /// Whether a request carries a valid token and an acceptable `Origin`.
@@ -424,6 +492,7 @@ where
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        431 => "Request Header Fields Too Large",
         _ => "Internal Server Error",
     };
     // No `Access-Control-Allow-Origin: *`. It was there to make a browser on
@@ -567,7 +636,28 @@ pub fn parse_client_command(text: &str) -> Option<PlayerCommand> {
 /// us buffer without limit.
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 
-/// Read until the header block is complete, and return it.
+/// How reading the request head ended.
+///
+/// Three of these are not success, and an earlier version returned all of them
+/// as `Ok(head)`. A truncated head with a parseable request line was then
+/// routed normally — and any header that had not arrived, including `Origin`,
+/// simply appeared absent. `origin_is_acceptable(None, …)` deliberately allows
+/// a missing `Origin` so native clients work, so a phone on flaky Wi-Fi whose
+/// head straddled a stall was served on half its headers. The token was still
+/// required, so this was never an auth bypass, but "served on partial
+/// headers" is not a state worth having, and its likely symptom was a
+/// mysterious 401 blamed on the token.
+enum Head {
+    /// Terminated by `\r\n\r\n`. The only complete outcome.
+    Complete(Vec<u8>),
+    /// The peer closed, or said nothing at all, before finishing.
+    Incomplete,
+    /// Larger than [`MAX_HEAD_BYTES`]. Distinguishable because it deserves a
+    /// different status code and a log line.
+    TooLarge,
+}
+
+/// Read until the header block is complete.
 ///
 /// Replaces the `TcpStream::peek` version lifted from `net.rs`. Peeking left
 /// the bytes in the kernel buffer so the socket could be handed to a handler
@@ -575,7 +665,7 @@ const MAX_HEAD_BYTES: usize = 16 * 1024;
 /// have already been decrypted out of the socket and cannot be put back. The
 /// head is buffered instead and replayed through [`Prefixed`], which costs one
 /// small allocation per request and works over any transport.
-async fn read_request_head<S>(stream: &mut S) -> std::io::Result<Vec<u8>>
+async fn read_request_head<S>(stream: &mut S) -> std::io::Result<Head>
 where
     S: AsyncRead + Unpin,
 {
@@ -589,13 +679,38 @@ where
         // Byte at a time: the head must not be over-read, because everything
         // after it belongs to the body or to the WebSocket framing.
         match tokio::time::timeout_at(deadline, stream.read(&mut byte)).await {
-            Ok(Ok(0)) => return Ok(head),
+            Ok(Ok(0)) => return Ok(Head::Incomplete),
             Ok(Ok(_)) => head.push(byte[0]),
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Ok(head),
+            Err(_) => return Ok(Head::Incomplete),
         }
-        if head.ends_with(b"\r\n\r\n") || head.len() >= MAX_HEAD_BYTES {
-            return Ok(head);
+        if head.ends_with(b"\r\n\r\n") {
+            return Ok(Head::Complete(head));
+        }
+        if head.len() >= MAX_HEAD_BYTES {
+            return Ok(Head::TooLarge);
+        }
+    }
+}
+
+/// Read and discard whatever the peer is still sending, briefly.
+///
+/// Closing a socket with unread data queued makes the OS send RST, which
+/// destroys any response already written — so a client that sent a 32 KB head
+/// got an empty reply and a connection reset, with nothing logged on either
+/// side to explain it. Draining first lets the response actually arrive.
+/// Bounded, because the point is to be polite, not to read an unbounded body.
+async fn drain_briefly<S>(stream: &mut S)
+where
+    S: AsyncRead + Unpin,
+{
+    use std::time::Duration;
+    let mut sink = vec![0u8; 4096];
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        match tokio::time::timeout_at(deadline, stream.read(&mut sink)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return,
+            Ok(Ok(_)) => continue,
         }
     }
 }
@@ -679,6 +794,123 @@ fn placeholder_page(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only `\r\n\r\n` means complete. An earlier version returned every
+    /// outcome as success, so a truncated head was routed on whatever headers
+    /// had happened to arrive — and a missing `Origin` reads as "native
+    /// client", which is allowed.
+    #[tokio::test]
+    async fn an_incomplete_head_is_not_mistaken_for_a_complete_one() {
+        use tokio::io::duplex;
+        use tokio::io::AsyncWriteExt;
+
+        let (mut peer, mut server) = duplex(4096);
+        peer.write_all(b"GET /healthz?t=x HTTP/1.1\r\nHost: a\r\nOrig")
+            .await
+            .unwrap();
+        drop(peer); // EOF mid-header
+
+        assert!(matches!(
+            read_request_head(&mut server).await.unwrap(),
+            Head::Incomplete
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_complete_head_is_returned_whole() {
+        use tokio::io::duplex;
+        use tokio::io::AsyncWriteExt;
+
+        let (mut peer, mut server) = duplex(4096);
+        peer.write_all(b"GET / HTTP/1.1\r\nHost: a\r\nOrigin: http://a\r\n\r\n")
+            .await
+            .unwrap();
+
+        let Head::Complete(head) = read_request_head(&mut server).await.unwrap() else {
+            panic!("should be complete");
+        };
+        assert_eq!(header_value(&head, "origin"), Some("http://a"));
+    }
+
+    /// A head split across writes must reassemble, because that is what a
+    /// phone on flaky Wi-Fi looks like.
+    #[tokio::test]
+    async fn a_head_split_across_writes_reassembles() {
+        use tokio::io::duplex;
+        use tokio::io::AsyncWriteExt;
+
+        let (mut peer, mut server) = duplex(4096);
+        tokio::spawn(async move {
+            for chunk in [
+                &b"GET /healthz"[..],
+                &b"?t=abc HTTP/1.1\r\nHost: a\r\n"[..],
+                &b"Origin: http://a\r\n\r\n"[..],
+            ] {
+                peer.write_all(chunk).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+            std::future::pending::<()>().await;
+        });
+
+        let Head::Complete(head) = read_request_head(&mut server).await.unwrap() else {
+            panic!("a split head must still be complete");
+        };
+        assert_eq!(parse_request_line(&head), Some(("GET", "/healthz?t=abc")));
+        assert_eq!(header_value(&head, "origin"), Some("http://a"));
+    }
+
+    #[tokio::test]
+    async fn an_oversized_head_is_distinguishable() {
+        use tokio::io::duplex;
+        use tokio::io::AsyncWriteExt;
+
+        let (mut peer, mut server) = duplex(64 * 1024);
+        tokio::spawn(async move {
+            let _ = peer.write_all(b"GET / HTTP/1.1\r\n").await;
+            // Never terminated.
+            let junk = vec![b'x'; MAX_HEAD_BYTES + 1024];
+            let _ = peer.write_all(&junk).await;
+            std::future::pending::<()>().await;
+        });
+
+        assert!(matches!(
+            read_request_head(&mut server).await.unwrap(),
+            Head::TooLarge
+        ));
+    }
+
+    /// The head must survive being read through a buffer smaller than itself,
+    /// which is how a real reader consumes it.
+    #[tokio::test]
+    async fn prefixed_replays_the_head_through_small_reads() {
+        use tokio::io::duplex;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut peer, server) = duplex(4096);
+        peer.write_all(b"TAIL").await.unwrap();
+        drop(peer);
+
+        let mut prefixed = Prefixed::new(b"HEADHEAD".to_vec(), server);
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 3];
+        loop {
+            let n = prefixed.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&chunk[..n]);
+        }
+        assert_eq!(out, b"HEADHEADTAIL");
+    }
+
+    #[test]
+    fn logged_paths_carry_no_query_string() {
+        // The query is where the token lives, and this line reaches a log the
+        // UI offers to copy.
+        assert_eq!(redact_query("/healthz?t=secret"), "/healthz?<redacted>");
+        assert_eq!(redact_query("/pair"), "/pair");
+        assert!(!redact_query("/ws?t=secret&x=1").contains("secret"));
+    }
 
     #[test]
     fn parses_a_request_line() {

@@ -197,15 +197,20 @@ fn main() {
     });
 
     log_info!("[main] player endpoint: {}", args.player);
-    log_info!("[main] phone should open: {pairing_url}");
-    log_info!("[main] that URL carries the pairing token; treat it as a password");
+    // Base URL only. The full pairing URL carries the token, and this log is
+    // routinely pasted into bug reports.
+    log_info!("[main] phone should open: {}", auth::redact_url(&pairing_url));
+    log_info!(
+        "[main] that URL carries a pairing token, withheld here because this log          gets shared. Open {local_url}/pair to see the full URL and its QR."
+    );
     log_info!("[main] pairing QR: {local_url}/pair");
     logging::flush_now();
 
     #[cfg(feature = "tray")]
     if args.tray {
         // Never returns.
-        coyote_bridge::tray::run(pairing_url, local_url);
+        let status_url = auth::with_token(&format!("{local_url}/healthz"), &token);
+        coyote_bridge::tray::run(pairing_url, local_url, status_url);
     }
 
     #[cfg(not(feature = "tray"))]
