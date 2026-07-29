@@ -192,9 +192,33 @@ Consequences:
   generated from the real Rust `V2Sustained` and asserted against by the TypeScript engine. Those
   live in `docs/spikes/pwa/fixtures/` in the desktop repo.
 - Fixtures are a **one-time snapshot**, not an ongoing sync contract, because the desktop app is
-  being hollowed out into the bridge rather than maintained in parallel.
-- The bridge stays in the **existing** repo — it is what the Tauri app becomes, keeping `net.rs`,
-  `buttplug/`, `input_bus.rs` and `tcode_input.rs` and shedding the engine, BLE and UI.
+  being retired rather than maintained in parallel.
+- ~~The bridge stays in the **existing** repo — it is what the Tauri app becomes, keeping
+  `net.rs`, `buttplug/`, `input_bus.rs` and `tcode_input.rs` and shedding the engine, BLE and
+  UI.~~ **Superseded 2026-07-29 — see below.**
+
+> ### The bridge does not live here
+>
+> **This was wrong, and it is struck through rather than deleted because it is the reason the
+> bridge spent a week in this repository.**
+>
+> The prediction was that the bridge would *become* the Tauri app — the same process, hollowed
+> out. It did not. It was written fresh alongside the desktop app and, measured on
+> `feat/bridge-tauri-ui`, it shares no code with it: zero path dependencies on `src-tauri`, no
+> workspace root tying them together. The one piece genuinely reused — `net.rs`'s trick of peeking
+> a connection to route HTTP and WebSocket on one port — was **copied**, and has since been
+> replaced entirely, because peeking is TCP-only and unimplementable over TLS.
+>
+> So the sentence above described a merge that never started, and two unrelated products shared a
+> repository on the strength of it.
+>
+> The bridge now lives in **[`maps524/coyote-socket-bridge`](https://github.com/maps524/coyote-socket-bridge)**,
+> extracted with history preserved.
+>
+> `input_bus.rs` and `tcode_input.rs` are still the right attachment point for a T-Code LAN
+> listener — the capability a browser cannot have. But that is **a copy or a small shared crate,
+> and which one is an open question**, not a reason to keep two products in one tree. If the
+> shared surface turns out to be larger than expected, that is itself the finding.
 
 ---
 
