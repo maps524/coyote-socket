@@ -94,6 +94,18 @@ export interface Urls {
   httpPort: number
 }
 
+/**
+ * Whether the phone-facing server is actually listening.
+ *
+ * Three-valued on purpose. It used to be an optional error string, where
+ * "no error" also meant "not asked yet" — so the window rendered a QR and
+ * reported no problem before anything had bound to the port.
+ */
+export type HttpStatus =
+  | { state: 'starting' }
+  | { state: 'serving' }
+  | { state: 'failed'; detail: string }
+
 export interface Status {
   snapshot: PlayerSnapshot
   urls: Urls
@@ -104,7 +116,7 @@ export interface Status {
    * window shows instead of leaving it advertising a dead one.
    */
   pairingUrl: string
-  httpError: string | null
+  http: HttpStatus
   endpoint: string
   recents: string[]
   staticDir: string | null

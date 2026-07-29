@@ -32,9 +32,11 @@ pub struct Status {
     /// The full pairing URL with the live token. Derived each call rather than
     /// stored, so revoking a token changes what the window shows.
     pub pairing_url: String,
-    /// Non-null when the phone-facing server failed to start; the QR will not
-    /// work and the window should say so.
-    pub http_error: Option<String>,
+    /// Whether the phone-facing server is actually listening.
+    ///
+    /// Three-valued rather than an error-or-nothing, so the window can say
+    /// "starting" instead of implying a QR works before anything has bound.
+    pub http: crate::HttpStatus,
     pub endpoint: String,
     pub recents: Vec<String>,
     pub static_dir: Option<String>,
@@ -49,7 +51,11 @@ pub fn bridge_status(state: Shared) -> Status {
         snapshot: state.bridge.snapshot(),
         urls: state.urls.clone(),
         pairing_url: state.pairing_url(),
-        http_error: state.http_error.lock().ok().and_then(|e| e.clone()),
+        http: state
+            .http_status
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or(crate::HttpStatus::Starting),
         endpoint: settings.endpoint.clone(),
         recents: settings.recents.clone(),
         static_dir: settings.static_dir.clone(),

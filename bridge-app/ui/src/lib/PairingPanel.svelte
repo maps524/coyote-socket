@@ -9,8 +9,14 @@
   import { bridge } from './bridge.svelte'
 
   const urls = $derived(bridge.status?.urls)
-  const httpError = $derived(bridge.status?.httpError ?? null)
   const pairingUrl = $derived(bridge.status?.pairingUrl ?? null)
+
+  // Three states, not "error or fine". A QR rendered before the port is bound
+  // is a promise nobody has checked, and the most likely reason for it to be
+  // wrong — another bridge already holding 8787 — is also the most likely
+  // thing to be happening while developing one.
+  const http = $derived(bridge.status?.http ?? { state: 'starting' as const })
+  const serving = $derived(http.state === 'serving')
 
   // The URL grants access, so it is not shown by default — a window on a desk
   // or in a screen share should not be a credential.
@@ -21,16 +27,27 @@
 <section class="panel">
   <h2>Phone</h2>
 
-  {#if httpError}
+  {#if http.state === 'failed'}
     <p class="bad small">
-      The phone-facing server did not start, so this QR leads nowhere.
-      <span class="mono">{httpError}</span>
+      The phone-facing server did not start, so nothing here would work.
+      <span class="mono">{http.detail}</span>
     </p>
+  {:else if http.state === 'starting'}
+    <p class="small muted">Starting the phone-facing server…</p>
   {/if}
 
-  {#if bridge.qrSvg}
+  <!--
+    The QR is shown only once something is genuinely listening. Rendering it
+    while the bind is still in flight, or after it failed, produces a code that
+    scans perfectly and leads nowhere — which sends the user to debug their
+    phone, their Wi-Fi and their certificate before they think to suspect the
+    thing that never started.
+  -->
+  {#if serving && bridge.qrSvg}
     <!-- The SVG comes from our own qr.rs, not from user input. -->
     <div class="qr">{@html bridge.qrSvg}</div>
+  {:else}
+    <div class="qr placeholder" aria-hidden="true"></div>
   {/if}
 
   <!--
@@ -49,15 +66,26 @@
     <button onclick={() => (revealed = !revealed)}>
       {revealed ? 'Hide token' : 'Show token'}
     </button>
-    <button onclick={() => urls && bridge.open(`${urls.local}/pair`)}>
+    <button
+      disabled={!serving}
+      onclick={() => urls && bridge.open(`${urls.local}/pair`)}
+    >
       Open pairing page
     </button>
   </div>
 
+  <!--
+    Deliberately phrased as a requirement rather than a status. "HTTPS is not
+    built" was true when written and stops being true the moment the TLS work
+    lands, at which point this panel would be confidently wrong — and the copy
+    that tells a user which of three things to go and check is the worst place
+    to be confidently wrong.
+  -->
   <p class="small muted">
-    Both devices must be on the same network. The phone side is plain HTTP, so
-    Web Bluetooth will not work there yet — that needs HTTPS, and it is not
-    built.
+    Both devices must be on the same network. Web Bluetooth needs an HTTPS
+    origin, so the phone cannot reach the Coyote over a plain
+    <span class="mono">http://</span> address however well everything else
+    works.
   </p>
 
   <!--
@@ -104,6 +132,13 @@
     padding: 0.5rem;
     width: min(100%, 12rem);
     margin: 0 auto 0.6rem;
+  }
+
+  /* Holds the layout so the panel does not jump when the QR appears. */
+  .qr.placeholder {
+    aspect-ratio: 1;
+    background: var(--panel-2);
+    border: 1px dashed var(--line);
   }
 
   .qr :global(svg) {

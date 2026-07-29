@@ -62,12 +62,41 @@ pub struct AppState {
     /// The built-in fake player, when running. Aborting the handle stops it.
     pub fake_player: Mutex<Option<FakePlayer>>,
     pub urls: Urls,
-    /// Why the HTTP server is not up, when it is not. `None` means it is.
-    pub http_error: Mutex<Option<String>>,
+    /// Whether the phone-facing server is actually listening.
+    ///
+    /// Three states, not an `Option<String>`. It was the latter, where `None`
+    /// meant both "fine" and "not asked yet" — so between the window
+    /// appearing and the bind returning, the UI rendered a QR and reported no
+    /// problem, for a port that might already be taken. That is not
+    /// hypothetical here: running two bridges at once is exactly what happens
+    /// while developing one, and 8787 is the first casualty.
+    ///
+    /// A field that promises a capability the runtime has not confirmed is a
+    /// shape worth hunting for generally. `bridge-tls` hit the same one from
+    /// the other direction — a trust-check page that rendered in full and then
+    /// blamed the certificate for a listener that had never bound.
+    pub http_status: Mutex<HttpStatus>,
     /// The serving context, once the listener is up. Holds the live token, so
     /// anything that needs the current pairing URL asks here rather than
     /// caching a copy that revocation cannot reach.
     pub http_ctx: Mutex<Option<Arc<http::Ctx>>>,
+}
+
+/// Whether the phone can actually reach us.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum HttpStatus {
+    /// The bind has not returned yet. Distinct from success on purpose: a QR
+    /// shown now is a promise nobody has checked.
+    Starting,
+    Serving,
+    Failed { detail: String },
+}
+
+impl HttpStatus {
+    pub fn is_serving(&self) -> bool {
+        matches!(self, Self::Serving)
+    }
 }
 
 pub struct FakePlayer {
@@ -177,7 +206,7 @@ fn main() {
                 settings_path,
                 fake_player: Mutex::new(None),
                 urls: urls.clone(),
-                http_error: Mutex::new(None),
+                http_status: Mutex::new(HttpStatus::Starting),
                 http_ctx: Mutex::new(None),
             });
             app.manage(Arc::clone(&state));
@@ -329,17 +358,34 @@ fn serve_http(
                 if let Ok(mut slot) = state.http_ctx.lock() {
                     *slot = Some(Arc::clone(&ctx));
                 }
+                // Only now is the port genuinely ours. Marking it serving any
+                // earlier would be the promise-before-confirmation bug this
+                // enum exists to prevent.
+                if let Ok(mut slot) = state.http_status.lock() {
+                    *slot = HttpStatus::Serving;
+                }
                 http::run(listener, ctx).await;
+
+                // `http::run` loops forever, so reaching here means the
+                // listener died under us.
+                log_warn!("[app] the phone-facing server stopped");
+                if let Ok(mut slot) = state.http_status.lock() {
+                    *slot = HttpStatus::Failed {
+                        detail: "the server stopped unexpectedly".into(),
+                    };
+                }
             }
             Err(e) => {
                 // Not fatal: the player link is the thing under test, and it
                 // works whether or not a phone can reach us. Record it so the
                 // window can say the QR will not work rather than showing a
                 // QR that leads nowhere.
-                let message = format!("could not serve on {bind}: {e}");
+                let message = format!(
+                    "could not serve on {bind}: {e}. If another bridge is                      already running, this one cannot take the port."
+                );
                 log_warn!("[app] {message}");
-                if let Ok(mut slot) = state.http_error.lock() {
-                    *slot = Some(message);
+                if let Ok(mut slot) = state.http_status.lock() {
+                    *slot = HttpStatus::Failed { detail: message };
                 }
             }
         }

@@ -595,12 +595,28 @@ pub const RELAY_KEEPALIVE: std::time::Duration = std::time::Duration::from_milli
 ///   diagnostics, and `packets` in particular resets on reconnect for reasons
 ///   that have nothing to do with continuity.
 ///
-/// The one case that motivated writing this down: a *paused* player still
-/// produces snapshots at the keepalive cadence, so "paused" and "dead" are
-/// distinguishable. That holds because `send_modify` notifies unconditionally
-/// even when the closure changes nothing — asserted in this module's tests
-/// rather than trusted to tokio's documentation, since a safety decision rests
-/// on it.
+/// # A failure this socket cannot report
+///
+/// When the relay is reached over `wss://` and the certificate is not trusted,
+/// the connection fails as close code **1006** with no further detail. There is
+/// no interstitial and no error the page can inspect, because a WebSocket is a
+/// subresource — the browser's certificate UI only exists for top-level
+/// navigations. A trust problem and an unplugged router are byte-identical
+/// here.
+///
+/// So **a consumer must not render 1006 as "the bridge is unreachable"**
+/// without qualification. That string sends someone to check their Wi-Fi for a
+/// problem that is in their certificate store. The distinguishing test is
+/// whether the *same origin* loads in a top-level tab: if it does, trust and
+/// network are both fine and the fault is elsewhere.
+///
+/// # Why this is written down at all
+///
+/// A *paused* player still produces snapshots at the keepalive cadence, so
+/// "paused" and "dead" are distinguishable. That holds because `send_modify`
+/// notifies unconditionally even when the closure changes nothing — asserted
+/// in this module's tests rather than trusted to tokio's documentation, since
+/// a safety decision rests on it.
 pub(crate) async fn ws_relay<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     addr: SocketAddr,
