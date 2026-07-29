@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// history.
 const MAX_RECENTS: usize = 6;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     /// Last endpoint connected to, `host:port`.
@@ -183,6 +183,19 @@ impl Settings {
             }
         }
 
+        // **Keep this literal exhaustive. Do not "tidy" it into
+        // `..self.clone()` or `..Default::default()`.**
+        //
+        // Naming every field is what forces a compile error when someone adds
+        // one, and that error is the only thing standing between a new setting
+        // and silent data loss: a struct-update fallthrough compiles happily
+        // and resets the missing field on every save. The symptom then appears
+        // somewhere else entirely — a port that reverts, a directory that
+        // forgets — with nothing pointing back here.
+        //
+        // This has already fired once. `bridge-tls` added `https_port` and the
+        // build stopped them rather than the port silently resetting to its
+        // default on every write.
         let merged = Settings {
             endpoint: self.endpoint.clone(),
             recents: self.recents.clone(),
@@ -385,6 +398,42 @@ mod tests {
         assert_eq!(loaded.endpoint, "192.168.0.20:23554");
 
         let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Every field survives a save.
+    ///
+    /// The exhaustive literal in `merge_and_write` makes *forgetting* a new
+    /// field a compile error. This catches the other half: wiring it in
+    /// wrongly, so it round-trips as a default instead of what was set. Set
+    /// everything to a non-default value, save, load, and require equality.
+    ///
+    /// If a new field makes this fail, the fix is in `merge_and_write` — not
+    /// here.
+    #[test]
+    fn no_field_is_lost_across_a_save() {
+        let path = temp_path("round-trip-all-fields");
+
+        let mut original = Settings::default();
+        original.remember("192.168.0.20:23554");
+        original.remember("10.0.0.7:9999");
+        original.http_port = 9001;
+        original.static_dir = Some("C:/somewhere/dist".to_string());
+        let token = original.token();
+        original.save(&path);
+
+        let mut loaded = Settings::load(&path);
+        // Not persisted by design: it is a claim about a process, not a file.
+        assert!(!loaded.token_is_ours);
+        loaded.token_is_ours = original.token_is_ours;
+
+        assert_eq!(
+            loaded, original,
+            "a field was dropped or defaulted on the way through save/load"
+        );
+        assert_eq!(loaded.token.as_deref(), Some(token.as_str()));
+        assert_eq!(loaded.recents.len(), 2);
+
         let _ = std::fs::remove_file(&path);
     }
 
