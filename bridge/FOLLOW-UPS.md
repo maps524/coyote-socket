@@ -739,3 +739,41 @@ does not percent-decode**, so the PWA cannot have an asset with a space in its
 name. `library::percent_decode` is the decoder to reuse; the reason it was not
 wired in here is that doing so means auditing every static path at the same
 time, which is a different change.
+
+---
+
+## 4. `HEAD` returns a body on every `respond` route
+
+**Confirmed by running it**, not read off the code:
+`head_on_a_respond_route_wrongly_carries_a_body` in `tests/dlna_media.rs`
+asserts the defect and is `#[ignore]`d, so it documents the behaviour without
+failing the build. It will start failing the day someone fixes this, which is
+when it should be deleted.
+
+`serve_conn` accepts `GET` and `HEAD`. `route` never looks at the method, and
+`respond` writes `body` unconditionally after the head. So `HEAD /healthz`,
+`HEAD /pair` and a `HEAD` for any static asset return the full body.
+
+Not urgent, and not the DLNA branch's to fix — `http.rs` is contended and this
+touches the one function every route calls. But worth writing down before it
+becomes the cause of something with a symptom somewhere else, which is
+§0b's pattern:
+
+- A cache or a proxy in front of the bridge that issues `HEAD` to revalidate
+  gets a body it did not ask for, on a connection that then closes. Harmless
+  here only because `Connection: close` means nothing tries to reuse the
+  socket — on a keep-alive connection the surplus body would be read as the
+  start of the next response, and the failure would appear on some later,
+  unrelated request.
+- The media proxy already handles `HEAD` correctly (`mediaproxy::relay`
+  returns after the head), so the two halves of the surface currently
+  disagree. That is the sort of inconsistency someone eventually "fixes" in
+  the wrong direction.
+
+The fix is one branch in `respond`, or a check in `route`.
+
+It was left alone because `http.rs` had four branches open against it. **They
+have all merged now, so that reason has expired** — this is a note about a live
+defect with no remaining excuse, and it should be fixed by whoever next opens
+that file rather than carried further. The `#[ignore]`d test is already written
+and will start failing the moment it is.

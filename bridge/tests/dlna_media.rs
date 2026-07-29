@@ -594,3 +594,22 @@ async fn a_bridge_without_dlna_says_it_is_not_enabled() {
     assert!(head.starts_with("HTTP/1.1 404"), "{head}");
     assert!(String::from_utf8_lossy(&body).contains("not enabled"));
 }
+
+/// Not a DLNA test. A pre-existing defect in the shared surface, asserted so
+/// the report of it is a fact rather than a reading of the code.
+///
+/// `serve_conn` accepts `HEAD`, `route` never looks at the method, and
+/// `respond` writes the body unconditionally — so `HEAD /healthz` returns a
+/// body. Left for the owner of `http.rs`; see `FOLLOW-UPS.md`.
+#[tokio::test]
+#[ignore = "documents a defect this branch deliberately does not fix"]
+async fn head_on_a_respond_route_wrongly_carries_a_body() {
+    let server = fake_media_server(RangeSupport::Honours).await;
+    let (bridge, token, _dlna) = bridge_with(server).await;
+    let (head, body) = request(bridge, "HEAD", &format!("/healthz?t={token}"), &[]).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(
+        !body.is_empty(),
+        "if this now passes with an empty body, the defect has been fixed and this test should go"
+    );
+}

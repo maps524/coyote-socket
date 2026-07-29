@@ -293,6 +293,7 @@ Then:
 - `http://127.0.0.1:8787/library/index.json` — the funscript listing
 - `wss://coyote.local:8443/ws` — the state relay (a page served over HTTPS
   cannot open a `ws://` socket, so this is the address the app actually uses)
+- `http://127.0.0.1:8787/dlna/index.json` — media servers on the network
 - Tray icon — left-click opens the pairing page
 
 `--help` on either binary lists the rest.
@@ -416,6 +417,88 @@ domain, so the install page says so rather than burying it, names the
 certificate so it can be found months later, and documents removal.
 
 Deleting `<config>/tls/` means every phone has to install a new certificate.
+
+## DLNA browsing and the media proxy
+
+The phone cannot discover anything on the network — SSDP needs UDP multicast
+and JavaScript has no UDP primitive, permanently. And it cannot play from a
+media server directly either: the app is on HTTPS because Web Bluetooth
+requires a secure context, and an HTTPS page cannot load an `http://` video.
+
+Both problems land on the bridge. Three endpoints, token-gated exactly like
+`/healthz`, sharing `/library`'s JSON envelope:
+
+```text
+GET /dlna/index.json[?refresh=1]                    media servers, and why the list is what it is
+GET /dlna/browse.json?server=<udn>&object=<id>      one directory level
+GET /dlna/media/<ref>                               the bytes, range-correct
+```
+
+### What is proven and what is not
+
+| Part | Status |
+|---|---|
+| Range handling — `206`, `Content-Range`, `If-Range`, `bytes=N-`, suffix, `416`, `HEAD` | **Tested against a real socket** through the real router and proxy, in `tests/dlna_media.rs`. |
+| Streaming rather than buffering | **Tested** — the response head must arrive before the upstream body is complete. |
+| Compensating for a server that ignores `Range` | **Tested** against a fake server that does exactly that. |
+| Refusing a `<res>` on another host | **Tested.** |
+| DIDL and device-description parsing | **Tested** against captured-shape documents, including truncated and malformed input. |
+| SSDP `M-SEARCH` against a real network | **Never run.** Every test here is a pure function over a captured datagram; nothing multicasts. |
+| **Universal Media Server, anything** | **Never talked to.** The DIDL fixtures are shaped from the captured player path, not from a UMS response. |
+| Playing in Safari or Bluefy | **Never tried.** |
+
+Scope that precisely: the transport is exercised, the protocol is reasoned
+from the specification and from one captured media URL.
+
+### `<res>` selection is not "take the first one"
+
+A server advertises the same item several times — the original, a transcode,
+sometimes a stream over a protocol a browser cannot open at all. Taking the
+first gives a video element that loads and shows nothing, which is a silent
+failure that gets blamed on the file. `upnp::choose_res` ranks by byte-range
+support (`DLNA.ORG_OP`'s **second** digit), then original over transcode, then
+container; and it carries the ones it rejected, with reasons, into
+`/dlna/browse.json`. When something will not play, what else was on offer is
+one field away rather than a packet capture away.
+
+`seekable: false` in a listing means the *server* said it does not honour byte
+ranges. Scrubbing will not work and the proxy is not the reason.
+
+### The cost of being in the playback path
+
+- **Co-located** — bridge and media server on one machine, which is the
+  expected deployment: the upstream fetch is a loopback socket, the bytes cross
+  the network once, and the overhead is a memcpy through a 64 KiB buffer.
+- **Separate machines** — the bytes cross the network twice, and if both hops
+  share one Wi-Fi radio the usable throughput roughly halves. Invisible for a
+  25 Mb/s file on a good link; the difference between playing and stalling on a
+  congested one. Unavoidable while the page is on HTTPS.
+
+Neither figure has been measured. The first is a claim about a memcpy; the
+second is arithmetic.
+
+### When discovery finds nothing
+
+An empty list is three different situations and they are reported as three
+different messages, because "no media servers found" otherwise reads as a
+statement about the network when the search may never have left the machine:
+
+- **Nothing answered at all** — including devices that are not media servers.
+  That points at the search not reaching the network. On a Windows box the
+  usual cause is the datagram leaving via a WSL or Hyper-V adapter.
+- **Things answered, none was a media server** — the search works. If UMS is
+  running, check its **IP allowlist** includes this host; that is a component
+  we do not own and it fails silently.
+- **A server answered but could not be described** — reported separately, with
+  the HTTP status, because it is not an empty network.
+
+`/dlna/index.json` carries the evidence for whichever it is: where the search
+was sent from, how many went out, and how many replies of any kind came back.
+
+**`--dlna-server http://192.168.0.4:5001/description/fetch`** pins a server by
+address and skips discovery entirely, for a network where multicast cannot
+work. Repeatable. A bad address is reported at startup rather than as an empty
+library later.
 
 ### Against a real Quest
 
