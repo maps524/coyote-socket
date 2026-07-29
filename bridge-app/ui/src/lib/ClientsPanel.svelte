@@ -7,7 +7,7 @@
 
   That makes the interesting case the one where we do not know. A phone that
   roams between access points drops its socket and opens a new one; unless the
-  client says which device it is, the bridge cannot tell that from a second
+  client says which browser it is, the bridge cannot tell that from a second
   phone arriving. Where that is so, this panel says so — a range and the reason
   for it, never a confident count. `clients.rs` sets out exactly which signals
   are and are not identity, and why none of the ones the bridge can observe on
@@ -53,6 +53,27 @@
     view.browsers.state === 'atLeast' ? view.browsers.unidentified : 0,
   )
 
+  /**
+   * Whether the count rests on ids the clients chose for themselves.
+   *
+   * Keyed off the count's own provenance rather than off whether the bridge
+   * *can* verify devices. Those come apart the moment pairing exists: with one
+   * paired phone and one unpaired browser, `credentialsAvailable` is true while
+   * the number in front of the user is still only as good as what the unpaired
+   * one volunteered. Wording that flipped to "verified" on the first paired
+   * device would be confidently wrong for every mixed view thereafter.
+   */
+  const countIsVolunteered = $derived(
+    view.browsers.state === 'reported' &&
+      view.browsers.count > 0 &&
+      view.browsers.provenance === 'selfReported',
+  )
+  const countIsVerified = $derived(
+    view.browsers.state === 'reported' &&
+      view.browsers.count > 0 &&
+      view.browsers.provenance === 'credential',
+  )
+
   /** How long since `ms`, in the coarsest unit that is still useful. */
   function ago(ms: number): string {
     const seconds = Math.max(0, Math.round((now - ms) / 1000))
@@ -67,7 +88,7 @@
 
   function name(client: ClientView): string {
     if (client.label) return client.label
-    if (client.provenance === 'credential') return 'Unnamed device'
+    if (client.provenance === 'credential') return 'Unnamed browser'
     return client.identified ? 'Self-named client' : 'Unidentified client'
   }
 
@@ -104,11 +125,26 @@
       <strong>{plural(view.connections, 'connection')}</strong>
       <span class="muted">·</span>
       {#if range.lo === range.hi}
-        <span>{plural(range.lo, 'browser')}</span>
+        <!--
+          Still hedged when the ids behind it were merely volunteered. A flat
+          "2 browsers" reads as a measurement, and a count assembled from
+          strings anyone with the pairing token could have sent is not one.
+        -->
+        <span class:uncertain={countIsVolunteered}>
+          {plural(range.lo, 'browser')}
+        </span>
       {:else}
         <span class="uncertain">{range.lo}–{range.hi} browsers</span>
       {/if}
     </p>
+
+    {#if countIsVolunteered}
+      <p class="small muted note">
+        Counted by the ids the clients sent for themselves. Anyone holding the
+        pairing token can send any id, so two of these could be one browser, or
+        one could be two.
+      </p>
+    {/if}
 
     {#if unidentifiedCount > 0}
       <!--
@@ -143,7 +179,14 @@
             does not, and a panel that rendered them alike would be trusted
             further than it earns.
           -->
-          {#if client.revokedAtMs !== null}
+          {#if client.revokeContested}
+            <span
+              class="tag bad"
+              title="This device was revoked and has connected again. Its credential was never deleted."
+            >
+              revoke failed
+            </span>
+          {:else if client.revokedAtMs !== null}
             <!--
               Takes precedence over "verified", which is what this row would
               otherwise still be claiming for a credential that has just been
@@ -182,7 +225,7 @@
           {:else if client.disconnectedAtMs !== null}
             <span>left {ago(client.disconnectedAtMs)} ago</span>
           {/if}
-          {#if client.revokedAtMs !== null}
+          {#if client.revokedAtMs !== null && !client.revokeContested}
             <span>revoked {ago(client.revokedAtMs)} ago — cannot reconnect</span>
           {/if}
           {#if client.createdMs !== null}
@@ -213,11 +256,27 @@
           </p>
         {/if}
 
+        {#if client.revokeContested}
+          <!--
+            The loudest thing this panel can say, and it earns it. The socket
+            was closed and the credential was not deleted, so the device came
+            straight back — and every other reading of this row would be
+            reassuring about a phone that is connected right now.
+          -->
+          <p class="small bad">
+            <strong>This device was revoked and has come back.</strong>
+            Its credential still works, so it was never deleted — only its
+            connection was closed. It is connected now. Revoke it again, and if
+            it returns a second time the credential store is not saving the
+            change.
+          </p>
+        {/if}
+
         {#if stale(client)}
           <p class="small warn">
-            Nothing has reached this client for {ago(client.lastHeardMs)}. The
-            socket is open but may already be dead — a phone out of range holds
-            one for a while.
+            This client has not answered for {ago(client.lastHeardMs)}. The
+            socket is still open, which by itself proves nothing — a phone
+            carried out of range holds one for a long time.
           </p>
         {/if}
 
@@ -230,7 +289,7 @@
           <p class="small muted">
             Possibly the client that dropped moments ago, from the same address
             and the same browser — <em>not confirmed</em>, and not counted as
-            the same device.
+            the same browser.
           </p>
         {/if}
       </li>
@@ -242,21 +301,34 @@
     "verified" and the difference matters the moment someone trusts the number.
   -->
   <p class="small muted footnote">
-    {#if view.credentialsAvailable}
+    <!--
+      Three cases, because two would have to lump the mixed one in with either
+      the verified or the unverified world, and it belongs to neither. The
+      condition is the *count's* provenance, not whether the bridge is capable
+      of verifying — those diverge the moment one device has paired and another
+      has not.
+    -->
+    {#if countIsVerified}
       <!--
         The identity is good now, and the caveats are still real. A credential
         answers "is this the same browser as last time" and nothing else, so
         the panel says browsers and leaves the headcount to the labels.
       -->
-      A verified row is a <em>browser</em>, not a handset and not a person.
-      Safari and a home-screen install on the same phone can hold separate
-      credentials and show as two; a browser whose storage was cleared is a new
-      one, with no way to know it was the old one.
+      Every row here was verified by this bridge. A verified row is a
+      <em>browser</em>, not a handset and not a person: Safari and a
+      home-screen install on the same phone can hold separate credentials and
+      show as two, and a browser whose storage was cleared is a new one with no
+      way to know it was the old one.
+    {:else if view.credentialsAvailable}
+      Identity here is whatever each client volunteered, and an unpaired client
+      can volunteer anything. Pairing a device replaces its guess with something
+      this bridge checked — until then an address identifies nothing, since NAT,
+      DHCP and a roaming phone all break it.
     {:else}
-      This bridge cannot verify a device: nothing has paired one. Identity here
+      This bridge cannot verify anything: no device has paired. Identity here
       is whatever a client volunteers, and the bridge cannot work it out on its
-      own — an address is not a device, since NAT, DHCP and a roaming phone all
-      break that, and the pairing token is shared by every device by design.
+      own — an address identifies nothing, since NAT, DHCP and a roaming phone
+      all break it, and the pairing token is shared by every device by design.
     {/if}
   </p>
 </section>
@@ -362,6 +434,10 @@
 
   .warn {
     color: var(--warn);
+  }
+
+  .bad {
+    color: var(--bad);
   }
 
   .footnote {

@@ -52,14 +52,14 @@ function emptySnapshot(): PlayerSnapshot {
 /**
  * What to render before the backend has said anything.
  *
- * Zero connections and zero reported devices, which is the truth at that
+ * Zero connections and zero reported browsers, which is the truth at that
  * moment: no socket has been accepted. Not a spinner and not a blank — an
  * empty panel that is correct is better than one that implies it does not know.
  */
 function emptyClients(): ClientsView {
   return {
     connections: 0,
-    browsers: { state: 'reported', count: 0 },
+    browsers: { state: 'reported', count: 0, provenance: 'credential' },
     clients: [],
     anyUnidentified: false,
     credentialsAvailable: false,

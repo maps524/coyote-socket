@@ -184,6 +184,23 @@ impl Key {
 /// and presents on every later upgrade. **The `id` here is not the secret** —
 /// the bearer value is stored hashed and never leaves the bridge, while this id
 /// is safe to render, log and put in a JSON body, which it is.
+/// # Contract the resolver must satisfy
+///
+/// `id` is deliberately **not** run through [`sanitise_id`]: that guard exists
+/// for strings a client chose, and applying it here would impose a length rule
+/// on someone else's generator for no benefit. But it is not unconstrained
+/// either, because it lands in a map key, a log line, a `/healthz` body and a
+/// desktop window. A resolver must supply an `id` that is:
+///
+/// - **stable** for the life of the credential, and distinct per credential;
+/// - **non-secret** — the bearer value is not this, and must never be;
+/// - **bounded and printable** — no control characters, no newlines, and short
+///   enough to render. The existing implementation supplies random hex.
+///
+/// Nothing enforces this at the boundary, because the resolver is installed by
+/// the process itself rather than by a peer. It is a contract between two
+/// modules in one binary, and it is written down so the second one to change
+/// knows what the first assumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credential {
     pub id: String,
@@ -366,7 +383,22 @@ pub fn agent_hint(user_agent: &str) -> Option<String> {
 pub enum BrowserCount {
     /// Every connected client presented an id, so this is the number of
     /// distinct ids. A browser that cleared its storage still counts as new.
-    Reported { count: usize },
+    ///
+    /// `provenance` says what that number is worth, and it is not decoration.
+    /// `Reported` would otherwise mean both "every one of these was verified by
+    /// the bridge" and "every one of these is a string a client typed", which
+    /// are not the same claim and must not render the same. The weakest
+    /// provenance present governs: one self-reported client among credentialed
+    /// ones makes the whole count self-reported, because the count is only as
+    /// trustworthy as its softest member.
+    ///
+    /// This gets sharper once pairing lands. A mixed view would otherwise carry
+    /// the credentialed footnote — "a verified row is a browser" — over a
+    /// number partly composed of ids anyone could have sent.
+    Reported {
+        count: usize,
+        provenance: Provenance,
+    },
     /// At least one connected client presented nothing, so `count` is a floor
     /// and nothing more. `unidentified` says how many connections we cannot
     /// attribute; each of them is somewhere between "a browser we have not
@@ -410,10 +442,27 @@ pub struct ClientView {
     /// When the current — or, for a gone row, the last — connection opened.
     pub connected_at_ms: u64,
     pub disconnected_at_ms: Option<u64>,
-    /// When the bridge last succeeded in writing to this client. The relay
-    /// writes at least once a second, so a value much older than that means
-    /// the socket is wedged and the client is probably already gone — which is
-    /// exactly the state a bare "connected" would hide.
+    /// When a frame last arrived **from** this client.
+    ///
+    /// Read that literally, because an earlier version did not. This used to be
+    /// set after a successful *write*, and a successful write means only that
+    /// the local TCP stack accepted some bytes — nothing about the peer. A
+    /// phone carried out of range holds a half-open socket, and 200-byte
+    /// snapshots at 1 Hz take minutes to fill a send buffer, so the field named
+    /// "last heard" could not detect the one case it existed for. It was a
+    /// diagnostic pointing at the wrong subsystem, which `FOLLOW-UPS.md` §0b
+    /// names as its own defect signature.
+    ///
+    /// It is now genuine evidence: the relay sends a WebSocket Ping each
+    /// keepalive and every browser answers with a Pong, so a live client
+    /// refreshes this about once a second. Silence here is the client's
+    /// silence.
+    ///
+    /// **Stale still implies dead; fresh does not imply alive** in the strict
+    /// sense — a Pong is answered by the browser, not by the page's script, so
+    /// this proves the browser is reachable rather than that the app is
+    /// healthy. That is a much smaller gap than the one it replaces, and it is
+    /// the strongest claim available without an application-level heartbeat.
     pub last_heard_ms: u64,
     /// The peer address of the most recent socket.
     pub address: String,
@@ -449,6 +498,20 @@ pub struct ClientView {
     /// no longer exists, described on the screen that is supposed to confirm
     /// its removal.
     pub revoked_at_ms: Option<u64>,
+    /// A revoked device reconnected with a credential that still verifies.
+    ///
+    /// **This is a detector, not a state.** It can only happen when the
+    /// credential was never deleted — the half of revocation that lives in the
+    /// credential store. Closing the socket without deleting the record leaves
+    /// a device that comes back, and the panel would otherwise show it as
+    /// "revoked" with a live socket attached, which is the worst reading in
+    /// this whole module: reassuring, on the confirmation screen, about a
+    /// phone that is at that moment driving hardware.
+    ///
+    /// The window renders it as a fault with what to do about it, rather than
+    /// letting the two contradictory facts sit side by side for a reader to
+    /// notice.
+    pub revoke_contested: bool,
 }
 
 /// Everything the panel and `/healthz` render.
@@ -482,9 +545,9 @@ struct Conn {
     seq: u64,
     address: String,
     connected_at_ms: u64,
-    /// Written by the relay after every successful send, without taking the
-    /// registry lock — a per-second lock and a per-second UI notification for
-    /// a clock would be a poor trade.
+    /// Written by the relay when a frame arrives from the client, without
+    /// taking the registry lock — a per-second lock and a per-second UI
+    /// notification for a clock would be a poor trade.
     last_heard_ms: Arc<AtomicU64>,
     /// Fires when this socket must close now.
     ///
@@ -505,6 +568,9 @@ struct Record {
     /// gone row says what happened to it rather than looking like a device
     /// that merely wandered off.
     revoked_at_ms: Option<u64>,
+    /// Set when a revoked row is attached to again by a still-valid
+    /// credential. See [`ClientView::revoke_contested`].
+    revoke_contested: bool,
     first_seen_ms: u64,
     connected_at_ms: u64,
     disconnected_at_ms: Option<u64>,
@@ -524,6 +590,12 @@ struct Inner {
     /// Which record each open connection currently belongs to. A connection
     /// can move between records exactly once — when a `hello` names it.
     placement: BTreeMap<u64, Key>,
+    /// Connections whose `hello` has already been applied.
+    ///
+    /// Enforces the "exactly once" above. Without it a client could re-identify
+    /// in a loop, hopping identities and waking the desktop panel on every
+    /// message. Cleared on disconnect with everything else about the socket.
+    identified: std::collections::BTreeSet<u64>,
 }
 
 /// Live connections to the bridge's WebSocket relay.
@@ -575,7 +647,7 @@ impl ClientRegistry {
     /// this here rather than on `http::Ctx` is deliberate: `http.rs` is
     /// contended, and this way the whole feature costs it one call site.
     pub fn set_credential_resolver(&self, resolver: CredentialResolver) {
-        *self.credentials.lock().expect("client registry lock") = Some(resolver);
+        *self.credentials.lock().unwrap_or_else(|e| e.into_inner()) = Some(resolver);
     }
 
     /// Whether this bridge can verify a device at all.
@@ -636,7 +708,7 @@ impl ClientRegistry {
         let close = watch::channel(false).0;
         let closed = close.subscribe();
         let seq = {
-            let mut inner = self.inner.lock().expect("client registry lock");
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let seq = inner.next_seq;
             inner.next_seq += 1;
             let (key, label, created_ms) = match identity {
@@ -682,10 +754,18 @@ impl ClientRegistry {
 
     /// Close every live socket belonging to a revoked credential.
     ///
-    /// Returns how many were closed. **Only credentialed rows** — revoking a
-    /// self-reported id would close a socket that reconnects a second later
-    /// under any id it likes, and a revoke button that appears to work and
-    /// does not is worse than no button.
+    /// Returns how many were closed. **`0` is not a failure, and it is not one
+    /// state either** — it means "no live socket here", which covers a device
+    /// that is merely offline, a device paired yesterday that this run has
+    /// never seen (the registry is per-run and remembers nothing across a
+    /// restart), and an id that does not exist. A caller must take its
+    /// success from the credential store, which is durable and authoritative;
+    /// this number is only "how much was disconnected just now".
+    ///
+    /// **Only credentialed rows** — revoking a self-reported id would close a
+    /// socket that reconnects a second later under any id it likes, and a
+    /// revoke button that appears to work and does not is worse than no
+    /// button.
     ///
     /// This is half of revocation. The other half — deleting the credential so
     /// it cannot be presented again — belongs to the credential store, must
@@ -698,8 +778,9 @@ impl ClientRegistry {
             provenance: Provenance::Credential,
             id: id.to_string(),
         };
+        let mut known = false;
         let closed = {
-            let mut inner = self.inner.lock().expect("client registry lock");
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             match inner.records.get_mut(&key) {
                 Some(record) => {
                     for conn in &record.open {
@@ -720,14 +801,19 @@ impl ClientRegistry {
                     // work?". Historically accurate and actively misleading is
                     // the same trade this module refused everywhere else.
                     record.revoked_at_ms = Some(now_ms());
+                    known = true;
                     record.open.len()
                 }
                 None => 0,
             }
         };
-        // Bump even when nothing was open: the row's meaning changed, and the
-        // panel is being watched right now.
-        self.bump();
+        // Bump when a row changed, including one with no open socket — its
+        // meaning changed and the panel is being watched right now. Not for an
+        // id this run has never seen, which is an ordinary outcome (the
+        // registry is per-run) and changes nothing to repaint.
+        if known {
+            self.bump();
+        }
         if closed > 0 {
             crate::log_info!("[clients] revoked device closed {closed} live socket(s)");
         }
@@ -737,7 +823,7 @@ impl ClientRegistry {
     /// The current picture, rendered.
     pub fn view(&self) -> ClientsView {
         let now = now_ms();
-        let inner = self.inner.lock().expect("client registry lock");
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         let connections: usize = inner.records.values().map(|r| r.open.len()).sum();
         let unidentified: usize = inner
@@ -751,9 +837,21 @@ impl ClientRegistry {
             .values()
             .filter(|r| !r.open.is_empty() && matches!(r.key, Key::Identified { .. }))
             .count();
+        // The weakest identity among the connected rows. `Provenance` is
+        // ordered weakest-first, so this is a min.
+        let weakest = inner
+            .records
+            .values()
+            .filter(|r| !r.open.is_empty())
+            .filter_map(|r| r.key.provenance())
+            .min()
+            .unwrap_or(Provenance::Credential);
 
         let browsers = if unidentified == 0 {
-            BrowserCount::Reported { count: identified }
+            BrowserCount::Reported {
+                count: identified,
+                provenance: weakest,
+            }
         } else {
             // The floor: every presented id is certainly a browser, and the
             // unidentified connections are somewhere between zero further
@@ -799,7 +897,7 @@ impl ClientRegistry {
     fn identify(&self, seq: u64, claim: Claim) {
         let now = now_ms();
         let changed = {
-            let mut inner = self.inner.lock().expect("client registry lock");
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.identify(seq, claim, now)
         };
         if changed {
@@ -810,7 +908,7 @@ impl ClientRegistry {
     fn disconnect(&self, seq: u64) {
         let now = now_ms();
         {
-            let mut inner = self.inner.lock().expect("client registry lock");
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.detach(seq, now);
             inner.prune(now);
         }
@@ -832,25 +930,86 @@ impl Inner {
         let address = conn.address.clone();
         match self.records.get_mut(&key) {
             Some(record) => {
-                if record.address != address {
-                    let previous = std::mem::replace(&mut record.address, address);
-                    if !record.previous_addresses.contains(&previous) {
-                        record.previous_addresses.push(previous);
-                        // Bounded: a phone on bad Wi-Fi can rack these up, and
-                        // the useful fact is "it moved", not every hop.
-                        if record.previous_addresses.len() > 4 {
-                            record.previous_addresses.remove(0);
+                // Whether joining this row is evidence of anything.
+                //
+                // For a credential, yes: the bridge checked it, so a new
+                // address really is the same browser having moved, and the
+                // history is worth rewriting.
+                //
+                // For a self-reported id, **no**, and this is the hole the
+                // provenance-in-the-key fix did not close. Anyone holding the
+                // pairing token can send `?c=<an id someone else is using>`.
+                // Rewriting the row from the newcomer would then move the
+                // displayed address to the attacker's, overwrite the label and
+                // the agent, and — worst of the three — push the victim's real
+                // address into `previous_addresses`, rendering "moved from" for
+                // a roam that never happened. That is the panel manufacturing
+                // evidence, on weaker grounds than `maybe_same_as`, which is
+                // scrupulously kept out of the arithmetic.
+                //
+                // So an unverified join is recorded as a socket and nothing
+                // else: the incumbent's details stand.
+                let trusted = matches!(record.key.provenance(), Some(Provenance::Credential));
+
+                if trusted {
+                    // Only when nothing else is attached. "Moved from" is a
+                    // claim about a *reconnect* — this browser was there, is
+                    // now here. A second socket opening alongside a live one is
+                    // a second tab, and rendering that as a move would invent a
+                    // journey out of two things that are both true at once.
+                    if record.open.is_empty() && record.address != address {
+                        let previous = std::mem::replace(&mut record.address, address);
+                        if !record.previous_addresses.contains(&previous) {
+                            record.previous_addresses.push(previous);
+                            // Bounded: a phone on bad Wi-Fi can rack these up,
+                            // and the useful fact is "it moved", not every hop.
+                            if record.previous_addresses.len() > 4 {
+                                record.previous_addresses.remove(0);
+                            }
                         }
                     }
-                }
-                if agent.is_some() {
-                    record.agent = agent;
-                }
-                if label.is_some() {
-                    record.label = label;
+                    if agent.is_some() {
+                        record.agent = agent;
+                    }
+                    if label.is_some() {
+                        record.label = label;
+                    }
+                } else if record.open.is_empty() && record.address != address {
+                    // A self-reported row with nothing currently attached: this
+                    // is a plain reconnect rather than a second socket, so the
+                    // address may move. Still no `previous_addresses` entry —
+                    // "it moved" is a claim about one device's history, and one
+                    // device is exactly what an unverified id does not
+                    // establish.
+                    record.address = address;
                 }
                 if created_ms.is_some() {
                     record.created_ms = created_ms;
+                }
+                // A revoked device just connected again, with a credential the
+                // store still verifies.
+                //
+                // That is not possible when both halves of revocation ran: the
+                // record is deleted first, so `identity_for` could not have
+                // resolved this cookie. Reaching here means the credential was
+                // never deleted — the half-wired revoke both branches spent a
+                // round warning each other about, arriving as a live socket on
+                // a row the panel is calling "revoked".
+                //
+                // Detected rather than assumed away, because the alternative is
+                // the worst version of this family: a row that reads *revoked*
+                // with a phone attached to it, driving output.
+                if record.revoked_at_ms.is_some()
+                    && matches!(
+                        record.key.provenance(),
+                        Some(Provenance::Credential)
+                    )
+                {
+                    record.revoke_contested = true;
+                    crate::log_warn!(
+                        "[clients] a revoked device reconnected with a credential that still \
+                         verifies — the credential was not deleted, so the revoke did not take"
+                    );
                 }
                 record.connected_at_ms = conn.connected_at_ms;
                 record.disconnected_at_ms = None;
@@ -866,6 +1025,7 @@ impl Inner {
                         agent,
                         created_ms,
                         revoked_at_ms: None,
+                        revoke_contested: false,
                         first_seen_ms: now,
                         connected_at_ms: conn.connected_at_ms,
                         disconnected_at_ms: None,
@@ -880,7 +1040,21 @@ impl Inner {
         }
     }
 
+    /// Apply a client's `hello` to the connection it arrived on.
+    ///
+    /// **Once per connection.** `placement`'s contract has always said a
+    /// connection moves records exactly once, but nothing enforced it: every
+    /// `hello` reached here and every one called `bump()`, so a client could
+    /// drive the desktop panel's repaint rate by sending them in a loop. It
+    /// could also hop between identities mid-connection, which is not a thing
+    /// any honest client does and not a history worth rendering.
+    ///
+    /// Returning `false` for the second and later ones makes the contract true
+    /// rather than merely documented.
     fn identify(&mut self, seq: u64, claim: Claim, now: u64) -> bool {
+        if !self.identified.insert(seq) {
+            return false;
+        }
         let Some(current) = self.placement.get(&seq).cloned() else {
             return false;
         };
@@ -944,6 +1118,7 @@ impl Inner {
     }
 
     fn detach(&mut self, seq: u64, now: u64) {
+        self.identified.remove(&seq);
         let Some(key) = self.placement.remove(&seq) else {
             return;
         };
@@ -997,9 +1172,13 @@ impl Record {
                 Key::Anonymous(_) => None,
             },
             created_ms: self.created_ms,
+            // A contested row is revocable again: the credential demonstrably
+            // still works, so there is something left to delete and retrying is
+            // the right action to offer.
             revocable: self.key.provenance() == Some(Provenance::Credential)
-                && self.revoked_at_ms.is_none(),
+                && (self.revoked_at_ms.is_none() || self.revoke_contested),
             revoked_at_ms: self.revoked_at_ms,
+            revoke_contested: self.revoke_contested,
             label: self.label.clone(),
             connected: !self.open.is_empty(),
             sockets: self.open.len(),
@@ -1084,10 +1263,15 @@ impl ClientHandle {
         self.registry.identify(self.seq, claim);
     }
 
-    /// Note that the bridge just succeeded in writing to this client.
+    /// Note that a frame arrived from this client.
     ///
-    /// Lock-free and silent: called once a second per client by the relay's
-    /// keepalive, so it must not wake the UI.
+    /// Call this **only for inbound traffic** — a Pong, a command, anything the
+    /// peer actually sent. Calling it after a successful write would make the
+    /// field describe our own kernel rather than the client, which is what it
+    /// used to do and why it could not detect a phone that had walked away.
+    ///
+    /// Lock-free and silent: a live client refreshes this about once a second
+    /// via Pong, so it must not wake the UI.
     pub fn heard(&self) {
         self.last_heard.store(now_ms(), Ordering::Relaxed);
     }
@@ -1151,7 +1335,7 @@ mod tests {
     fn an_empty_bridge_reports_nothing_rather_than_guessing() {
         let view = registry().view();
         assert_eq!(view.connections, 0);
-        assert_eq!(view.browsers, BrowserCount::Reported { count: 0 });
+        assert_eq!(view.browsers, BrowserCount::Reported { count: 0, provenance: Provenance::Credential });
         assert!(view.clients.is_empty());
         assert!(!view.any_unidentified);
     }
@@ -1172,22 +1356,116 @@ mod tests {
 
         let view = reg.view();
         assert_eq!(view.connections, 1);
-        assert_eq!(view.browsers, BrowserCount::Reported { count: 1 });
+        assert_eq!(view.browsers, BrowserCount::Reported { count: 1, provenance: Provenance::SelfReported });
         assert_eq!(view.clients.len(), 1, "a roam is not a second device");
 
         let client = &view.clients[0];
         assert!(client.connected);
         assert_eq!(client.connections, 2, "the reconnect is stated, not hidden");
         assert_eq!(client.address, "192.168.0.77:51999");
+        // No "moved from" line. An unverified id groups the sockets, which is
+        // useful, but it does not establish that one device did the moving —
+        // and a roam is a claim about one device's history. See
+        // `an_unverified_join_cannot_rewrite_the_row_it_joins`.
+        assert!(client.previous_addresses.is_empty());
+    }
+
+    /// The same roam, with a credential behind it: now the history is real and
+    /// the panel says so.
+    #[test]
+    fn a_verified_roam_is_recorded_as_an_address_change() {
+        let reg = registry();
+        let first = reg.connect(addr("192.168.0.31:51002"), Some(PHONE), credential("dev-0001", None));
+        drop(first);
+        let _second = reg.connect(addr("192.168.0.77:51999"), Some(PHONE), credential("dev-0001", None));
+
+        let view = reg.view();
+        assert_eq!(view.clients.len(), 1);
+        assert_eq!(view.clients[0].address, "192.168.0.77:51999");
         assert_eq!(
-            client.previous_addresses,
+            view.clients[0].previous_addresses,
             vec!["192.168.0.31:51002".to_string()],
-            "the roam is visible as an address change"
+            "the bridge checked the credential, so the roam is evidence"
+        );
+    }
+
+    /// The impersonation that survived folding provenance into the key.
+    ///
+    /// Anyone holding the pairing token can send a `?c=` or a `hello` naming an
+    /// id someone else is using. Grouping the sockets is a tolerable
+    /// consequence of an unverified id — but the newcomer must not be able to
+    /// **rewrite the row it joined**: not the displayed address, not the label,
+    /// not the agent, and above all not push the incumbent's address into
+    /// `previous_addresses`, which would render a "moved from" line for a roam
+    /// that never happened. Manufacturing evidence is worse than showing none.
+    #[test]
+    fn an_unverified_join_cannot_rewrite_the_row_it_joins() {
+        const ATTACKER_UA: &str = "Mozilla/5.0 (Windows NT 10.0) Firefox/121.0";
+        let reg = registry();
+
+        let _victim = reg.connect(addr("192.168.0.31:51002"), Some(PHONE), claimed("victim-phone"));
+        let attacker = reg.connect(addr("10.9.9.9:40000"), Some(ATTACKER_UA), ConnectingIdentity::Unidentified);
+        attacker.identify(Claim {
+            id: Some("victim-phone".into()),
+            label: Some("Definitely the phone".into()),
+        });
+
+        let view = reg.view();
+        let row = view
+            .clients
+            .iter()
+            .find(|c| c.id.as_deref() == Some("victim-phone"))
+            .expect("the shared row");
+
+        assert_eq!(row.address, "192.168.0.31:51002", "the incumbent's address stands");
+        assert!(
+            row.previous_addresses.is_empty(),
+            "no fabricated roam: the victim's address must not become history"
+        );
+        assert_eq!(row.label, None, "the attacker cannot name someone else's row");
+        assert_eq!(
+            row.agent.as_deref(),
+            agent_hint(PHONE).as_deref(),
+            "the incumbent's agent stands"
+        );
+        // And the count says these are self-reported, so nothing downstream
+        // reads two sockets on one volunteered id as a verified fact.
+        assert_eq!(
+            view.browsers,
+            BrowserCount::Reported {
+                count: 1,
+                provenance: Provenance::SelfReported
+            }
+        );
+    }
+
+    /// One weak member makes the whole count weak. A mixed view must not
+    /// inherit the credentialed wording.
+    #[test]
+    fn the_weakest_provenance_present_governs_the_count() {
+        let reg = registry();
+        let _verified = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-0001", None));
+        assert_eq!(
+            reg.view().browsers,
+            BrowserCount::Reported {
+                count: 1,
+                provenance: Provenance::Credential
+            }
+        );
+
+        let _volunteered = reg.connect(addr("192.168.0.32:5000"), Some(PHONE), claimed("phone-aaaaaaaa"));
+        assert_eq!(
+            reg.view().browsers,
+            BrowserCount::Reported {
+                count: 2,
+                provenance: Provenance::SelfReported
+            },
+            "a count is only as trustworthy as its softest member"
         );
     }
 
     #[test]
-    fn two_identified_devices_are_two() {
+    fn two_identified_browsers_are_two() {
         let reg = registry();
         let _phone = reg.connect(
             addr("192.168.0.31:5000"),
@@ -1202,7 +1480,7 @@ mod tests {
 
         let view = reg.view();
         assert_eq!(view.connections, 2);
-        assert_eq!(view.browsers, BrowserCount::Reported { count: 2 });
+        assert_eq!(view.browsers, BrowserCount::Reported { count: 2, provenance: Provenance::SelfReported });
     }
 
     /// The honest case, and today's default: nothing claimed an id, so the
@@ -1299,7 +1577,7 @@ mod tests {
         let view = reg.view();
         assert_eq!(view.connections, 1);
         assert_eq!(view.clients.len(), 1, "no leftover unidentified row");
-        assert_eq!(view.browsers, BrowserCount::Reported { count: 1 });
+        assert_eq!(view.browsers, BrowserCount::Reported { count: 1, provenance: Provenance::SelfReported });
         let client = &view.clients[0];
         assert!(client.identified);
         assert_eq!(client.label.as_deref(), Some("Sara's phone"));
@@ -1307,6 +1585,34 @@ mod tests {
             client.connections, 1,
             "identifying a live socket is not a second connection"
         );
+    }
+
+    /// A client must not be able to re-identify in a loop. Each `hello` used to
+    /// wake the desktop panel, so the repaint rate was the client's to choose.
+    #[test]
+    fn only_the_first_hello_on_a_connection_counts() {
+        let reg = registry();
+        let handle = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), ConnectingIdentity::Unidentified);
+        handle.identify(Claim {
+            id: Some("phone-aaaaaaaa".into()),
+            label: Some("First".into()),
+        });
+
+        let mut rx = reg.subscribe();
+        let _ = rx.borrow_and_update();
+
+        for n in 0..10 {
+            handle.identify(Claim {
+                id: Some(format!("hop-{n:08}")),
+                label: Some(format!("rename {n}")),
+            });
+        }
+
+        assert!(!rx.has_changed().unwrap(), "no repaints the client can drive");
+        let view = reg.view();
+        assert_eq!(view.clients.len(), 1, "no identity hopping");
+        assert_eq!(view.clients[0].id.as_deref(), Some("phone-aaaaaaaa"));
+        assert_eq!(view.clients[0].label.as_deref(), Some("First"));
     }
 
     /// A reconnect that identifies late still merges with the earlier session.
@@ -1348,16 +1654,16 @@ mod tests {
 
         let view = reg.view();
         assert_eq!(view.connections, 0);
-        assert_eq!(view.browsers, BrowserCount::Reported { count: 0 });
+        assert_eq!(view.browsers, BrowserCount::Reported { count: 0, provenance: Provenance::Credential });
         assert_eq!(view.clients.len(), 1);
         assert!(!view.clients[0].connected);
         assert!(view.clients[0].disconnected_at_ms.is_some());
     }
 
-    /// Two tabs on one phone are one device with two sockets, and the panel
+    /// Two tabs on one phone are one browser with two sockets, and the panel
     /// says both numbers rather than picking one.
     #[test]
-    fn two_sockets_on_one_identity_are_one_device() {
+    fn two_sockets_on_one_identity_are_one_browser() {
         let reg = registry();
         let _a = reg.connect(
             addr("192.168.0.31:5000"),
@@ -1372,7 +1678,7 @@ mod tests {
 
         let view = reg.view();
         assert_eq!(view.connections, 2);
-        assert_eq!(view.browsers, BrowserCount::Reported { count: 1 });
+        assert_eq!(view.browsers, BrowserCount::Reported { count: 1, provenance: Provenance::SelfReported });
         assert_eq!(view.clients[0].sockets, 2);
     }
 
@@ -1548,7 +1854,7 @@ mod tests {
 
         let view = reg.view();
         assert_eq!(view.clients.len(), 2, "the two must not merge");
-        assert_eq!(view.browsers, BrowserCount::Reported { count: 2 });
+        assert_eq!(view.browsers, BrowserCount::Reported { count: 2, provenance: Provenance::SelfReported });
     }
 
     /// Nor by sending a `hello` after the fact.
@@ -1640,6 +1946,58 @@ mod tests {
         // The provenance stays truthful about what the connection *was* — the
         // row is annotated, not rewritten.
         assert_eq!(row.provenance, Some(Provenance::Credential));
+    }
+
+    /// The detector for a half-wired revoke: the socket was closed but the
+    /// credential was never deleted, so the device comes straight back.
+    ///
+    /// Without this the panel would show a row tagged "revoked" with a live
+    /// socket on it — reassuring, on the confirmation screen, about a phone
+    /// that is at that moment connected.
+    #[test]
+    fn a_revoked_device_that_reconnects_contests_the_revoke() {
+        let reg = registry();
+        let first = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-0001", None));
+        reg.revoke("dev-0001");
+        drop(first);
+        assert!(!reg.view().clients[0].revoke_contested);
+
+        // Only reachable when the credential still verifies — i.e. the store
+        // half of revocation never ran.
+        let _again = reg.connect(addr("192.168.0.31:5001"), Some(PHONE), credential("dev-0001", None));
+
+        let view = reg.view();
+        assert_eq!(view.clients.len(), 1);
+        let row = &view.clients[0];
+        assert!(row.connected, "the device is back");
+        assert!(row.revoke_contested, "and the panel must not call that revoked");
+        assert!(
+            row.revocable,
+            "the credential still works, so retrying is a real action"
+        );
+    }
+
+    /// A revoked device that comes back *without* a credential is an ordinary
+    /// unidentified client, not a contested revoke. The store did its job; the
+    /// browser is simply back on the pairing page.
+    #[test]
+    fn a_revoked_device_returning_uncredentialed_is_not_contested() {
+        let reg = registry();
+        let first = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-0001", None));
+        reg.revoke("dev-0001");
+        drop(first);
+
+        let _stranger = reg.connect(
+            addr("192.168.0.31:5001"),
+            Some(PHONE),
+            ConnectingIdentity::Unidentified,
+        );
+
+        let view = reg.view();
+        let revoked = view.clients.iter().find(|c| c.id.as_deref() == Some("dev-0001")).unwrap();
+        assert!(!revoked.revoke_contested);
+        assert!(!revoked.connected);
+        assert_eq!(view.connections, 1, "the new socket is its own row");
     }
 
     /// Revoking a device with no live socket still changes what the panel says.
@@ -1750,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn the_view_serialises_with_camel_case_and_a_tagged_device_count() {
+    fn the_view_serialises_with_camel_case_and_a_tagged_browser_count() {
         let reg = registry();
         let _a = reg.connect(
             addr("192.168.0.31:5000"),

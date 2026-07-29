@@ -147,7 +147,7 @@ export type Provenance = 'selfReported' | 'credential'
  * called `known`.
  */
 export type BrowserCount =
-  | { state: 'reported'; count: number }
+  | { state: 'reported'; count: number; provenance: Provenance }
   | { state: 'atLeast'; count: number; unidentified: number }
 
 /** One identity group: a client, or a connection we cannot attribute. */
@@ -177,6 +177,15 @@ export interface ClientView {
    * sitting there still tagged "verified".
    */
   revokedAtMs: number | null
+  /**
+   * A revoked device reconnected with a credential that still verifies.
+   *
+   * A detector, not a state: it can only happen when the credential was never
+   * deleted, so the revoke closed a socket and nothing more. Rendered as a
+   * fault, because the alternative is a row reading "revoked" with a live
+   * phone attached to it.
+   */
+  revokeContested: boolean
   connected: boolean
   /** Open sockets. Two tabs on one phone is two sockets, one device. */
   sockets: number

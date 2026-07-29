@@ -1394,9 +1394,18 @@ pub(crate) async fn ws_relay<S>(
 
     loop {
         tokio::select! {
-            // First arm, deliberately: `select!` polls in order, and a socket
-            // that has just been revoked must not get one more state update
-            // out of a busy relay.
+            // `biased` is load-bearing, not tidiness. Without it `select!`
+            // polls its arms in a **random** order on every iteration, so a
+            // revoked socket with a busy snapshot channel loses the race about
+            // three times in four and keeps receiving state it should not.
+            //
+            // An earlier version of this comment asserted that arms are polled
+            // in order and there was no `biased`. It read as a deliberate
+            // decision and was simply wrong, which is why the ordering now has
+            // a test — the property is invisible at the call site and the
+            // failure is probabilistic.
+            biased;
+
             _ = client.revoked() => {
                 log_info!("[ws] {addr} closed: the device was revoked");
                 // Say why. A silent drop is byte-identical to a dead router,
@@ -1418,7 +1427,6 @@ pub(crate) async fn ws_relay<S>(
                 if send_snapshot(&mut tx, &snap).await.is_err() {
                     break;
                 }
-                client.heard();
                 keepalive.reset();
             }
             _ = keepalive.tick() => {
@@ -1434,12 +1442,18 @@ pub(crate) async fn ws_relay<S>(
                 if send_snapshot(&mut tx, &snap).await.is_err() {
                     break;
                 }
-                // A successful write is the only evidence the socket is still
-                // attached to anything. A phone that walked out of range keeps
-                // a half-open TCP connection for a while, so "connected" alone
-                // would go on claiming a client that is gone; the panel shows
-                // how long ago this was and lets a reader see that.
-                client.heard();
+                // Ask the client to prove it is still there.
+                //
+                // A successful write proves nothing about the peer — it means
+                // the local TCP stack took the bytes. A phone carried out of
+                // range holds a half-open socket, and 200-byte snapshots at
+                // 1 Hz would take minutes to fill the send buffer, so a
+                // write-based liveness check could not detect the case it
+                // existed for. Every browser answers a Ping with a Pong
+                // automatically, so this is the client's own signal.
+                if tx.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
             }
             // A file appeared, vanished or was renamed in the library
             // directory. The message says only "ask again" — contents travel
@@ -1468,6 +1482,7 @@ pub(crate) async fn ws_relay<S>(
             incoming = rx.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
+                        client.heard();
                         if let Some(claim) = clients::parse_hello(&text) {
                             // The client saying which device it is. Advisory,
                             // unauthenticated, and used for nothing except
@@ -1484,8 +1499,12 @@ pub(crate) async fn ws_relay<S>(
                         }
                     }
                     Some(Ok(Message::Ping(p))) => {
+                        client.heard();
                         if tx.send(Message::Pong(p)).await.is_err() { break; }
                     }
+                    // The answer to our keepalive Ping, and the ordinary way a
+                    // live client stays fresh on the panel.
+                    Some(Ok(Message::Pong(_))) => client.heard(),
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(e)) => {
                         log_debug!("[ws] {addr} error: {e}");
