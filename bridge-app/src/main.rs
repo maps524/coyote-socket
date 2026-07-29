@@ -577,6 +577,19 @@ fn serve_http(
                     tls: https.as_ref().map(|(_, p)| Arc::clone(&p.public)),
                     devices,
                     clients,
+                    // The desktop app has no DLNA control, so it does not
+                    // browse. `None` is the field's own documented meaning —
+                    // "did not look", as distinct from "found no servers" —
+                    // which is the right answer here rather than a placeholder.
+                    //
+                    // Absent entirely until now: `dlna` was added to `Ctx` and
+                    // wired in the headless binary, and this crate was not
+                    // built. `cargo test` in `bridge/` cannot see `bridge-app`
+                    // at all, so the suite stayed green while the app did not
+                    // compile. Second time tonight in the two directions —
+                    // `tls_end_to_end.rs` was missing `clients` from the other
+                    // branch — and `Ctx` is the shared surface nobody owns.
+                    dlna: None,
                 });
                 // Published before serving starts, so anything asking for the
                 // current pairing URL gets the live token rather than a copy.

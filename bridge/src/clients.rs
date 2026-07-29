@@ -26,9 +26,18 @@
 //! | `User-Agent` | A device *class* at best. Two identical iPhones are byte-identical here, and it is trivially forged. |
 //! | `Sec-WebSocket-Key` | Random per connection. Actively anti-identity. |
 //!
-//! That list is exhaustive for what the bridge can observe *on its own*, and
-//! none of it identifies anything. Identity has to be something the client
-//! carries, and there are two grades of it — see [`Provenance`]:
+//! That list covers the signals that arrive on any connection and identify
+//! nobody. It is **not** a list of everything the bridge can observe: since
+//! pairing landed it also reads a `Cookie` and verifies it against its own
+//! store, which identifies a browser and involves no client honesty at all.
+//!
+//! (This sentence previously called the table "exhaustive for what the bridge
+//! can observe on its own", which was true before that store existed and is the
+//! subject-narrowing described in `FOLLOW-UPS.md` §0f. It is also the one
+//! instance where the absolutes grep would have passed the file.)
+//!
+//! Identity has to be carried, and there are two grades of it — see
+//! [`Provenance`]:
 //!
 //! - **A verified per-device credential.** Minted by the pairing flow: the
 //!   token on the QR is exchanged once, over the HTTPS origin, for a
@@ -181,9 +190,19 @@ impl Key {
 ///
 /// Minted and stored by the pairing work in `bridge-tls`: the pairing token is
 /// exchanged once, over the HTTPS origin, for a credential the browser keeps
-/// and presents on every later upgrade. **The `id` here is not the secret** —
-/// the bearer value is stored hashed and never leaves the bridge, while this id
-/// is safe to render, log and put in a JSON body, which it is.
+/// and presents on every later upgrade.
+///
+/// **The `id` here is not the secret.** The bearer value is `id.secret`, and it
+/// very much does leave the machine — it is handed to the browser as a cookie
+/// and comes back on every request, which is the whole mechanism. What stays is
+/// the *stored* form: the secret is held only as a SHA-256 hash, so the on-disk
+/// record cannot be replayed. This `id` is the non-secret half, safe to render,
+/// log and put in a JSON body, which is what happens to it.
+///
+/// An earlier version of this comment said the bearer value "never leaves the
+/// bridge", which is false and is the dangerous direction to be false in:
+/// someone auditing what escapes this machine would have read a true statement
+/// about the *stored* form as a claim about the credential itself.
 /// # Contract the resolver must satisfy
 ///
 /// `id` is deliberately **not** run through [`sanitise_id`]: that guard exists
@@ -289,8 +308,14 @@ impl Credential {
     /// Deliberately far weaker than [`sanitise_id`] — no length floor, no
     /// charset — because this comes from the bridge's own store rather than
     /// from a peer, and imposing our format on someone else's generator would
-    /// buy nothing. It rejects only what cannot be displayed at all: nothing,
-    /// whitespace, control characters, or something too long to be a name.
+    /// buy nothing.
+    ///
+    /// It rejects four things: nothing at all, whitespace only, control
+    /// characters, and anything longer than [`MAX_ID_LEN`]. The first three
+    /// cannot be displayed; the fourth can, and is refused anyway because an
+    /// unbounded id reaches a window and a log line. Listed rather than
+    /// summarised, because the summary this replaced ("only what cannot be
+    /// displayed at all") was contradicted by its own next clause.
     pub fn id_is_usable(&self) -> bool {
         let id = self.id.trim();
         !id.is_empty()

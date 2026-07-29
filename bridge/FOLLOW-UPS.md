@@ -1,6 +1,6 @@
 # Bridge follow-ups
 
-Sections **0** through **0e** are not tasks. They are defect signatures this
+Sections **0** through **0f** are not tasks. They are defect signatures this
 work produced repeatedly, written as recognition rules because each has already
 caught its next instance.
 
@@ -16,6 +16,7 @@ nothing about the rest.
 | **0c** | Verification concentrating where the system succeeds | Which paths did success prevent me from exercising? |
 | **0d** | A defence that admits whatever does not resemble its threat | What did I name the threat as? |
 | **0e** | A correct behaviour at a frequency nobody decided | This is correct once — what is it a thousand times a second? |
+| **0f** | A sentence accurate about one thing, written as a claim about a larger one | What is the subject of this sentence, and does the code still have only that subject? |
 
 The wording in each row is the section's own. A summary that paraphrases the
 thing it summarises is §0d in miniature: the table exists so people do not read
@@ -333,6 +334,171 @@ The counter-question matches the one above: not *"does this line exist?"* or
 *"did this test pass?"* but **"what would have to be true for this to run, and
 is that what it measured?"**
 
+### The command was right; its scope was not what you assumed
+
+A near neighbour, and the reason it sits here rather than with the merge
+failures: nothing is stale, nothing is lost, and the tool does exactly what it
+says. **The gap is between what it covered and what the reader took it to
+cover.**
+
+Four instances, and the first two are the same defect from opposite directions:
+
+- `cargo test --lib` was reported as green while `tests/tls_end_to_end.rs` did
+  not compile. A `Ctx` field added during a merge was missing from one test
+  target, and `--lib` does not build test targets. **`--all-targets` is the
+  claim people think `--lib` is making.**
+- The same thing across crates, in the other direction: `bridge-app` did not
+  compile because `Ctx` gained a `dlna` field that only the headless binary was
+  updated for. **`cargo test` in `bridge/` cannot see `bridge-app` at all**, and
+  "the suite is green" meant that command all evening. `Ctx` is the shared
+  surface every branch extends and nobody owns, and each extension silently
+  obliges every construction site in a crate the author was not building.
+- A verification was run against an `origin/` ref an hour old and read as the
+  state of the world. The command succeeded and reported the opposite of the
+  truth for one command; a `git fetch` first would have settled it.
+- A `grep` confirmed a suspicion about a live hazard, and the attribute
+  disabling it lived fifteen lines above the match — recorded above, and the
+  same shape seen from the reading side.
+
+In all four the output is correct and the inference is not, which is what makes
+it hard: there is nothing wrong to notice. The question is not *"did it pass?"*
+but **"what did this command actually look at?"** — and for anything that takes
+a scope flag or a ref, the honest answer is usually narrower than the sentence
+you were about to write about it.
+
+**The bar before calling a rebase green is `--all-targets` in both crates.**
+Every cross-crate break tonight was invisible to the command everyone was
+actually running, and both were found by another agent rather than by the author.
+
+### The edit that silently did nothing — and the wrong story told about it
+
+A `stale()` doc comment went on describing a write-based liveness check that
+ping/pong had replaced. The *code* was correct and the *body copy* the user
+reads was correct; only the comment was stale, so nothing failed and nothing
+looked wrong.
+
+**The first diagnosis was that a rebase had dropped the hunk**, and it was
+written up here as one — a third merge failure mode, complete with a table. It
+was wrong. `git range-diff` against the pre-rebase range paired all six commits
+and showed no such loss, and the pre-rebase commit itself turned out never to
+have contained the new text at all.
+
+The actual cause: a scripted `str.replace(old, new)` whose `old` did not match.
+Python returns the string unchanged and the script reports success. The edit
+never happened, the commit was made, `svelte-check` passed — because a comment
+is not type-checked — and the adjacent replacement in the same script *did*
+match, so the change looked half-applied rather than absent.
+
+> **A search-and-replace that matches nothing succeeds.** `str.replace`,
+> `sed`, and every editor scripted the same way report no error for a pattern
+> that was never found. A script that makes five replacements and lands four is
+> indistinguishable, from its exit code, from one that lands five.
+
+This is the same defect signature as the rest of section 0a, in the tooling
+rather than in the product: **a success path taken for input the code could
+already tell was wrong.** The fix is the same shape too — make the guard match
+the condition. Assert the match count, or use a tool that fails on a missing
+pattern.
+
+And the misdiagnosis is section 0b: a failure attributed to the component
+nearest the symptom rather than to its cause. It was written into this document,
+in the section warning against exactly that, and stood for one commit.
+
+**The risk is not spread evenly across a script, and knowing where it
+concentrates tells you which replaces to check first.** An unasserted replace
+against Rust is usually safe by accident: if it fails to match, the surrounding
+edit no longer compiles and the compiler says so. The same replace against a
+*comment*, a doc string or Markdown has **no backstop at all** — nothing
+compiles the output, no test exercises it, and the only reader who would notice
+is a human who happens to look. Every instance found this week was in a comment
+or a doc, across two branches, and that is not a coincidence.
+
+### Two checks, and what each is actually good for
+
+Both were run on this week's three-branch sequence. Neither result was known
+until someone looked, and "the tests pass" had already been offered for both.
+
+**`git range-diff <old-base>..<old-tip> <new-base>..<new-tip>`** compares a
+rebase against its original. `--no-patch` gives one line per commit — `=`
+unchanged, `!` altered, `<`/`>` on one side only — and the full form shows the
+diff of the diffs, in which a genuinely lost hunk is a `+` line the old commit's
+patch had and the new one does not. It needs both ranges to still be reachable,
+and it pairs *commits*, so it covers rebases and cherry-picks and does nothing
+for a squash or a true merge.
+
+**Grepping the tree for phrases you know you wrote** finds a missing sentence
+whatever caused it to be missing — a lost hunk, a no-op edit, or a change never
+made. It can only find what you remember writing, which makes it strongest just
+after your own work and weakest on someone else's.
+
+The division is sharper than "use both", and it is why the wrong story survived
+as long as it did:
+
+| | Finds | Blind to |
+|---|---|---|
+| Read the diff | wrong resolutions | absences |
+| Grep for remembered phrases | that something is missing | *why* it is missing |
+| `git range-diff` | whether a rebase dropped it | squashes, merges, a discarded pre-rebase ref |
+
+Grep found the symptom here and was read as identifying the cause. It cannot:
+an absent sentence looks identical whether a merge ate it or the edit never
+ran. **Establishing that a merge lost something needs the comparison, not the
+search** — and running it is what turned a plausible story into a false one.
+
+### A fourth mode, which none of the three catches
+
+Attributed to scarlet, who found it by noticing an unfamiliar SHA in an agent's
+final report rather than by any of the checks above.
+
+PR #12 was merged at `9924843`; the agent pushed another commit afterwards.
+**Nothing was lost in a rebase and no resolution was wrong — the commit was
+never in the merge at all.** Every method above misses it, and for a different
+reason each time: `range-diff` pairs commits within two ranges and a squash
+merge produces neither range; grep fails because you do not remember writing
+lines you did not write; and reading the diff shows a correct diff of the wrong
+tip.
+
+> **A merge is a snapshot of a moving branch, and "ready to merge" is a claim
+> about a moment.**
+
+**And the obvious check for it is inert, which is the part worth keeping.** The
+answer looks like: after merging, compare the branch tip against the
+`headRefOid` you actually merged. That was run — in the same command as the
+merge. It can only see a push that has already happened, so it is a check
+against a slow agent and no check at all against a fast one. Not a skipped
+mechanism: **a mechanism that could not fail in the way it needed to fail**,
+which is section 0a, executed by the person who wrote section 0a, on the merge
+of the branch carrying it.
+
+No check wins a race, so the fix is a protocol rather than a better check:
+**the agent declares frozen, and only then does the merge happen.** Freeze is a
+state the agent controls and can hold. "Ready to merge" — like "green and
+pushed" — is a claim about a moment, and a moment is the one thing a merge
+cannot verify after the fact.
+
+It has happened four times. The fourth was the merge of the branch that
+documents it, and the commit it stranded was the one withdrawing content that
+had already been called back. Both instances are worth keeping, because they do
+not read alike: `9924843` stranded a commit that **existed**, and `b00d228`
+stranded one that **withdrew** something already retracted. "The merge was
+missing a fix" and "the merge included something already called back" feel like
+different problems and are the same one.
+
+| | Finds | Blind to |
+|---|---|---|
+| Compare tip to merged `headRefOid` | a push that finished before the merge | a push that races it, and anything inside the merge |
+| The agent declares frozen first | both | nothing, if the freeze is honoured |
+
+### What all four have in common
+
+**The correct action is to go looking for something that is not there.**
+
+Every one of these is invisible to the checks that ask whether what is present
+is right. A clean diff, a green build and a passing suite are all statements
+about the code that arrived; none of them is a statement about the code that
+did not.
+
+
 ---
 
 ## 0b. Misattributed failure
@@ -639,6 +805,106 @@ Retention as an eraser: a bounded gone-row list whose ids are attacker-chosen,
 so evidence of a real disconnect can be evicted by churn. Same shape — a
 correct bound and a correct record, and an emergent defect at a rate the
 attacker picks rather than the author.
+
+---
+
+## 0f. True of the narrower thing
+
+A comment that is **accurate about one thing and written as a claim about a
+larger one**. Distinct from a stale comment, and worse, because it survives
+being read: a reviewer checks it, finds it true, and moves on. The error is not
+in the sentence's content but in its *subject*.
+
+> **Ask what the subject of the sentence is, and whether the code still has
+> only that subject.**
+
+### The instance that proves the net has holes
+
+Lead with this one, because it is the only case where the mechanical check would
+have **passed the file**.
+
+`clients.rs` said its table of signals was *"exhaustive for what the bridge can
+observe on its own"*. True when written — the bridge could observe an address, a
+shared token, a `User-Agent`, and nothing that identified anyone. After the
+credential work merged it observes a `Cookie` and verifies it against its own
+store, with no client honesty involved anywhere. The subject narrowed from "a
+bridge with no credential store" to "the bridge", and the sentence kept the old
+scope.
+
+**"Exhaustive" is not an absolute the grep below looks for, and no reasonable
+list would contain it.** That instance was found by asking the subject question
+and by nothing else.
+
+### Three more, two agents, one subsystem
+
+| Said | True of | Written as a claim about |
+|---|---|---|
+| The bearer value **"never leaves the bridge"** | the stored SHA-256 hash | the credential, which goes to the browser and returns on every request |
+| Returning the cookie is **"the only moment the secret exists outside the phone"** | the minting step | the credential's whole lifetime — it is in flight constantly |
+| The public certificate is **"the only thing the install page serves"** | the key material | the page, which also carries the pairing token |
+
+The first two are the same error in opposite directions — one says the secret
+never leaves, the other that it leaves exactly once — and **both were written by
+someone describing the stored form while believing they were describing the
+credential.** Two agents produced it independently, in one week, about one
+subsystem. That makes it structural rather than careless.
+
+Direction does not excuse it. The `exhaustive` one undersells what the bridge
+can do, which is the safe way to be wrong; the other three oversell safety,
+which is not. **The shape does not care which way it leans**, and a pessimistic
+instance is still a sentence whose subject has moved.
+
+### Why it is worse than an ordinary stale comment
+
+The consequence is not confusion, it is misplaced confidence, and it lands on
+the reader best positioned to catch a real problem:
+
+- Someone auditing **what escapes this machine** reads "never leaves the bridge"
+  and stops looking.
+- Someone reasoning about **exposure** reads "exists outside the phone once" and
+  concludes the secret crosses the wire a single time — so `Secure`, `HttpOnly`
+  and the `Origin` requirement read as belt-and-braces rather than as the
+  load-bearing guards they are.
+
+An ordinary stale comment wastes a minute. This one buys a false all-clear.
+
+### The absolutes grep is the net, not the target
+
+Grepping comments for *"the only"*, *"never"*, *"always"*, *"the entire"*,
+*"cannot"* found three of the four, and it works because a narrowing sentence
+tends to be phrased categorically: a hedged sentence survives a change in
+behaviour, and a categorical one goes false.
+
+**But the defect is the scope mismatch, and a hedged sentence carries it just as
+well.** The `exhaustive` case is the proof rather than the argument. So a clean
+absolutes sweep is **not an all-clear** — it is a cheap mechanical pass that
+catches the common phrasing, and the subject question is what actually finds
+these.
+
+### A relative, worth its own name rather than this section's
+
+*"Step 2 of the install page"* pointing at what renumbering made step 3. It is
+not a scope error: there is no reading of it that is true, which is exactly what
+separates it. Its recognition question is **"does this still point at what it
+pointed at?"**, and its mechanism is that a numbered reference has no way to
+announce it has gone stale — no compiler, no test, and nothing in the text to
+notice. Every hardcoded index into something reorderable has it: numbered steps,
+"the second column", "the example above", section references in this file.
+
+It is also section 0b, because it did not merely go stale — it produced the
+plausible wrong answer to the question someone asks while already stuck.
+
+### Where these live, and why
+
+**Every instance found this week is in a comment or a doc. Zero in compiled
+code.**
+
+That is the sharpest form of the point in section 0a about scripted edits: the
+compiler is doing the entire job everywhere it can reach, and nothing at all is
+doing it anywhere else. A wrong claim in code is a type error or a failing test.
+The identical wrong claim three lines above it, in a `///`, has no backstop of
+any kind — no compiler, no test, and no reader who treats it as something that
+could be false.
 
 ---
 
