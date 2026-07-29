@@ -203,9 +203,17 @@ export interface ClientView {
   connectedAtMs: number
   disconnectedAtMs: number | null
   /**
-   * When the bridge last succeeded in writing to this client. The relay writes
-   * at least once a second, so a much older value means the socket is wedged
-   * and the client has probably already gone.
+   * When a frame last arrived **from** this client.
+   *
+   * Read that literally. It used to be set after a successful *write*, which
+   * proves only that the local TCP stack took the bytes — so the field named
+   * "last heard" could not detect the one case it existed for. The relay now
+   * pings each keepalive and browsers answer automatically, so this is the
+   * client's own signal.
+   *
+   * Stale implies dead. Fresh implies the browser is reachable, which is not
+   * quite the page being healthy: a Pong is answered by the browser, not by
+   * the app's script.
    */
   lastHeardMs: number
   address: string
