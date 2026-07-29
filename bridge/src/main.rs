@@ -5,15 +5,15 @@
 //! main thread and never returns. With `--no-tray` (or a build without the
 //! `tray` feature) the main thread just parks instead.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use coyote_bridge::state::{PlayerCommand, PlayerSnapshot};
-use coyote_bridge::{http, logging, player};
+use coyote_bridge::auth;
+use coyote_bridge::wire::Tap;
+use coyote_bridge::{http, logging, supervisor};
 use coyote_bridge::{log_info, log_warn};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch};
 
 const DEFAULT_PLAYER_PORT: u16 = 23554;
 const DEFAULT_HTTP_PORT: u16 = 8787;
@@ -25,6 +25,10 @@ struct Args {
     static_dir: Option<PathBuf>,
     log_dir: Option<PathBuf>,
     tray: bool,
+    /// Pin the pairing token instead of minting a fresh one each start. For a
+    /// service under a supervisor, where a URL that changes on every restart is
+    /// worse than a secret in a unit file.
+    token: Option<auth::Token>,
 }
 
 impl Default for Args {
@@ -42,6 +46,7 @@ impl Default for Args {
             static_dir: None,
             log_dir: None,
             tray: true,
+            token: None,
         }
     }
 }
@@ -60,6 +65,8 @@ OPTIONS:
   --static-dir <path>     Directory to serve - the PWA's `dist`.
   --log-dir <path>        Where to write coyote-bridge.log. [default: cwd]
   --no-tray               Do not create a tray icon (headless servers).
+  --token <hex>           Pairing token. Default: a fresh one each start, which
+                          means the phone URL changes on every restart.
   -h, --help              Show this.
 
 NOTE: DeoVR and HereSphere do not listen on 23554 until remote control is
@@ -101,6 +108,7 @@ fn parse_args() -> Result<Args, String> {
             "--static-dir" => args.static_dir = Some(PathBuf::from(value()?)),
             "--log-dir" => args.log_dir = Some(PathBuf::from(value()?)),
             "--no-tray" => args.tray = false,
+            "--token" => args.token = Some(coyote_bridge::auth::Token::from_string(value()?)),
             other => return Err(format!("unknown argument: {other}\n\n{USAGE}")),
         }
     }
@@ -127,9 +135,24 @@ fn main() {
         }
     }
 
-    let advertised_ip = local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    let pairing_url = format!("http://{advertised_ip}:{}", args.http_port);
+    let advertised_ip = http::local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let base_url = format!("http://{advertised_ip}:{}", args.http_port);
     let local_url = format!("http://127.0.0.1:{}", args.http_port);
+
+    // The headless binary has no settings file, so its token is per-run. That
+    // is a real behaviour change: the URL to hand a phone now differs on every
+    // start. It is the honest default for a service with nowhere to persist a
+    // secret, and the alternative — no token at all — leaves any web page the
+    // user visits able to drive their player. The app build persists its token
+    // (see `bridge-app/src/settings.rs`); a long-lived deployment should
+    // eventually do the same.
+    let token = args.token.clone().unwrap_or_else(auth::Token::generate);
+    let pairing_url = auth::with_token(&base_url, &token);
+    let allowed_hosts = vec![
+        format!("{advertised_ip}:{}", args.http_port),
+        format!("127.0.0.1:{}", args.http_port),
+        format!("localhost:{}", args.http_port),
+    ];
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -140,16 +163,14 @@ fn main() {
     let player_endpoint = args.player.clone();
     let static_dir = args.static_dir.clone();
     let pairing_for_http = pairing_url.clone();
+    let token_for_http = token.clone();
 
     runtime.spawn(async move {
-        // watch: the phone wants current state, not a backlog. A slow client
-        // that misses intermediate positions is fine - it gets the latest.
-        let (snapshot_tx, snapshot_rx) =
-            watch::channel(PlayerSnapshot::new(player_endpoint.clone()));
-        // mpsc: commands are discrete and must not be coalesced.
-        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>(16);
-
-        tokio::spawn(player::run(player_endpoint, snapshot_tx, cmd_rx));
+        // The headless binary connects on start and never stops trying: it is
+        // a service, and there is nobody here to press a button. The
+        // supervisor's Connect/Disconnect commands exist for the UI, and are
+        // simply left unused.
+        let bridge = supervisor::spawn(Some(player_endpoint), Tap::disabled());
 
         match TcpListener::bind(bind_addr).await {
             Ok(listener) => {
@@ -157,10 +178,13 @@ fn main() {
                 http::run(
                     listener,
                     Arc::new(http::Ctx {
-                        snapshot_rx,
-                        cmd_tx,
+                        snapshot_rx: bridge.snapshot_rx.clone(),
+                        cmd_tx: bridge.cmd_tx.clone(),
                         static_dir,
                         pairing_url: pairing_for_http,
+                        token: std::sync::RwLock::new(token_for_http),
+                        allowed_hosts,
+                        on_token_rotated: None,
                     }),
                 )
                 .await;
@@ -173,14 +197,20 @@ fn main() {
     });
 
     log_info!("[main] player endpoint: {}", args.player);
-    log_info!("[main] phone should open: {pairing_url}");
+    // Base URL only. The full pairing URL carries the token, and this log is
+    // routinely pasted into bug reports.
+    log_info!("[main] phone should open: {}", auth::redact_url(&pairing_url));
+    log_info!(
+        "[main] that URL carries a pairing token, withheld here because this log          gets shared. Open {local_url}/pair to see the full URL and its QR."
+    );
     log_info!("[main] pairing QR: {local_url}/pair");
     logging::flush_now();
 
     #[cfg(feature = "tray")]
     if args.tray {
         // Never returns.
-        coyote_bridge::tray::run(pairing_url, local_url);
+        let status_url = auth::with_token(&format!("{local_url}/healthz"), &token);
+        coyote_bridge::tray::run(pairing_url, local_url, status_url);
     }
 
     #[cfg(not(feature = "tray"))]
@@ -192,18 +222,4 @@ fn main() {
     loop {
         std::thread::park();
     }
-}
-
-/// Best-guess LAN address, for the URL we hand the phone.
-///
-/// Uses the connected-UDP-socket trick: connecting a UDP socket sends no
-/// packets, but it makes the OS pick a source address via its routing table -
-/// which is exactly "the interface I would reach the network on". Avoids a
-/// dependency and avoids the classic bug of picking the first interface,
-/// which on a dev machine is usually a virtual adapter.
-fn local_ip() -> Option<IpAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    // Any routable address works; nothing is sent to it.
-    socket.connect("192.0.2.1:9").ok()?;
-    socket.local_addr().ok().map(|a| a.ip())
 }

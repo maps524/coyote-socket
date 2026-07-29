@@ -19,19 +19,103 @@ in a state worth keeping.
 
 ## What is proven and what is not
 
+**Updated 2026-07-28: the bridge has now talked to a real player.** DeoVR on a
+Meta Quest, over Wi-Fi — one recording spanning **837.9 seconds** across
+**three connections**, with **418 inbound frames**. Position streamed; play,
+pause, forward and back all worked from the bridge. The raw capture is
+committed at `fixtures/deovr-quest-2026-07-28.wire.jsonl` and what it settles
+is in `src/capture.rs`.
+
+> An earlier draft of this file described "two sessions, ~7 minutes, 240
+> packets". That was measured from a capture file while it was still being
+> written, and it understated the recording. Every quantitative claim below is
+> now re-derived from the committed fixture by tests in `capture.rs`, so the
+> prose fails the build rather than drifting from the evidence again.
+
 | Part | Status |
 |---|---|
-| Length-prefixed framing | Unit-tested. Format taken from two agreeing sources (below). |
-| Keepalive, timeout, reconnect | Tested against `fake-player`, which enforces the real 3 s timeout. |
+| Length-prefixed framing | **Confirmed against a real DeoVR** — 418 of 418 frames parsed. |
+| Byte order (little-endian) | **Measured**, not inferred. The capture records the raw prefix bytes: `c6 00 00 00` for a 198-byte payload, 418 times over. Big-endian would read that as 3,321,888,768. |
+| Keepalive, timeout, reconnect | Tested against `fake-player`; the real link survived minutes without being dropped. |
+| Position, duration, media identity | **Confirmed against a real DeoVR.** |
+| Play / pause / seek from the bridge | **Confirmed against a real DeoVR**, by hand. |
 | Static file serving | Tested, and run by hand against a directory of files. |
-| WebSocket relay | Tested, and driven by hand from a browser `WebSocket`. |
-| Seek from the phone | Works end to end against `fake-player`. |
-| **Talking to a real DeoVR or HereSphere** | **Never done. Nobody has run this against a headset.** |
+| WebSocket relay | Tested, and driven by hand from a desktop browser. **Never driven from a phone.** |
+| `playerState` as a status field | **Confirmed unreliable.** See below. |
+| **HereSphere, anything** | **Never connected to. Entirely unobserved.** |
 
-That last row is the whole point of the caveat. The client has only ever spoken
-to `fake-player`, which was written from the same reading of the same two
-sources. A shared misreading passes every test in this repo. Until someone runs
-it against a Quest, **the protocol client is a hypothesis.**
+Scope that precisely: **one player, one version, one platform, and only the
+features that session exercised.** Seeking, playing and pausing were exercised.
+Media changes, HereSphere, and on-device (non-streamed) media were not. This is
+enormously more than the spike had; it is not "verified".
+
+### The finding: `playerState` is advisory, not a status
+
+DeoVR's documented mapping (`Play = 0, Pause = 1`) is **correct** — every pause
+in the capture coincides with `1`, every stretch of `0` advances at 1.0×.
+Nothing in the client or the fake was changed.
+
+But the field does not observe the player. It appears to **echo the last value a
+remote client set**:
+
+```
+t+  0 …  58 s   state 0    advancing 1.00x     playing
+t+ 63 …  67 s   state 1    static    0.01x     paused
+t+ 78 …  90 s   state 1    static    0.00x     paused
+t+ 90 … 210 s   state 1    advancing 1.00x     PLAYING, still reporting 1
+```
+
+The last thing the bridge sent before t+90 s was `{"playerState":1}`. A play or
+pause performed *inside the headset* never reaches the field.
+
+Consequences for anything downstream:
+
+- **Never gate output on `playing`.** It is advisory.
+- The authoritative signal is whether position is advancing, and it is
+  inherently late: two packets are needed to establish that position stopped,
+  and the observed cadence is ~1010 ms, so a headset-initiated pause is
+  undetectable for **1.0–2.0 s**. That is a floor, not an estimate.
+- Remote-initiated pauses are unaffected — the flag flips because remote-set is
+  exactly what it echoes.
+
+`PlayerSnapshot::state_suspect` flags the contradiction when it occurs.
+
+## The HTTP surface now requires a token
+
+`/healthz` and `/ws` refuse a request that does not carry `?t=<token>`. The
+pairing URL and QR carry it; `/pair`, `/qr.svg` and the static app do not
+require it.
+
+**This is a breaking change for any client that hardcoded `ws://host:8787/ws`,
+including the PWA.** The fix is one line — read the token from the URL the
+phone was opened with and pass it on:
+
+```js
+const token = new URLSearchParams(location.search).get('t')
+const ws = new WebSocket(`ws://${location.host}/ws?t=${token}`)
+```
+
+Read `src/auth.rs` before assuming this makes anything secure. In particular it
+does **not** give confidentiality: the token travels in a URL over plain HTTP
+and anyone on the network can read it. It stops one specific, real attack —
+a web page you happen to visit opening a WebSocket to your bridge and driving
+your player, which no CORS setting prevents. TLS is separate work and neither
+substitutes for the other.
+
+The headless binary mints a fresh token each start, so its phone URL changes on
+every restart; `--token <hex>` pins one. The desktop app persists its token, so
+a home-screen shortcut keeps working.
+
+### Still a hypothesis
+
+- **HereSphere.** The claim that one adapter covers both players rests entirely
+  on MFP's two source files being identical in framing. No HereSphere has ever
+  been connected to.
+- **On-device media.** The observed `path` was an HTTP URL because the media was
+  streamed from a DLNA server. A file on the headset presumably reports a
+  filesystem path; that form is unobserved.
+- **The phone.** The WebSocket relay has only ever been driven from a desktop
+  browser.
 
 ## Where the framing came from
 

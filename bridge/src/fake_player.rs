@@ -19,6 +19,32 @@
 //! - **It interleaves zero-length heartbeat frames** with JSON ones.
 //! - **It accepts commands** and acts on them, so the phone→player direction
 //!   can be seen working.
+//!
+//! ## Breaking the circularity: point MultiFunPlayer at this
+//!
+//! The self-consistency problem above has one cheap answer that does not need
+//! a headset. **MultiFunPlayer is an independent implementation**, written by
+//! someone else from the same published protocol. Configure its DeoVR or
+//! HereSphere media source to point at this fake instead of at a headset. If
+//! MFP connects, reads position, and follows play/pause, then this fake's
+//! framing has been validated by a third party — and the client, which is
+//! tested against this fake, inherits that validation.
+//!
+//! Be precise about what that does and does not prove:
+//!
+//! - It **does** prove our *server* side frames packets the way a real
+//!   third-party client expects to read them.
+//! - It **does not** prove our *client* can read a real player. Only a real
+//!   DeoVR or HereSphere settles that.
+//!
+//! It is still worth doing before the headset test, because if MFP already
+//! agrees with us, a Quest failure isolates to the real player rather than to
+//! our framing in general.
+//!
+//! Everything MFP sends is published on the [`crate::wire::Tap`] **before it
+//! is parsed**, with the raw length bytes attached. Parsing is exactly what
+//! would hide a framing disagreement, so the evidence has to be captured
+//! upstream of it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -29,13 +55,124 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::codec::{self, Frame};
 use crate::logging::now_ms;
 use crate::state::PlayerPacket;
+use crate::wire::{Dir, Kind, Source, Tap};
 use crate::{log_info, log_warn};
 
 /// The real players' documented tolerance before they hang up.
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Replay the captured DeoVR session at the gaps it was recorded with, using
+/// the recorded length prefixes.
+///
+/// Two properties make this worth more than a generated stream:
+///
+/// 1. **The prefix bytes are the recorded ones.** Payloads are not
+///    re-serialised from a parsed struct and the length is not recomputed by
+///    our encoder. Re-framing here would make the whole exercise circular
+///    again: a client reading a stream our own encoder produced can only
+///    demonstrate that our decoder agrees with our encoder.
+/// 2. **It does not loop.** Looping would restart position from the beginning
+///    of the recording, injecting a large backwards jump into a connection the
+///    client is told is continuous — manufacturing, inside our own fixture,
+///    the exact discontinuity the rest of the system treats as impossible on a
+///    live link. When the recording runs out, the connection is closed, which
+///    is a thing real players genuinely do.
+async fn replay<W>(writer: &mut W, tap: &Tap) -> String
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+
+    let capture = crate::capture::Capture::deovr_quest();
+    // One connection's worth. Replaying across a reconnect boundary would
+    // reintroduce the recorded 131-second backwards jump.
+    let frames = capture.longest_connection();
+    if frames.is_empty() {
+        return "capture is empty".into();
+    }
+    log_info!(
+        "[fake-player] replaying {} recorded frames from a real DeoVR session",
+        frames.len()
+    );
+
+    for (index, frame) in frames.iter().enumerate() {
+        let Some(prefix) = frame.prefix_bytes() else {
+            continue;
+        };
+        let Some(payload) = frame.text.as_deref() else {
+            continue;
+        };
+
+        // Prefix and payload in one write, exactly as recorded.
+        let mut bytes = Vec::with_capacity(4 + payload.len());
+        bytes.extend_from_slice(&prefix);
+        bytes.extend_from_slice(payload.as_bytes());
+        if let Err(e) = writer.write_all(&bytes).await {
+            return format!("write failed: {e}");
+        }
+        tap.frame(
+            Source::Fake,
+            Dir::Out,
+            Kind::Json,
+            prefix,
+            frame.len,
+            Some(payload.to_string()),
+            None,
+        );
+
+        if let Some(next) = frames.get(index + 1) {
+            let gap = next.at_ms.saturating_sub(frame.at_ms).clamp(1, 5_000);
+            tokio::time::sleep(Duration::from_millis(gap)).await;
+        }
+    }
+
+    "recording exhausted — closing, as a real player would".into()
+}
+
+/// Publish a frame we are about to put on the wire, with the prefix we framed
+/// it with. Shown next to what the client sends back, the two are readable as
+/// a conversation.
+fn tap_out(tap: &Tap, json: &str) {
+    tap.frame(
+        Source::Fake,
+        Dir::Out,
+        Kind::Json,
+        (json.len() as i32).to_le_bytes(),
+        json.len() as i64,
+        Some(json.to_string()),
+        None,
+    );
+}
+
+/// What the fake pretends to be.
+///
+/// The distinction is not cosmetic. Until a real player was captured,
+/// everything this fake did was a guess dressed as a test — and several of
+/// those guesses were wrong (see `capture.rs`). Replay exists so the default
+/// test material is *observed* rather than *imagined*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Profile {
+    /// Generated traffic. Responds to seek and play/pause, so it is the one to
+    /// use when driving the fake by hand — but every detail of its shape is
+    /// our own invention.
+    Synthetic,
+    /// Replays the DeoVR-on-a-Quest capture verbatim, at the gaps it was
+    /// actually recorded with, looping.
+    ///
+    /// **This is DeoVR's behaviour, and only DeoVR's.** HereSphere has never
+    /// been connected to by anything in this repo. A test passing against this
+    /// replay is evidence about one player, one version, one platform — not
+    /// about the other player the same adapter claims to cover.
+    ///
+    /// Deliberately inert: it ignores commands, because a recording cannot
+    /// respond and pretending otherwise would put invention back in. Use
+    /// [`Profile::Synthetic`] for interactive work and this for regression.
+    ReplayDeoVr,
+}
+
 #[derive(Debug, Clone)]
 pub struct FakePlayerConfig {
+    pub profile: Profile,
     pub media_path: String,
     pub duration_s: f64,
     /// How often to push a state update. DeoVR is roughly 1 Hz; faster makes
@@ -52,6 +189,7 @@ pub struct FakePlayerConfig {
 impl Default for FakePlayerConfig {
     fn default() -> Self {
         Self {
+            profile: Profile::Synthetic,
             media_path: "C:\\VR\\fake-clip.mp4".into(),
             duration_s: 600.0,
             tick: Duration::from_millis(500),
@@ -62,14 +200,56 @@ impl Default for FakePlayerConfig {
     }
 }
 
+impl FakePlayerConfig {
+    /// Replay the real capture.
+    pub fn replay_deovr() -> Self {
+        Self {
+            profile: Profile::ReplayDeoVr,
+            ..Default::default()
+        }
+    }
+
+    /// Generated traffic, but shaped the way the real player actually behaved:
+    /// a full packet every second, no interleaved heartbeats, and a URL for a
+    /// path.
+    ///
+    /// Between `Synthetic` (responsive but invented) and `ReplayDeoVr`
+    /// (observed but inert), this is the one that is both responsive and
+    /// shaped by evidence.
+    pub fn observed_deovr() -> Self {
+        let capture = crate::capture::Capture::deovr_quest();
+        let inbound = capture.inbound();
+        let json = inbound
+            .first()
+            .and_then(|e| e.text.as_deref())
+            .expect("the embedded capture has frames");
+        let first: crate::state::PlayerPacket =
+            serde_json::from_str(json).expect("the embedded capture parses");
+        Self {
+            profile: Profile::Synthetic,
+            media_path: first.path.unwrap_or_default(),
+            duration_s: first.duration.unwrap_or(600.0),
+            // ~1010 ms observed; 1000 is the documented cadence.
+            tick: Duration::from_millis(1000),
+            // Every observed frame was a full packet.
+            full_packet_every: 1,
+            // None observed from DeoVR.
+            send_heartbeats: false,
+            enforce_timeout: true,
+        }
+    }
+}
+
 /// Accept connections forever, serving one at a time (as the real players do).
-pub async fn serve(listener: TcpListener, cfg: FakePlayerConfig) {
+pub async fn serve(listener: TcpListener, cfg: FakePlayerConfig, tap: Tap) {
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 log_info!("[fake-player] client connected from {peer}");
-                let reason = serve_client(stream, &cfg).await;
+                tap.event(Source::Fake, format!("client connected from {peer}"));
+                let reason = serve_client(stream, &cfg, &tap).await;
                 log_info!("[fake-player] client {peer} gone: {reason}");
+                tap.event(Source::Fake, format!("client {peer} gone: {reason}"));
             }
             Err(e) => {
                 log_warn!("[fake-player] accept failed: {e}");
@@ -80,7 +260,7 @@ pub async fn serve(listener: TcpListener, cfg: FakePlayerConfig) {
 }
 
 /// Serve one client until it disconnects or times out. Returns why it ended.
-pub async fn serve_client(stream: TcpStream, cfg: &FakePlayerConfig) -> String {
+pub async fn serve_client(stream: TcpStream, cfg: &FakePlayerConfig, tap: &Tap) -> String {
     let _ = stream.set_nodelay(true);
     let (reader, mut writer) = stream.into_split();
 
@@ -93,28 +273,80 @@ pub async fn serve_client(stream: TcpStream, cfg: &FakePlayerConfig) -> String {
         let seek = Arc::clone(&seek);
         let paused = Arc::clone(&paused);
         let mut reader = reader;
+        let tap = tap.clone();
         tokio::spawn(async move {
             loop {
-                match codec::read_frame(&mut reader).await {
-                    Ok(frame) => {
+                // Raw read, and tapped before any parsing. If a third-party
+                // client disagrees with us about framing, the parse is exactly
+                // what would swallow the evidence.
+                match codec::read_frame_raw(&mut reader).await {
+                    Ok(raw) => {
                         last_rx.store(now_ms(), Ordering::Relaxed);
-                        if let Frame::Json(json) = frame {
-                            log_info!("[fake-player] <- {json}");
-                            if let Ok(cmd) = serde_json::from_str::<PlayerPacket>(&json) {
-                                if let Some(t) = cmd.current_time {
-                                    *seek.lock().unwrap() = Some(t);
-                                }
-                                if let Some(s) = cmd.player_state {
-                                    paused.store(s == 1, Ordering::Relaxed);
+                        match raw.frame {
+                            Frame::Heartbeat => tap.frame(
+                                Source::Fake,
+                                Dir::In,
+                                Kind::Heartbeat,
+                                raw.prefix,
+                                raw.len as i64,
+                                None,
+                                None,
+                            ),
+                            Frame::Json(json) => {
+                                log_info!("[fake-player] <- {json}");
+                                let note = codec::diagnose_payload(&json);
+                                tap.frame(
+                                    Source::Fake,
+                                    Dir::In,
+                                    if note.is_some() { Kind::Error } else { Kind::Json },
+                                    raw.prefix,
+                                    raw.len as i64,
+                                    Some(json.clone()),
+                                    note,
+                                );
+                                if let Ok(cmd) = serde_json::from_str::<PlayerPacket>(&json) {
+                                    if let Some(t) = cmd.current_time {
+                                        *seek.lock().unwrap() = Some(t);
+                                    }
+                                    if let Some(s) = cmd.player_state {
+                                        paused.store(s == 1, Ordering::Relaxed);
+                                    }
                                 }
                             }
                         }
                     }
-                    Err(_) => return,
+                    Err(e) => {
+                        // A client we could not frame is the finding, not a
+                        // nuisance: say so instead of closing quietly.
+                        if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                            log_warn!("[fake-player] framing failure from client: {e}");
+                            tap.frame(
+                                Source::Fake,
+                                Dir::In,
+                                Kind::Error,
+                                [0; 4],
+                                0,
+                                Some(e.to_string()),
+                                Some(
+                                    "A third-party client framed a packet in a way we could \
+                                     not read. That is evidence about our framing, not about \
+                                     the client."
+                                        .into(),
+                                ),
+                            );
+                        }
+                        return;
+                    }
                 }
             }
         })
     };
+
+    if cfg.profile == Profile::ReplayDeoVr {
+        let outcome = replay(&mut writer, tap).await;
+        read_task.abort();
+        return outcome;
+    }
 
     let mut position = 0.0f64;
     let mut ticks: u32 = 0;
@@ -129,6 +361,7 @@ pub async fn serve_client(stream: TcpStream, cfg: &FakePlayerConfig) -> String {
     if let Err(e) = codec::write_json(&mut writer, &opening).await {
         return format!("write failed: {e}");
     }
+    tap_out(tap, &opening);
 
     let mut ticker = tokio::time::interval(cfg.tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -172,11 +405,21 @@ pub async fn serve_client(stream: TcpStream, cfg: &FakePlayerConfig) -> String {
                     read_task.abort();
                     return format!("write failed: {e}");
                 }
+                tap_out(tap, &json);
                 if cfg.send_heartbeats && ticks.is_multiple_of(4) {
                     if let Err(e) = codec::write_heartbeat(&mut writer).await {
                         read_task.abort();
                         return format!("heartbeat write failed: {e}");
                     }
+                    tap.frame(
+                        Source::Fake,
+                        Dir::Out,
+                        Kind::Heartbeat,
+                        codec::HEARTBEAT,
+                        0,
+                        None,
+                        None,
+                    );
                 }
             }
         }

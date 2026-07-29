@@ -18,6 +18,7 @@ tokio-tungstenite = "0.21"
 # drops the windowing stack entirely.
 tao = { version = "0.35.3", optional = true }
 tray-icon = { version = "0.24.2", optional = true }
+getrandom = "0.2"
 
 [dev-dependencies]
 # `test-util` gives the paused clock, so keepalive-cadence tests assert
