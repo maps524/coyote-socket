@@ -164,6 +164,14 @@ export interface ClientView {
   /** When this device first paired, when the credential store records it. */
   createdMs: number | null
   /**
+   * This row volunteers an id that a verified credential also holds.
+   *
+   * The two never merge, so the counts are right without this. But both render
+   * the same id string, and the panel is what someone reads before choosing
+   * which row to revoke.
+   */
+  impersonating: boolean
+  /**
    * Whether "revoke this device" is coherent here. Only a verified credential
    * that has not already been revoked: revoking a self-reported id closes a
    * socket that reconnects a second later under any id it likes.

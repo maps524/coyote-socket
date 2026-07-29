@@ -481,6 +481,15 @@ pub struct ClientView {
     /// the prose speculates. Merging on this evidence is precisely the
     /// confidently-wrong number this module exists to avoid.
     pub maybe_same_as: Option<String>,
+    /// This row's id is one a verified credential is also using.
+    ///
+    /// Only ever set on a self-reported row: a client volunteered an id that
+    /// belongs to a device this bridge has actually verified. Keying on
+    /// provenance already keeps the two apart, so the counts are right without
+    /// this — but both rows render the same id string, and the panel is what
+    /// someone reads before deciding which row to revoke. Two identical-looking
+    /// ids with nothing to separate them is how the wrong one gets picked.
+    pub impersonating: bool,
     /// Whether "revoke this device" is a coherent action on this row.
     ///
     /// True only for a verified credential that has not already been revoked:
@@ -1103,10 +1112,18 @@ impl Inner {
         let conn = from.open.remove(position);
         let agent = from.agent.clone();
         from.connections = from.connections.saturating_sub(1);
-        // An anonymous record that exists only because we had not been told yet
-        // is not a client that was ever here. Drop it rather than leaving a
-        // phantom "unidentified" row beside every identified one.
-        if from.open.is_empty() && matches!(current, Key::Anonymous(_)) && from.connections == 0 {
+        // An identity a connection merely passed through is not a client that
+        // was ever here. Drop the row rather than leaving a phantom beside the
+        // real one.
+        //
+        // This used to apply only to anonymous rows, which covered the common
+        // case — a socket that connects unidentified and then says who it is —
+        // and missed the shape next to it: arriving as `?c=A` and then sending
+        // `hello{clientId: B}` left an "A" row that nothing was ever attached
+        // to. The condition that matters is "nothing is left here", not which
+        // kind of key it was, and keying it on the kind was an oversight
+        // wearing a decision's clothes.
+        if from.open.is_empty() && from.connections == 0 {
             self.records.remove(&current);
         } else if from.open.is_empty() {
             from.disconnected_at_ms = Some(now);
@@ -1137,15 +1154,36 @@ impl Inner {
     }
 
     /// Keep the gone rows bounded, in count and in age.
+    ///
+    /// **Verified rows are evicted last, and that is a security property rather
+    /// than a nicety.** The bound is fixed and the ids that fill it are chosen
+    /// by whoever connects, so ordering purely by recency makes retention an
+    /// eraser: a client holding the pairing token connects and drops under a
+    /// dozen invented ids and the record of a real device's disconnect falls
+    /// off the end. That record is the evidence someone opened the panel to
+    /// find, and losing it looks like nothing happening rather than like an
+    /// attack.
+    ///
+    /// Age still expires everything equally. This only decides who goes first
+    /// when the list is full.
     fn prune(&mut self, now: u64) {
-        let mut gone: Vec<(u64, Key)> = self
+        let mut gone: Vec<(bool, u64, Key)> = self
             .records
             .values()
-            .filter_map(|r| r.disconnected_at_ms.map(|at| (at, r.key.clone())))
+            .filter_map(|r| {
+                r.disconnected_at_ms.map(|at| {
+                    (
+                        r.key.provenance() == Some(Provenance::Credential),
+                        at,
+                        r.key.clone(),
+                    )
+                })
+            })
             .collect();
-        gone.sort_by_key(|(at, _)| *at);
+        // Unverified first, then oldest first: the eviction order.
+        gone.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         let excess = gone.len().saturating_sub(RETAIN_DISCONNECTED);
-        for (index, (at, key)) in gone.into_iter().enumerate() {
+        for (index, (_, at, key)) in gone.into_iter().enumerate() {
             if index < excess || now.saturating_sub(at) > RETAIN_DISCONNECTED_MS {
                 self.records.remove(&key);
             }
@@ -1172,6 +1210,7 @@ impl Record {
                 Key::Anonymous(_) => None,
             },
             created_ms: self.created_ms,
+            impersonating: self.impersonates_a_credential(inner),
             // A contested row is revocable again: the credential demonstrably
             // still works, so there is something left to delete and retrying is
             // the right action to offer.
@@ -1192,6 +1231,24 @@ impl Record {
             agent: self.agent.clone(),
             maybe_same_as: self.rejoin_hint(inner, now),
         }
+    }
+
+    /// Whether this row volunteers an id that a verified credential also holds.
+    ///
+    /// Cheap because both sets are tiny — this is a handful of rows, not a
+    /// directory.
+    fn impersonates_a_credential(&self, inner: &Inner) -> bool {
+        let Key::Identified {
+            provenance: Provenance::SelfReported,
+            id,
+        } = &self.key
+        else {
+            return false;
+        };
+        inner.records.contains_key(&Key::Identified {
+            provenance: Provenance::Credential,
+            id: id.clone(),
+        })
     }
 
     /// A gone, unidentified row from the same address and agent, close enough
@@ -2029,6 +2086,130 @@ mod tests {
         );
         assert_eq!(reg.revoke("phone-aaaaaaaa"), 0);
         assert_eq!(reg.view().connections, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Structurally unexpected claims
+    //
+    // Not absent and not forged — *malformed in shape*. Everything above tests
+    // a client that either says nothing or says something false. These test a
+    // client that says something the code did not have a category for, which is
+    // where the last two defects in this module came from.
+    // -----------------------------------------------------------------------
+
+    /// The rendered key namespaces cannot be made to collide.
+    ///
+    /// `:` is a legal character in a self-reported id, so `c:` + `red:x` looked
+    /// like it could collide with `cred:` + `x` — and a duplicate `key` would
+    /// crash the panel's keyed `{#each}`, reachable by anyone with the token.
+    /// It cannot: the prefixes differ at index 1, so no suffix can reconcile
+    /// them. Asserted rather than left to that argument, because the argument
+    /// is exactly the kind that stops holding when someone renames a prefix.
+    #[test]
+    fn key_namespaces_cannot_be_forged_into_each_other() {
+        let credential = Key::Identified {
+            provenance: Provenance::Credential,
+            id: "dev-abc123".into(),
+        };
+        for hostile in [
+            "red:dev-abc123",
+            "c:dev-abc123",
+            "cred:dev-abc123",
+            "anon:0",
+            "::::::::",
+        ] {
+            let claimed = Key::Identified {
+                provenance: Provenance::SelfReported,
+                id: hostile.to_string(),
+            };
+            assert_ne!(claimed.render(), credential.render(), "{hostile}");
+            assert_ne!(claimed.render(), Key::Anonymous(0).render(), "{hostile}");
+        }
+    }
+
+    /// A self-reported id that matches a real credential is not merely
+    /// separate — it is a claim worth showing as one.
+    ///
+    /// Keying on provenance already stops the merge, so the counts are right.
+    /// But both rows then render the same id string, and the panel is what
+    /// someone reads *before* revoking. Two identical-looking ids with no
+    /// signal between them is how the wrong row gets picked.
+    #[test]
+    fn a_self_reported_id_matching_a_credential_is_flagged_as_impersonation() {
+        let reg = registry();
+        let _real = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-abc123", None));
+        let _fake = reg.connect(addr("10.9.9.9:40000"), Some(PHONE), claimed("dev-abc123"));
+
+        let view = reg.view();
+        assert_eq!(view.clients.len(), 2, "still not merged");
+
+        let real = view
+            .clients
+            .iter()
+            .find(|c| c.provenance == Some(Provenance::Credential))
+            .unwrap();
+        let fake = view
+            .clients
+            .iter()
+            .find(|c| c.provenance == Some(Provenance::SelfReported))
+            .unwrap();
+        assert!(
+            fake.impersonating,
+            "a volunteered id matching a verified one must say so"
+        );
+        assert!(!real.impersonating, "the genuine row is not the suspect one");
+    }
+
+    /// An identity a connection passes *through* must not be left behind.
+    ///
+    /// Arriving as `?c=A` and then sending `hello{clientId: B}` moves the
+    /// socket, and the vacated row used to persist as a "recently
+    /// disconnected" entry for an identity nothing was ever really attached to.
+    /// Anonymous rows were already cleaned up this way; self-reported ones were
+    /// not, and the difference was an oversight rather than a decision.
+    #[test]
+    fn an_identity_a_connection_passed_through_leaves_no_row() {
+        let reg = registry();
+        let handle = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), claimed("first-aaaaaaaa"));
+        handle.identify(Claim {
+            id: Some("second-bbbbbbbb".into()),
+            label: None,
+        });
+
+        let view = reg.view();
+        assert_eq!(view.clients.len(), 1, "no ghost for the id it passed through");
+        assert_eq!(view.clients[0].id.as_deref(), Some("second-bbbbbbbb"));
+        assert_eq!(view.clients[0].connections, 1);
+    }
+
+    /// Retention must not be an attacker's eraser.
+    ///
+    /// The gone-row list is bounded, and the ids that fill it are chosen by
+    /// whoever connects. So a client with the pairing token can churn through
+    /// invented ids and evict the record of a real device's disconnect — which
+    /// is the evidence someone is looking at the panel to find. Verified rows
+    /// are therefore evicted last.
+    #[test]
+    fn churn_from_unverified_clients_cannot_evict_verified_history() {
+        let reg = registry();
+        let real = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-real", None));
+        drop(real);
+
+        for n in 0..(RETAIN_DISCONNECTED * 3) {
+            let noise = reg.connect(
+                addr("10.9.9.9:40000"),
+                Some(PHONE),
+                ConnectingIdentity::Claimed(format!("noise-{n:08}")),
+            );
+            drop(noise);
+        }
+
+        let view = reg.view();
+        assert!(
+            view.clients.iter().any(|c| c.id.as_deref() == Some("dev-real")),
+            "the verified device's disconnect survived the churn"
+        );
+        assert!(view.clients.len() <= RETAIN_DISCONNECTED);
     }
 
     #[test]

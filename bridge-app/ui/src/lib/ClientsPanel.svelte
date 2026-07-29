@@ -86,10 +86,27 @@
     return new Date(ms).toLocaleTimeString()
   }
 
+  /**
+   * The row's headline.
+   *
+   * A label is only promoted to the headline when it came with a verified
+   * credential — that one was typed by the user, into their own bridge. An
+   * unverified client also gets to send a `label`, and rendering that as the
+   * row's name would hand the most prominent text on the panel to whoever
+   * holds the pairing token: "Sara's iPhone", or "verified", chosen by the
+   * connection you are trying to identify. Those are shown, but as something
+   * the client *said* — see `claimedName`.
+   */
   function name(client: ClientView): string {
-    if (client.label) return client.label
-    if (client.provenance === 'credential') return 'Unnamed browser'
+    if (client.provenance === 'credential') {
+      return client.label ?? 'Unnamed browser'
+    }
     return client.identified ? 'Self-named client' : 'Unidentified client'
+  }
+
+  /** A label the client chose, when it is not entitled to the headline. */
+  function claimedName(client: ClientView): string | null {
+    return client.provenance === 'credential' ? null : client.label
   }
 
   /**
@@ -218,6 +235,14 @@
         </div>
 
         <div class="small muted facts">
+          {#if claimedName(client)}
+            <!--
+              Attributed, and in quotes. This text was chosen by the connection
+              itself, so presenting it plainly would let whoever holds the
+              pairing token write the most prominent words on the panel.
+            -->
+            <span>calls itself &ldquo;{claimedName(client)}&rdquo;</span>
+          {/if}
           <span class="mono">{client.address}</span>
           {#if client.agent}<span>{client.agent}</span>{/if}
           {#if client.connected}
@@ -253,6 +278,22 @@
               : 'An id the client chose for itself. Not a credential and not checked.'}
           >
             {client.id}
+          </p>
+        {/if}
+
+        {#if client.impersonating}
+          <!--
+            Loud, because the panel is what someone reads before revoking, and
+            two rows showing the same id with nothing between them is how the
+            wrong one gets picked. The counts are already correct — this is
+            about the reader, not the arithmetic.
+          -->
+          <p class="small bad">
+            <strong>This client is using a verified device's id.</strong>
+            It did not present that device's credential, so it is a different
+            connection claiming the same name. The verified row is the other
+            one; this one cannot be revoked because there is nothing durable
+            behind it.
           </p>
         {/if}
 
