@@ -36,8 +36,25 @@
   // While a drag is in progress the bar follows the finger, not the player.
   // Otherwise the next 1 Hz packet snaps it back to where playback still is
   // and the control fights the user.
+  //
+  // `scrubbing` is cleared on pointer release *and* on cancel and blur, not
+  // only on `change`. A drag that ends without a change event — a touch
+  // cancelled by a scroll, a drag abandoned outside the window — would
+  // otherwise leave the bar frozen at `scrubTo` while playback advanced
+  // underneath it, showing a confidently wrong position indefinitely.
   let scrubbing = $state(false)
   let scrubTo = $state(0)
+  // Which file the drag started on, so a media change mid-drag cannot commit
+  // a position measured against a timeline that no longer exists.
+  let dragMedia = $state<string | null>(null)
+
+  // A reconnect is a discontinuity: the epoch changing means the position
+  // before and after are unrelated. Abandon any drag in flight rather than
+  // letting its release seek the new connection.
+  $effect(() => {
+    void snap.epoch
+    scrubbing = false
+  })
 </script>
 
 <section class="panel">
@@ -70,19 +87,28 @@
       class="scrub"
       type="range"
       min="0"
-      max={snap.durationS ?? 0}
+      max={snap.durationS ?? 1}
       step="0.1"
       value={scrubbing ? scrubTo : (snap.positionS ?? 0)}
-      disabled={!snap.durationS}
+      disabled={!snap.durationS || snap.positionS === null}
       aria-label="Seek"
       oninput={(e) => {
         scrubbing = true
         scrubTo = Number(e.currentTarget.value)
       }}
       onchange={(e) => {
+        const target = Number(e.currentTarget.value)
         scrubbing = false
-        bridge.command('seek', Number(e.currentTarget.value))
+        // Only commit if the media is still the one that was being dragged.
+        // A media change mid-drag replaces duration, and releasing would
+        // otherwise seek the *new* file to a position measured against the
+        // old one's timeline.
+        if (dragMedia === snap.media) bridge.command('seek', target)
       }}
+      onpointerdown={() => (dragMedia = snap.media)}
+      onpointerup={() => (scrubbing = false)}
+      onpointercancel={() => (scrubbing = false)}
+      onblur={() => (scrubbing = false)}
       style="--progress: {scrubbing && snap.durationS
         ? (scrubTo / snap.durationS) * 100
         : progress}%"
@@ -120,13 +146,21 @@
     <div class="row controls">
       <button onclick={() => bridge.command('play')}>Play</button>
       <button onclick={() => bridge.command('pause')}>Pause</button>
+      <!--
+        Disabled while position is unknown. `positionS ?? 0` would make "+10s"
+        mean "seek to 10.0" on a player that has not told us where it is —
+        which is the missing-means-zero mistake this file's own header warns
+        about, and it would move the video rather than fail visibly.
+      -->
       <button
-        onclick={() => bridge.command('seek', Math.max(0, (snap.positionS ?? 0) - 10))}
+        disabled={snap.positionS === null}
+        onclick={() => bridge.command('seek', Math.max(0, snap.positionS! - 10))}
       >
         −10s
       </button>
       <button
-        onclick={() => bridge.command('seek', (snap.positionS ?? 0) + 10)}
+        disabled={snap.positionS === null}
+        onclick={() => bridge.command('seek', snap.positionS! + 10)}
       >
         +10s
       </button>

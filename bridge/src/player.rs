@@ -85,6 +85,11 @@ pub async fn run(
                     s.link = LinkState::Connected;
                     s.packets = 0;
                     s.fault = None;
+                    // The discontinuity marker, bumped before any packet from
+                    // this connection can be merged in. A consumer that sees a
+                    // new epoch must treat the position that follows as
+                    // unrelated to the one before it.
+                    s.epoch = s.epoch.wrapping_add(1);
                 });
 
                 let outcome = serve_connection(stream, snapshot_tx, cmd_rx, &tap).await;
@@ -194,7 +199,48 @@ impl Outcome {
     }
 }
 
+/// A `JoinHandle` that aborts its task when dropped.
+///
+/// Tokio's `JoinHandle` **detaches** on drop rather than aborting, which is a
+/// reasonable default and exactly the wrong one here. The read task owns the
+/// `OwnedReadHalf` and a clone of `snapshot_tx`, so a detached one keeps
+/// reading the socket and keeps publishing state — for a connection the user
+/// has disconnected from.
+///
+/// The consequence was observed in the wild, not theorised: in the one real
+/// session anyone has captured, a position frame was published **3.9 seconds
+/// after the user pressed Disconnect** (`capture.rs`). `on_disconnect` had
+/// already cleared position and set the link to `Idle`, and the ghost
+/// immediately republished a live-advancing position underneath it — a
+/// consumer reading `link: "idle"` alongside a moving position, which is
+/// precisely the lying state `on_disconnect` exists to prevent.
+///
+/// It self-heals within ~3 s against DeoVR only because DeoVR enforces the
+/// keepalive timeout and closes the socket. **HereSphere is unobserved.** A
+/// peer that does not enforce it leaks the task forever, and switching
+/// endpoints leaks another every time.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
 /// Drive one established connection until either half fails.
+///
+/// Cancelling this future — which is how Disconnect and endpoint switching
+/// work — must take the read task with it. See [`AbortOnDrop`].
 async fn serve_connection(
     stream: TcpStream,
     snapshot_tx: &watch::Sender<PlayerSnapshot>,
@@ -205,18 +251,18 @@ async fn serve_connection(
 
     let read_tx = snapshot_tx.clone();
     let read_tap = tap.clone();
-    let mut read_task = tokio::spawn(async move { read_loop(reader, read_tx, read_tap).await });
+    let mut read_task = AbortOnDrop(tokio::spawn(read_loop(reader, read_tx, read_tap)));
 
-    let outcome = tokio::select! {
+    tokio::select! {
         joined = &mut read_task => match joined {
             Ok(outcome) => outcome,
+            Err(e) if e.is_cancelled() => Outcome::closed("read task cancelled"),
             Err(e) => Outcome::closed(format!("read task panicked: {e}")),
         },
         detail = write_loop(writer, cmd_rx, tap) => Outcome::closed(detail),
-    };
-
-    read_task.abort();
-    outcome
+    }
+    // `read_task` is dropped here on every path, including the one where the
+    // write half returned first. No explicit abort call to forget.
 }
 
 /// Read frames until the stream ends or desyncs.

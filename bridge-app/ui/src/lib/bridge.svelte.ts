@@ -29,6 +29,7 @@ function emptySnapshot(): PlayerSnapshot {
     type: 'player',
     link: 'idle',
     endpoint: '',
+    epoch: 0,
     media: null,
     positionS: null,
     durationS: null,

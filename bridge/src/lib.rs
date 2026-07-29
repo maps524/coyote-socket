@@ -39,6 +39,7 @@
 //! working headless build — which it cannot if a window is a compile-time
 //! dependency of the protocol.
 
+pub mod auth;
 pub mod capture;
 pub mod codec;
 pub mod fake_player;

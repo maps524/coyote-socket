@@ -14,6 +14,7 @@ use std::time::Duration;
 use coyote_bridge::fake_player::{serve_client, FakePlayerConfig};
 use coyote_bridge::http;
 use coyote_bridge::state::{LinkState, PlayerCommand, PlayerSnapshot};
+use coyote_bridge::auth::Token;
 use coyote_bridge::wire::Tap;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
@@ -222,7 +223,7 @@ async fn bridge_reconnects_after_the_player_goes_away() {
 
 /// Bring the whole thing up: fake player, bridge client, HTTP/WS server.
 /// Returns the base `http://127.0.0.1:port`.
-async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>) {
+async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>, Token) {
     let (player_addr, _player) = spawn_fake_player(fast_player(), limit).await;
     std::mem::forget(_player);
 
@@ -232,15 +233,19 @@ async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>)
     let port = listener.local_addr().unwrap().port();
     let base = format!("http://127.0.0.1:{port}");
 
+    let token = Token::generate();
     let ctx = std::sync::Arc::new(http::Ctx {
         snapshot_rx,
         cmd_tx: cmd_tx.clone(),
         static_dir: None,
-        pairing_url: base.clone(),
+        pairing_url: coyote_bridge::auth::with_token(&base, &token),
+        token: std::sync::RwLock::new(token.clone()),
+        allowed_hosts: vec![format!("127.0.0.1:{port}")],
+        on_token_rotated: None,
     });
     tokio::spawn(http::run(listener, ctx));
 
-    (base, cmd_tx)
+    (base, cmd_tx, token)
 }
 
 async fn get(url: &str) -> (u16, String) {
@@ -270,8 +275,8 @@ async fn get(url: &str) -> (u16, String) {
 
 #[tokio::test]
 async fn websocket_client_receives_a_hello_then_player_state() {
-    let (base, _cmd) = spawn_full_stack(1).await;
-    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+    let ws_url = format!("{}/ws?t={token}", base.replace("http://", "ws://"));
 
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
 
@@ -305,8 +310,8 @@ async fn websocket_client_receives_a_hello_then_player_state() {
 
 #[tokio::test]
 async fn websocket_seek_reaches_the_player_and_comes_back() {
-    let (base, _cmd) = spawn_full_stack(1).await;
-    let ws_url = base.replace("http://", "ws://") + "/ws";
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+    let ws_url = format!("{}/ws?t={token}", base.replace("http://", "ws://"));
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
 
     // Wait until the link is up before commanding it.
@@ -343,9 +348,9 @@ async fn websocket_seek_reaches_the_player_and_comes_back() {
 
 #[tokio::test]
 async fn built_in_pages_are_served() {
-    let (base, _cmd) = spawn_full_stack(1).await;
+    let (base, _cmd, token) = spawn_full_stack(1).await;
 
-    let (status, body) = get(&format!("{base}/healthz")).await;
+    let (status, body) = get(&format!("{base}/healthz?t={token}")).await;
     assert_eq!(status, 200);
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["type"], "player");
@@ -384,6 +389,9 @@ async fn traversal_outside_the_static_root_is_refused() {
             cmd_tx,
             static_dir: Some(dir.clone()),
             pairing_url: base.clone(),
+            token: std::sync::RwLock::new(Token::generate()),
+            allowed_hosts: vec![format!("127.0.0.1:{port}")],
+            on_token_rotated: None,
         }),
     ));
 
@@ -421,26 +429,64 @@ async fn client_reads_recorded_traffic_from_a_real_deovr() {
     // Values taken from the capture, not from anything we invented.
     assert_eq!(snap.duration_s, Some(7693.12));
     assert!(
-        snap.media.as_deref().unwrap_or_default().starts_with("http://"),
+        snap.media
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("http://"),
         "a real DeoVR reports a URL, not a filesystem path: {:?}",
         snap.media
     );
-    assert!(snap.position_s.unwrap() >= 32.0);
     assert_eq!(snap.speed, Some(1.0));
+    assert_eq!(snap.epoch, 1, "the first connection is epoch 1");
 
-    // The unresolved contradiction, asserted rather than glossed: the real
-    // player called itself paused while its position tracked the wall clock.
-    // If this ever stops holding, the capture or the mapping has changed and
-    // somebody should find out which.
+    let start = snap.position_s.expect("position must be known");
     let advanced = wait_for(&mut rx, "position to advance", |s| {
-        s.position_s.unwrap_or(0.0) > 33.0
+        s.position_s.unwrap_or(0.0) > start + 1.0
     })
     .await;
-    assert_eq!(advanced.playing, Some(false));
+    assert!(advanced.position_s.unwrap() > start);
+
+    // The `playerState` contradiction is not asserted here: it appears 76
+    // seconds into the recording, and this test replays in real time. It is
+    // covered in `capture::tests`, which walks the whole connection in memory.
+}
+
+/// The attack the token exists to stop, run against the real server.
+///
+/// A page the user visits can reach a LAN address, and WebSockets are not
+/// subject to the same-origin policy — so without a token, any tab could open
+/// this socket and issue `seek`, `play` and `pause`. These assert that it
+/// cannot.
+#[tokio::test]
+async fn an_untokened_request_is_refused() {
+    let (base, _cmd, _token) = spawn_full_stack(1).await;
+
+    let (status, body) = get(&format!("{base}/healthz")).await;
+    assert_eq!(status, 401, "healthz leaks the media URL and LAN address");
+    assert!(!body.contains("positionS"));
+
+    let (status, _) = get(&format!("{base}/healthz?t=wrong")).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn a_websocket_without_a_token_cannot_open() {
+    let (base, _cmd, _token) = spawn_full_stack(1).await;
+    let ws_url = base.replace("http://", "ws://") + "/ws";
     assert!(
-        advanced.state_is_suspect(),
-        "a 'paused' player advancing at 1.0x must be flagged, not accepted"
+        tokio_tungstenite::connect_async(&ws_url).await.is_err(),
+        "the socket that can drive the player must not open unauthenticated"
     );
+}
+
+/// The pairing page has to stay reachable: it is how a phone *obtains* the
+/// token, so gating it would be a bootstrap that cannot start.
+#[tokio::test]
+async fn the_pairing_page_stays_reachable_without_a_token() {
+    let (base, _cmd, _token) = spawn_full_stack(1).await;
+    let (status, body) = get(&format!("{base}/pair")).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("qr.svg"));
 }
 
 async fn next_text<S>(ws: &mut S) -> String

@@ -26,14 +26,17 @@
 
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
 
+use crate::auth::{self, Token};
 use crate::state::{PlayerCommand, PlayerSnapshot};
 use crate::{log_debug, log_info, log_warn, qr};
 
@@ -43,7 +46,97 @@ pub struct Ctx {
     /// Where the PWA's `dist` lives. `None` serves a placeholder at `/`.
     pub static_dir: Option<PathBuf>,
     /// The URL to show on the pairing page — the LAN one, not `localhost`.
+    /// Carries the token; see [`crate::auth`].
     pub pairing_url: String,
+    /// Shared secret required on `/healthz` and `/ws`.
+    ///
+    /// Behind a lock because it can be rotated at runtime — see
+    /// `/pair/rotate`. See [`crate::auth`] for what this does and, more
+    /// importantly, what it does not do. It is not a substitute for TLS.
+    pub token: std::sync::RwLock<Token>,
+    /// `host:port` values a browser may legitimately claim as its `Origin`.
+    pub allowed_hosts: Vec<String>,
+    /// Called after a rotation so the owner can persist the new token and
+    /// rebuild any URL that carries it.
+    #[allow(clippy::type_complexity)]
+    pub on_token_rotated: Option<Box<dyn Fn(&Token) + Send + Sync>>,
+}
+
+impl Ctx {
+    pub fn token(&self) -> Token {
+        self.token.read().expect("token lock").clone()
+    }
+
+    /// Replace the token and notify the owner.
+    pub fn rotate_token(&self) -> Token {
+        let fresh = Token::generate();
+        *self.token.write().expect("token lock") = fresh.clone();
+        log_info!("[http] pairing token rotated");
+        if let Some(callback) = &self.on_token_rotated {
+            callback(&fresh);
+        }
+        fresh
+    }
+}
+
+/// A stream with some already-read bytes waiting in front of it.
+///
+/// Exists so the HTTP surface does not depend on `TcpStream::peek`. The
+/// original code peeked the request head, left it in the kernel buffer, and
+/// handed the raw socket to whichever handler won — which works only for TCP.
+/// A TLS stream has no equivalent: by the time bytes are readable they have
+/// been decrypted out of the socket and cannot be put back.
+///
+/// So the head is *read* into a buffer and replayed here. The routing logic is
+/// unchanged; it simply now works over anything that reads and writes, which
+/// is what lets the same code serve `ws://` today and `wss://` once TLS lands.
+pub struct Prefixed<S> {
+    head: Vec<u8>,
+    consumed: usize,
+    inner: S,
+}
+
+impl<S> Prefixed<S> {
+    pub fn new(head: Vec<u8>, inner: S) -> Self {
+        Self {
+            head,
+            consumed: 0,
+            inner,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.consumed < self.head.len() {
+            let remaining = &self.head[self.consumed..];
+            let take = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..take]);
+            self.consumed += take;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 /// Best-guess LAN address, for the URL we hand the phone.
@@ -79,40 +172,65 @@ pub async fn run(listener: TcpListener, ctx: Arc<Ctx>) {
 }
 
 async fn handle(stream: TcpStream, addr: SocketAddr, ctx: Arc<Ctx>) {
-    let mut peek_buf = vec![0u8; 2048];
-    let n = match peek_request_head(&stream, &mut peek_buf).await {
-        Ok(0) | Err(_) => return,
-        Ok(n) => n,
-    };
-    let head = &peek_buf[..n];
+    // Plain TCP: not a secure transport, so `secure` is false and anything
+    // gated on confidentiality refuses.
+    serve_conn(stream, addr, ctx, false).await
+}
 
-    if is_websocket_upgrade(head) {
-        match accept_async(stream).await {
+/// Serve one connection, over any transport.
+///
+/// Generic so a TLS-wrapped stream can be passed here unchanged. The head is
+/// read rather than peeked (see [`Prefixed`]) because peeking is a TCP-only
+/// facility, and a secure page can only open a secure socket — so the
+/// WebSocket path has to work over TLS or the phone cannot use it at all.
+///
+/// `secure` says whether this transport is encrypted. The caller knows and
+/// this function cannot find out, so it is a parameter rather than a guess.
+/// It gates `/pair/rotate`, which exists to replace a token that was delivered
+/// in cleartext and would be worthless if it could itself be issued in
+/// cleartext.
+pub async fn serve_conn<S>(stream: S, addr: SocketAddr, ctx: Arc<Ctx>, secure: bool)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut stream = stream;
+    let head = match read_request_head(&mut stream).await {
+        Ok(head) if !head.is_empty() => head,
+        _ => return,
+    };
+
+    if is_websocket_upgrade(&head) {
+        // The token is on the query string of the upgrade request, and the
+        // Origin is in its headers. Both are checked before the handshake
+        // completes: a browser that is refused should see a failed connection,
+        // not an open socket that goes quiet.
+        let target = parse_request_line(&head).map(|(_, path)| path).unwrap_or("");
+        let origin = header_value(&head, "origin");
+        if !authorised(target, origin, &ctx) {
+            log_warn!("[ws] {addr} refused: bad or missing token");
+            let mut stream = Prefixed::new(head, stream);
+            let _ = respond(&mut stream, 401, "text/plain; charset=utf-8", b"unauthorized").await;
+            return;
+        }
+
+        let stream = Prefixed::new(head, stream);
+        match accept_hdr_async(stream, |_req: &_, res| Ok(res)).await {
             Ok(ws) => ws_relay(ws, addr, ctx).await,
             Err(e) => log_warn!("[http] {addr} websocket handshake failed: {e}"),
         }
         return;
     }
 
-    // Consume the bytes we peeked so the socket is positioned past the
-    // request head before we reply.
-    let mut stream = stream;
-    let mut sink = vec![0u8; n];
-    if stream.read_exact(&mut sink).await.is_err() {
-        return;
-    }
-
-    let Some((method, path)) = parse_request_line(head) else {
-        let _ = respond(
-            &mut stream,
-            400,
-            "text/plain; charset=utf-8",
-            b"bad request",
-        )
-        .await;
+    let Some((method, path)) = parse_request_line(&head).map(|(m, p)| (m.to_string(), p.to_string()))
+    else {
+        let mut stream = Prefixed::new(head, stream);
+        let _ = respond(&mut stream, 400, "text/plain; charset=utf-8", b"bad request").await;
         return;
     };
     log_debug!("[http] {addr} {method} {path}");
+
+    let origin = header_value(&head, "origin").map(|o| o.to_string());
+    let mut stream = Prefixed::new(head, stream);
 
     if method != "GET" && method != "HEAD" {
         let _ = respond(
@@ -125,22 +243,78 @@ async fn handle(stream: TcpStream, addr: SocketAddr, ctx: Arc<Ctx>) {
         return;
     }
 
-    route(&mut stream, path, &ctx).await;
+    route(&mut stream, &path, origin.as_deref(), secure, &ctx).await;
 }
 
-async fn route(stream: &mut TcpStream, path: &str, ctx: &Ctx) {
-    // Strip the query string; none of these routes take parameters yet.
+/// Whether a request carries a valid token and an acceptable `Origin`.
+fn authorised(path_and_query: &str, origin: Option<&str>, ctx: &Ctx) -> bool {
+    let presented = auth::token_from_query(path_and_query);
+    presented.is_some_and(|t| ctx.token().matches(t))
+        && auth::origin_is_acceptable(origin, &ctx.allowed_hosts)
+}
+
+async fn route<W>(stream: &mut W, path: &str, origin: Option<&str>, secure: bool, ctx: &Ctx)
+where
+    W: AsyncWrite + Unpin,
+{
+    let full = path;
+    // Strip the query string for routing; the token lives in it.
     let path = path.split('?').next().unwrap_or("/");
 
     let result = match path {
+        // Gated: leaks the media URL, the LAN address and the link state.
         "/healthz" => {
-            let snap = ctx.snapshot_rx.borrow().clone();
-            let body = serde_json::to_vec_pretty(&snap).unwrap_or_default();
-            respond(stream, 200, "application/json; charset=utf-8", &body).await
+            if !authorised(full, origin, ctx) {
+                respond(stream, 401, "text/plain; charset=utf-8", b"unauthorized").await
+            } else {
+                let snap = ctx.snapshot_rx.borrow().clone();
+                let body = serde_json::to_vec_pretty(&snap).unwrap_or_default();
+                respond(stream, 200, "application/json; charset=utf-8", &body).await
+            }
         }
+        // Ungated, deliberately. The pairing page and its QR are how a phone
+        // *obtains* the token, so gating them on the token is a bootstrap
+        // that cannot start. They are reachable only from the LAN and they
+        // hand out a credential — which is a real exposure, and the reason the
+        // pairing page says so and the tray offers rotation.
         "/pair" => {
             let body = pairing_page(&ctx.pairing_url);
             respond(stream, 200, "text/html; charset=utf-8", body.as_bytes()).await
+        }
+        // Exchange a token that travelled in cleartext for one that did not.
+        //
+        // The pairing QR must point at plain HTTP: a phone that has not yet
+        // trusted the local CA meets a full-page certificate interstitial with
+        // no route back to the instructions. So the first token is always
+        // sniffable by anyone on the LAN at that moment. This narrows the
+        // window from "forever" to "until the phone finishes pairing" — it
+        // does not close it, and a sniffer who acts within that window can
+        // rotate the token themselves and lock the user out.
+        //
+        // Refused over plaintext, because a rotation delivered in cleartext
+        // would hand the eavesdropper the replacement too.
+        "/pair/rotate" => {
+            if !secure {
+                respond(
+                    stream,
+                    403,
+                    "text/plain; charset=utf-8",
+                    b"rotation requires a secure transport",
+                )
+                .await
+            } else if !authorised(full, origin, ctx) {
+                respond(stream, 401, "text/plain; charset=utf-8", b"unauthorized").await
+            } else {
+                let fresh = ctx.rotate_token();
+                let body = serde_json::json!({ "token": fresh.as_str() }).to_string();
+                respond(
+                    stream,
+                    200,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                )
+                .await
+            }
         }
         "/qr.svg" => match qr::to_svg(&ctx.pairing_url) {
             Ok(svg) => respond(stream, 200, "image/svg+xml; charset=utf-8", svg.as_bytes()).await,
@@ -149,6 +323,9 @@ async fn route(stream: &mut TcpStream, path: &str, ctx: &Ctx) {
                 respond(stream, 500, "text/plain; charset=utf-8", msg.as_bytes()).await
             }
         },
+        // Ungated: static assets are the app itself, which has to load before
+        // it can present anything. It reads the token from its own URL and
+        // uses it for `/ws`, which is where the capability actually is.
         _ => serve_static(stream, path, ctx).await,
     };
 
@@ -157,7 +334,10 @@ async fn route(stream: &mut TcpStream, path: &str, ctx: &Ctx) {
     }
 }
 
-async fn serve_static(stream: &mut TcpStream, path: &str, ctx: &Ctx) -> std::io::Result<()> {
+async fn serve_static<W>(stream: &mut W, path: &str, ctx: &Ctx) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let Some(root) = ctx.static_dir.as_ref() else {
         let body = placeholder_page(&ctx.pairing_url);
         return respond(stream, 200, "text/html; charset=utf-8", body.as_bytes()).await;
@@ -228,26 +408,35 @@ fn mime_for(path: &Path) -> &'static str {
     }
 }
 
-async fn respond(
-    stream: &mut TcpStream,
+pub(crate) async fn respond<W>(
+    stream: &mut W,
     status: u16,
     content_type: &str,
     body: &[u8],
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         _ => "Internal Server Error",
     };
+    // No `Access-Control-Allow-Origin: *`. It was there to make a browser on
+    // another origin able to read these responses, which is precisely the
+    // thing that should not happen: it let any page in any tab read `/healthz`
+    // and learn the media URL and LAN address. Same-origin requests do not
+    // need the header, and nothing legitimate here is cross-origin.
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Cache-Control: no-store\r\n\
-         Access-Control-Allow-Origin: *\r\n\
+         X-Content-Type-Options: nosniff\r\n\
          Connection: close\r\n\r\n",
         body.len()
     );
@@ -266,11 +455,13 @@ async fn respond(
 /// four things the spike promised — position, playing/paused, duration and
 /// file identity — plus the link state, because "the bridge cannot see the
 /// player" is a thing the phone has to render differently from "paused".
-async fn ws_relay(
-    ws: tokio_tungstenite::WebSocketStream<TcpStream>,
+pub(crate) async fn ws_relay<S>(
+    ws: tokio_tungstenite::WebSocketStream<S>,
     addr: SocketAddr,
     ctx: Arc<Ctx>,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     log_info!("[ws] {addr} connected");
     let (mut tx, mut rx) = ws.split();
     let mut snapshots = ctx.snapshot_rx.clone();
@@ -372,34 +563,50 @@ pub fn parse_client_command(text: &str) -> Option<PlayerCommand> {
 // Request parsing
 // ---------------------------------------------------------------------------
 
-/// Peek until the header block is complete or the buffer fills. Lifted from
-/// `net.rs::peek_request_head`.
-async fn peek_request_head(stream: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+/// Cap on the request head, so a peer that never sends `\r\n\r\n` cannot make
+/// us buffer without limit.
+const MAX_HEAD_BYTES: usize = 16 * 1024;
+
+/// Read until the header block is complete, and return it.
+///
+/// Replaces the `TcpStream::peek` version lifted from `net.rs`. Peeking left
+/// the bytes in the kernel buffer so the socket could be handed to a handler
+/// untouched — elegant, and unavailable on a TLS stream, where readable bytes
+/// have already been decrypted out of the socket and cannot be put back. The
+/// head is buffered instead and replayed through [`Prefixed`], which costs one
+/// small allocation per request and works over any transport.
+async fn read_request_head<S>(stream: &mut S) -> std::io::Result<Vec<u8>>
+where
+    S: AsyncRead + Unpin,
+{
     use std::time::Duration;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let mut last_len = 0usize;
+
+    let mut head = Vec::with_capacity(1024);
+    let mut byte = [0u8; 1];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
     loop {
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            return Ok(last_len);
-        }
-        let n = match tokio::time::timeout(deadline - now, stream.peek(buf)).await {
-            Ok(Ok(n)) => n,
+        // Byte at a time: the head must not be over-read, because everything
+        // after it belongs to the body or to the WebSocket framing.
+        match tokio::time::timeout_at(deadline, stream.read(&mut byte)).await {
+            Ok(Ok(0)) => return Ok(head),
+            Ok(Ok(_)) => head.push(byte[0]),
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Ok(last_len),
-        };
-        if n == 0 {
-            return Ok(last_len);
+            Err(_) => return Ok(head),
         }
-        if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") || n == buf.len() {
-            return Ok(n);
+        if head.ends_with(b"\r\n\r\n") || head.len() >= MAX_HEAD_BYTES {
+            return Ok(head);
         }
-        if n == last_len {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        last_len = n;
     }
+}
+
+/// Case-insensitive header lookup on a raw request head.
+pub fn header_value<'a>(head: &'a [u8], name: &str) -> Option<&'a str> {
+    let text = std::str::from_utf8(head).ok()?;
+    text.split("\r\n").skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
 }
 
 pub fn is_websocket_upgrade(head: &[u8]) -> bool {

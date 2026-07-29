@@ -20,15 +20,22 @@ in a state worth keeping.
 ## What is proven and what is not
 
 **Updated 2026-07-28: the bridge has now talked to a real player.** DeoVR on a
-Meta Quest, over Wi-Fi, for two sessions totalling about seven minutes and 240
-inbound packets. Position streamed, play, pause, forward and back all worked
-from the bridge. The capture is in `fixtures/` and what it settles is in
-`src/capture.rs`.
+Meta Quest, over Wi-Fi — one recording spanning **837.9 seconds** across
+**three connections**, with **418 inbound frames**. Position streamed; play,
+pause, forward and back all worked from the bridge. The raw capture is
+committed at `fixtures/deovr-quest-2026-07-28.wire.jsonl` and what it settles
+is in `src/capture.rs`.
+
+> An earlier draft of this file described "two sessions, ~7 minutes, 240
+> packets". That was measured from a capture file while it was still being
+> written, and it understated the recording. Every quantitative claim below is
+> now re-derived from the committed fixture by tests in `capture.rs`, so the
+> prose fails the build rather than drifting from the evidence again.
 
 | Part | Status |
 |---|---|
-| Length-prefixed framing | Unit-tested, and **confirmed against a real DeoVR** — every frame parsed. |
-| Byte order (little-endian) | **Settled.** MFP reads with `BitConverter.ToInt32` and writes with `GetBytes`, no swap, and MFP is Windows-only. |
+| Length-prefixed framing | **Confirmed against a real DeoVR** — 418 of 418 frames parsed. |
+| Byte order (little-endian) | **Measured**, not inferred. The capture records the raw prefix bytes: `c6 00 00 00` for a 198-byte payload, 418 times over. Big-endian would read that as 3,321,888,768. |
 | Keepalive, timeout, reconnect | Tested against `fake-player`; the real link survived minutes without being dropped. |
 | Position, duration, media identity | **Confirmed against a real DeoVR.** |
 | Play / pause / seek from the bridge | **Confirmed against a real DeoVR**, by hand. |
@@ -72,6 +79,32 @@ Consequences for anything downstream:
   exactly what it echoes.
 
 `PlayerSnapshot::state_suspect` flags the contradiction when it occurs.
+
+## The HTTP surface now requires a token
+
+`/healthz` and `/ws` refuse a request that does not carry `?t=<token>`. The
+pairing URL and QR carry it; `/pair`, `/qr.svg` and the static app do not
+require it.
+
+**This is a breaking change for any client that hardcoded `ws://host:8787/ws`,
+including the PWA.** The fix is one line — read the token from the URL the
+phone was opened with and pass it on:
+
+```js
+const token = new URLSearchParams(location.search).get('t')
+const ws = new WebSocket(`ws://${location.host}/ws?t=${token}`)
+```
+
+Read `src/auth.rs` before assuming this makes anything secure. In particular it
+does **not** give confidentiality: the token travels in a URL over plain HTTP
+and anyone on the network can read it. It stops one specific, real attack —
+a web page you happen to visit opening a WebSocket to your bridge and driving
+your player, which no CORS setting prevents. TLS is separate work and neither
+substitutes for the other.
+
+The headless binary mints a fresh token each start, so its phone URL changes on
+every restart; `--token <hex>` pins one. The desktop app persists its token, so
+a home-screen shortcut keeps working.
 
 ### Still a hypothesis
 

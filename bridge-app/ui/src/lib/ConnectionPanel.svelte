@@ -67,11 +67,20 @@
       {/each}
     </datalist>
 
+    <!--
+      Disabled once a link exists. `probe.rs` says explicitly to probe only on
+      failure: real players accept one client at a time, so opening a second
+      connection to check on the first is a good way to break the link you are
+      testing. A button that can sever the connection it is reporting on is
+      worse than no button.
+    -->
     <button
       type="button"
       onclick={() => bridge.check(endpoint)}
-      disabled={bridge.busy || !endpoint}
-      title="Check the address without connecting"
+      disabled={bridge.busy || !endpoint || connected || trying}
+      title={connected || trying
+        ? 'Already connected — probing again could drop the link'
+        : 'Check the address without connecting'}
     >
       Test
     </button>

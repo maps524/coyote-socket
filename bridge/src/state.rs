@@ -199,6 +199,29 @@ pub struct PlayerSnapshot {
     /// The `host:port` the bridge is dialling.
     pub endpoint: String,
 
+    /// Bumped on every successful connection. **A change means the position
+    /// before it and the position after it are unrelated.**
+    ///
+    /// This exists because the transport coalesces. State reaches consumers
+    /// through a `watch` channel, which keeps only the latest value, so a
+    /// consumer that is briefly busy can observe `283.38` and then `151.66`
+    /// with `link: "connected"` on both and nothing in between — the recorded
+    /// 131-second backwards jump across a reconnect, arriving as something
+    /// indistinguishable from a seek. The intermediate `Idle`/`Connecting`
+    /// states that would have told the story were dropped by the channel, and
+    /// no amount of care inside the bridge can put them back.
+    ///
+    /// A monotonic counter survives coalescing: it is carried *on* the value
+    /// rather than in the sequence of values. `packets` resetting to zero is
+    /// the only other tell, and it is documented as diagnostic — something a
+    /// consumer must not build on.
+    ///
+    /// The capture is why this is not speculative. Every discontinuity in 837
+    /// seconds was a reconnect, and there were zero in-connection stalls, so
+    /// "the epoch changed" is both necessary and sufficient for "do not
+    /// interpolate across this". See `capture.rs`.
+    pub epoch: u64,
+
     /// Media identity as the *player* reports it. Almost certainly a path on
     /// the headset's filesystem or a URL, and almost certainly not a path the
     /// phone can resolve. MFP has `MediaPathModifier`s for exactly this;
@@ -262,6 +285,7 @@ impl PlayerSnapshot {
             kind: "player",
             link: LinkState::Idle,
             endpoint,
+            epoch: 0,
             media: None,
             position_s: None,
             duration_s: None,
@@ -430,6 +454,25 @@ mod tests {
         assert_eq!(snap.position_s, None);
         assert_eq!(snap.playing, None);
         assert_eq!(snap.endpoint, "192.168.1.50:23554");
+    }
+
+    /// A consumer must be able to tell a reconnect from a seek using only two
+    /// snapshots, because the transport may hand it only two.
+    #[test]
+    fn epoch_distinguishes_a_reconnect_from_a_seek() {
+        let mut snap = PlayerSnapshot::new("quest".into());
+        snap.epoch = 4;
+        snap.apply(&packet(r#"{"path":"a.mp4","currentTime":283.38}"#), 1000);
+        let before = snap.clone();
+
+        // A seek: same connection, position moves, epoch unchanged.
+        snap.apply(&packet(r#"{"currentTime":151.66}"#), 2000);
+        assert_eq!(snap.epoch, before.epoch, "a seek is not a new connection");
+
+        // A reconnect: the supervisor bumps the epoch, and the identical
+        // position change now reads as discontinuous.
+        snap.epoch += 1;
+        assert_ne!(snap.epoch, before.epoch);
     }
 
     #[test]

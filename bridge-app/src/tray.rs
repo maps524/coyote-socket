@@ -99,22 +99,19 @@ fn surface<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// Open `url` in the default browser without pulling in a crate for it.
+/// Open `url` in the default browser.
+///
+/// Notably **not** through `cmd /C start` on Windows, which the first version
+/// of this did. `cmd` parses its argument as a command line, so any URL
+/// carrying `&`, `|`, `^` or `%` is one quoting mistake away from being
+/// executed rather than opened. Callers are supposed to have validated the URL
+/// first (see `commands::is_bridge_url`), but a validator and a shell is a
+/// combination that only has to be wrong once. Tauri's `opener` hands the
+/// string to the OS shell-execute API as a single opaque argument, so there is
+/// no command line to escape.
 pub fn open_url(url: &str) {
     coyote_bridge::log_info!("[tray] opening {url}");
-    let result = if cfg!(target_os = "windows") {
-        // `start` is a cmd builtin, and the empty "" is the window title —
-        // without it cmd treats a quoted URL as the title and opens nothing.
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-    } else if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(url).spawn()
-    } else {
-        std::process::Command::new("xdg-open").arg(url).spawn()
-    };
-
-    if let Err(e) = result {
+    if let Err(e) = tauri_plugin_opener::open_url(url, None::<&str>) {
         coyote_bridge::log_warn!("[tray] could not open browser: {e}. Open {url} manually.");
     }
 }

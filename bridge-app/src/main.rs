@@ -16,10 +16,13 @@
 //!
 //! ## What it deliberately does not do
 //!
-//! It does not make the protocol client any more proven than it was. The
-//! client has still never spoken to a real DeoVR or HereSphere. A tidy window
-//! showing "Connected" would be an excellent way to forget that, so the UI
-//! says so on its face and the wire log stays one click away.
+//! It does not make the protocol client more proven than the evidence allows.
+//! The client has now spoken to a real DeoVR on a Quest — once, for fourteen
+//! minutes, on one platform, exercising position, play, pause and seek. It has
+//! never spoken to HereSphere at all, never seen a media change, and never
+//! seen on-device media. A tidy window showing "Connected" would be an
+//! excellent way to forget where that line sits, so the UI states the scope on
+//! its face and the wire log stays one click away.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -31,6 +34,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use coyote_bridge::auth;
 use coyote_bridge::supervisor::{self, BridgeHandle};
 use coyote_bridge::wire::{Tap, WireEvent};
 use coyote_bridge::{http, log_info, log_warn, logging};
@@ -100,16 +104,29 @@ fn main() {
             logging::init(Some(config_dir.clone()));
 
             let settings_path = config_dir.join("bridge-settings.json");
-            let settings = Settings::load(&settings_path);
+            let mut settings = Settings::load(&settings_path);
             let http_port = settings.http_port;
             let static_dir = settings.static_dir.clone().map(PathBuf::from);
+            // Mints on first run; persisted, so the phone's saved URL survives
+            // a restart. See `settings::Settings::token`.
+            let token = settings.token();
+            settings.save(&settings_path);
 
             let advertised = http::local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            let base = format!("http://{advertised}:{http_port}");
             let urls = Urls {
-                pairing: format!("http://{advertised}:{http_port}"),
+                // Carries the token: this is the URL that grants access, which
+                // is why it is treated as a secret in the UI rather than
+                // displayed as a plain address.
+                pairing: auth::with_token(&base, &token),
                 local: format!("http://127.0.0.1:{http_port}"),
                 http_port,
             };
+            let allowed_hosts = vec![
+                format!("{advertised}:{http_port}"),
+                format!("127.0.0.1:{http_port}"),
+                format!("localhost:{http_port}"),
+            ];
 
             // One live tap, shared by the player client and the fake player,
             // so a cross-check run reads as a single conversation rather than
@@ -142,7 +159,14 @@ fn main() {
             // losing it to a ring buffer would be an avoidable loss.
             capture_wire(&tap, config_dir.join("wire-capture.jsonl"));
 
-            serve_http(app.handle().clone(), Arc::clone(&state), static_dir, http_port);
+            serve_http(
+                app.handle().clone(),
+                Arc::clone(&state),
+                static_dir,
+                http_port,
+                token,
+                allowed_hosts,
+            );
             forward_events(app.handle().clone(), bridge, wire_rx);
             tray::install(app.handle(), &urls)?;
 
@@ -232,11 +256,24 @@ fn serve_http(
     state: Arc<AppState>,
     static_dir: Option<PathBuf>,
     port: u16,
+    token: auth::Token,
+    allowed_hosts: Vec<String>,
 ) {
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
     let pairing_url = state.urls.pairing.clone();
     let snapshot_rx = state.bridge.snapshot_rx.clone();
     let cmd_tx = state.bridge.cmd_tx.clone();
+
+    // Persist a rotated token, so a rotation performed over TLS survives a
+    // restart rather than silently reverting to the cleartext one it replaced.
+    let rotate_state = Arc::clone(&state);
+    let on_token_rotated: Box<dyn Fn(&auth::Token) + Send + Sync> =
+        Box::new(move |fresh: &auth::Token| {
+            if let Ok(mut settings) = rotate_state.settings.lock() {
+                settings.token = Some(fresh.as_str().to_string());
+            }
+            rotate_state.save_settings();
+        });
 
     tauri::async_runtime::spawn(async move {
         match TcpListener::bind(bind).await {
@@ -249,6 +286,9 @@ fn serve_http(
                         cmd_tx,
                         static_dir,
                         pairing_url,
+                        token: std::sync::RwLock::new(token),
+                        allowed_hosts,
+                        on_token_rotated: Some(on_token_rotated),
                     }),
                 )
                 .await;

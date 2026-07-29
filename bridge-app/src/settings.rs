@@ -25,6 +25,20 @@ pub struct Settings {
     pub http_port: u16,
     /// Directory of static files to serve, when the PWA has been built.
     pub static_dir: Option<String>,
+
+    /// The pairing token, persisted so the phone's home-screen shortcut keeps
+    /// working across restarts.
+    ///
+    /// A per-run token would put a fresh secret in the URL on every launch and
+    /// break that shortcut every time — the same churn that makes a rotating
+    /// tunnel hostname unusable, relocated from the host into the query
+    /// string. A stable origin with an unstable credential is not stable.
+    ///
+    /// It is stored in plaintext next to the log. That is the right level of
+    /// protection for a LAN development tool and the wrong level for anything
+    /// else, which is a fact worth stating rather than hiding: anyone who can
+    /// read this file can drive the player.
+    pub token: Option<String>,
 }
 
 impl Default for Settings {
@@ -34,6 +48,7 @@ impl Default for Settings {
             recents: Vec::new(),
             http_port: 8787,
             static_dir: None,
+            token: None,
         }
     }
 }
@@ -45,6 +60,18 @@ impl Settings {
         self.recents.retain(|e| e != endpoint);
         self.recents.insert(0, endpoint.to_string());
         self.recents.truncate(MAX_RECENTS);
+    }
+
+    /// The stored token, minting and storing one on first run.
+    pub fn token(&mut self) -> coyote_bridge::auth::Token {
+        match &self.token {
+            Some(existing) => coyote_bridge::auth::Token::from_string(existing.clone()),
+            None => {
+                let fresh = coyote_bridge::auth::Token::generate();
+                self.token = Some(fresh.as_str().to_string());
+                fresh
+            }
+        }
     }
 
     pub fn load(path: &PathBuf) -> Self {
@@ -97,6 +124,36 @@ mod tests {
         let s = Settings::load(&missing);
         assert_eq!(s.http_port, 8787);
         assert!(s.recents.is_empty());
+    }
+
+    /// The whole reason the token is persisted: a home-screen shortcut must
+    /// keep working across restarts.
+    #[test]
+    fn the_token_survives_a_restart() {
+        let path = std::env::temp_dir().join("coyote-bridge-token-test.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut first = Settings::default();
+        let minted = first.token();
+        first.save(&path);
+
+        let mut second = Settings::load(&path);
+        assert_eq!(
+            second.token().as_str(),
+            minted.as_str(),
+            "a new token every launch would break the phone's saved URL"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_token_is_minted_once_and_then_reused() {
+        let mut s = Settings::default();
+        assert!(s.token.is_none());
+        let first = s.token();
+        let second = s.token();
+        assert_eq!(first.as_str(), second.as_str());
+        assert!(s.token.is_some(), "minting must persist into the settings");
     }
 
     #[test]

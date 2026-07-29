@@ -28,6 +28,15 @@ export interface PlayerSnapshot {
   type: 'player'
   link: LinkState
   endpoint: string
+  /**
+   * Bumped on every successful connection.
+   *
+   * A change means the position before it and the position after it are
+   * unrelated — the recorded capture jumped backwards 131.7 s across a
+   * reconnect. State arrives over a coalescing channel, so the intermediate
+   * "disconnected" states may never be delivered; this survives that.
+   */
+  epoch: number
   media: string | null
   /** Null means "the player has not told us", which is not position zero. */
   positionS: number | null

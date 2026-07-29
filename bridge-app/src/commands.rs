@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use coyote_bridge::fake_player::{serve, FakePlayerConfig};
 use coyote_bridge::probe::{self, Reachability};
-use coyote_bridge::state::{PlayerCommand, PlayerSnapshot};
+use coyote_bridge::state::{LinkState, PlayerCommand, PlayerSnapshot};
 use coyote_bridge::{log_info, log_warn, logging, qr};
 use serde::Serialize;
 use tauri::State;
@@ -91,7 +91,19 @@ pub async fn connect(endpoint: String, state: Shared<'_>) -> Result<Reachability
         ));
     }
 
-    let reachability = probe::probe(&endpoint).await;
+    // Skip the probe when this endpoint is already up. Probing opens a second
+    // connection, and a real player that accepts one client at a time may drop
+    // the live one to take it — so the check would break exactly what it is
+    // meant to verify.
+    let already_connected = {
+        let snapshot = state.bridge.snapshot();
+        snapshot.endpoint == endpoint && snapshot.link == LinkState::Connected
+    };
+    let reachability = if already_connected {
+        Reachability::PortOpen
+    } else {
+        probe::probe(&endpoint).await
+    };
     log_info!("[app] connect {endpoint}: {}", reachability.summary());
 
     // Remember it either way. A typo is worth forgetting, but an address that
@@ -235,17 +247,36 @@ pub fn set_static_dir(path: Option<String>, state: Shared) -> Result<(), String>
 
 /// Open a URL in the default browser.
 ///
-/// Restricted to our own bridge URLs. The window is the only caller, but an
-/// unrestricted "open anything" command is a wide door to leave in an app that
-/// serves pages to a LAN.
+/// Restricted to our own bridge URLs. The window is the only caller today, but
+/// this crate's whole purpose is serving pages to a LAN, so an "open anything"
+/// command is a door worth closing before someone walks through it.
 #[tauri::command]
 pub fn open_external(url: String, state: Shared) -> Result<(), String> {
-    let allowed = [&state.urls.local, &state.urls.pairing];
-    if !allowed.iter().any(|base| url.starts_with(base.as_str())) {
+    if !is_bridge_url(&url, &[&state.urls.local, &state.urls.pairing]) {
         return Err(format!("refusing to open {url}: not a bridge URL"));
     }
     crate::tray::open_url(&url);
     Ok(())
+}
+
+/// Whether `url` is one of ours.
+///
+/// A bare `starts_with` is not enough, and the gap is not theoretical: the URL
+/// reaches `cmd /C start`, so `http://192.168.0.5:8787@evil/x&calc.exe` passes
+/// a prefix test, is a legal URL whose *host* is `evil`, and carries a shell
+/// metacharacter into a command line. Requiring a delimiter after the base
+/// closes the host-confusion half; [`crate::tray::open_url`] no longer goes
+/// through `cmd` at all, which closes the other.
+fn is_bridge_url(url: &str, bases: &[&String]) -> bool {
+    bases.iter().any(|base| {
+        let Some(rest) = url.strip_prefix(base.as_str()) else {
+            return false;
+        };
+        // The authority must end here. Anything that continues it — `@`, a
+        // digit extending the port, another label — is a different origin
+        // wearing our prefix.
+        matches!(rest.chars().next(), None | Some('/') | Some('?') | Some('#'))
+    })
 }
 
 /// Nothing here should ever be reached with a poisoned lock, but a warn beats
@@ -253,4 +284,52 @@ pub fn open_external(url: String, state: Shared) -> Result<(), String> {
 #[allow(dead_code)]
 fn warn_poisoned(what: &str) {
     log_warn!("[app] {what} lock was poisoned");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bases() -> Vec<String> {
+        vec![
+            "http://127.0.0.1:8787".to_string(),
+            "http://192.168.0.5:8787".to_string(),
+        ]
+    }
+
+    #[test]
+    fn our_own_urls_are_allowed() {
+        let b = bases();
+        let refs: Vec<&String> = b.iter().collect();
+        for url in [
+            "http://127.0.0.1:8787",
+            "http://127.0.0.1:8787/",
+            "http://127.0.0.1:8787/pair",
+            "http://192.168.0.5:8787/healthz?pretty=1",
+            "http://192.168.0.5:8787/pair#qr",
+        ] {
+            assert!(is_bridge_url(url, &refs), "should allow {url}");
+        }
+    }
+
+    /// The bypass this check exists for. Each of these passes a bare
+    /// `starts_with` and none of them is our origin.
+    #[test]
+    fn a_prefix_is_not_an_origin() {
+        let b = bases();
+        let refs: Vec<&String> = b.iter().collect();
+        for url in [
+            // userinfo trick: the real host is `x`, and `&calc.exe` was a
+            // shell metacharacter on the old `cmd /C start` path.
+            "http://192.168.0.5:8787@x&calc.exe",
+            // port extension: :87879 is not :8787.
+            "http://192.168.0.5:87879/evil",
+            // label extension: a different host entirely.
+            "http://127.0.0.1:8787.evil.com/",
+            "https://127.0.0.1:8787/",
+            "file:///C:/Windows/System32/calc.exe",
+        ] {
+            assert!(!is_bridge_url(url, &refs), "should refuse {url}");
+        }
+    }
 }

@@ -61,42 +61,72 @@ use crate::{log_info, log_warn};
 /// The real players' documented tolerance before they hang up.
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Replay the captured DeoVR session, looping, at the gaps it was recorded
-/// with.
+/// Replay the captured DeoVR session at the gaps it was recorded with, using
+/// the recorded length prefixes.
 ///
-/// Payloads go out byte for byte as they arrived — not re-serialised from a
-/// parsed struct. Round-tripping through our own types would quietly normalise
-/// key order, number formatting and anything we failed to model, which is
-/// exactly the material a recording is for.
+/// Two properties make this worth more than a generated stream:
+///
+/// 1. **The prefix bytes are the recorded ones.** Payloads are not
+///    re-serialised from a parsed struct and the length is not recomputed by
+///    our encoder. Re-framing here would make the whole exercise circular
+///    again: a client reading a stream our own encoder produced can only
+///    demonstrate that our decoder agrees with our encoder.
+/// 2. **It does not loop.** Looping would restart position from the beginning
+///    of the recording, injecting a large backwards jump into a connection the
+///    client is told is continuous — manufacturing, inside our own fixture,
+///    the exact discontinuity the rest of the system treats as impossible on a
+///    live link. When the recording runs out, the connection is closed, which
+///    is a thing real players genuinely do.
 async fn replay<W>(writer: &mut W, tap: &Tap) -> String
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
+    use tokio::io::AsyncWriteExt;
+
     let capture = crate::capture::Capture::deovr_quest();
-    if capture.frames.is_empty() {
+    // One connection's worth. Replaying across a reconnect boundary would
+    // reintroduce the recorded 131-second backwards jump.
+    let frames = capture.longest_connection();
+    if frames.is_empty() {
         return "capture is empty".into();
     }
     log_info!(
-        "[fake-player] replaying {} captured frames from: {}",
-        capture.frames.len(),
-        capture.source
+        "[fake-player] replaying {} recorded frames from a real DeoVR session",
+        frames.len()
     );
 
-    let gaps = capture.gaps_ms();
-    loop {
-        for (index, frame) in capture.frames.iter().enumerate() {
-            if let Err(e) = codec::write_json(writer, &frame.json).await {
-                return format!("write failed: {e}");
-            }
-            tap_out(tap, &frame.json);
+    for (index, frame) in frames.iter().enumerate() {
+        let Some(prefix) = frame.prefix_bytes() else {
+            continue;
+        };
+        let Some(payload) = frame.text.as_deref() else {
+            continue;
+        };
 
-            // The gap *after* this frame. Looping back to the first frame
-            // reuses the last observed gap, which is the closest thing to
-            // honest that a three-frame loop allows.
-            let gap = gaps.get(index).copied().unwrap_or(1010);
+        // Prefix and payload in one write, exactly as recorded.
+        let mut bytes = Vec::with_capacity(4 + payload.len());
+        bytes.extend_from_slice(&prefix);
+        bytes.extend_from_slice(payload.as_bytes());
+        if let Err(e) = writer.write_all(&bytes).await {
+            return format!("write failed: {e}");
+        }
+        tap.frame(
+            Source::Fake,
+            Dir::Out,
+            Kind::Json,
+            prefix,
+            frame.len,
+            Some(payload.to_string()),
+            None,
+        );
+
+        if let Some(next) = frames.get(index + 1) {
+            let gap = next.at_ms.saturating_sub(frame.at_ms).clamp(1, 5_000);
             tokio::time::sleep(Duration::from_millis(gap)).await;
         }
     }
+
+    "recording exhausted — closing, as a real player would".into()
 }
 
 /// Publish a frame we are about to put on the wire, with the prefix we framed
@@ -188,8 +218,13 @@ impl FakePlayerConfig {
     /// shaped by evidence.
     pub fn observed_deovr() -> Self {
         let capture = crate::capture::Capture::deovr_quest();
-        let first: crate::state::PlayerPacket = serde_json::from_str(&capture.frames[0].json)
-            .expect("the embedded capture parses");
+        let inbound = capture.inbound();
+        let json = inbound
+            .first()
+            .and_then(|e| e.text.as_deref())
+            .expect("the embedded capture has frames");
+        let first: crate::state::PlayerPacket =
+            serde_json::from_str(json).expect("the embedded capture parses");
         Self {
             profile: Profile::Synthetic,
             media_path: first.path.unwrap_or_default(),
