@@ -39,6 +39,20 @@
 //! working headless build — which it cannot if a window is a compile-time
 //! dependency of the protocol.
 
+//! ## One assumption worth knowing before you change anything
+//!
+//! Much of this code assumes there is exactly one of things there is usually
+//! one of: one bridge on the network, one instance of the process, one paired
+//! device, one writer of the config directory. Each is true in the finished
+//! product and false during development, which is the worst combination —
+//! the resulting bugs are invisible to whoever wrote the code and appear only
+//! to whoever runs it.
+//!
+//! Four defects have come from it so far, and they looked unrelated to each
+//! other. `FOLLOW-UPS.md` lists them, gives the shape they share, and predicts
+//! where the next one is. Read it before adding a field that records whether
+//! something worked.
+
 pub mod auth;
 pub mod capture;
 pub mod codec;

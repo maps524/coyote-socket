@@ -1,5 +1,73 @@
 # Bridge follow-ups
 
+---
+
+## 0. The singleton assumption
+
+Not a task. A stated assumption with its consequences, written down because it
+has already produced four defects that looked unrelated to each other, and the
+fifth will look unrelated to those.
+
+**The assumption:** that there is exactly one of everything — one bridge on the
+network, one instance of the process, one paired device, one writer of the
+config directory.
+
+Every one of those is true in the finished product and false during
+development, which is the worst possible combination: the bugs are invisible to
+the people writing the code and appear only to the people running it. Two
+bridges at once is not an edge case while building a bridge — it is Tuesday.
+
+### The four found so far
+
+| Assumed singleton | What broke |
+|---|---|
+| One process holds the HTTP port | Bind failure was stored as `Option<String>`, where `None` meant both "fine" and "not asked yet". The window rendered a QR for a port it never got. |
+| One responder to `coyote.local` | Both instances register mDNS, so instance B's install page could certify instance A's listener, report "Trusted", and send the phone to A carrying B's token. |
+| One writer of the CA directory | Two instances racing an empty directory could load a key and a certificate that did not match, with nothing verifying they belonged together. |
+| One paired device | Auto-rotating the token after a phone paired would silently un-pair every other device, because there is one shared token and no per-device identity. |
+
+The first two are worth reading together, because **neither review predicted
+the combination**. A trust check that blames the certificate for a listener
+that never bound, plus a QR that scans perfectly and leads nowhere, compose
+into an hour spent debugging TLS for a port collision. Each defect was found
+separately. The interaction was found by accident.
+
+### The shape, so the next one is recognisable
+
+It appears as **a field that promises a capability nobody has confirmed**, and
+it is almost always an `Option` doing two jobs: `None` meaning "no problem" and
+"no answer yet" at the same time. The tell is that the optimistic reading is
+the default, so the failure is silent and the UI is confident.
+
+The fix is the same each time: make "not yet known" a state of its own, and set
+the success state only after the runtime has confirmed it. Three values, not
+two.
+
+### Where the fifth one probably is
+
+Stated as a prediction so it can be checked rather than rediscovered:
+
+- **The settings file has one writer.** Two instances of the desktop app both
+  read `bridge-settings.json` at startup and both write it — on connect, on
+  static-dir change, on token rotation. Last writer wins with no merge and no
+  detection. Rotate the token in one and the other clobbers it back, so a
+  revoked credential returns from the dead. This is unfixed.
+- **The relay accepts many clients but the command channel is one queue.** Two
+  phones both issuing `seek` will fight, and neither will be told. Harmless
+  today because there is one phone; not harmless once pairing works.
+- **Two instances mean two tray icons**, identical and unlabelled, with no way
+  to tell which one holds the port.
+
+### The inverse, which is a real constraint and not an assumption
+
+Worth keeping straight: **the player genuinely does accept one client at a
+time.** That is not our assumption to relax — it is why `probe` must not run
+while connected, and why a "test this address" button that opens a second
+connection can sever the first. When auditing the list above, do not
+"fix" that one.
+
+---
+
 Two pieces of work this session identified but deliberately did not build, plus
 the evidence that scopes them. Both are sessions of their own; half-building
 either would have been worse than writing them down.
