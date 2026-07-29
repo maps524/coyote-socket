@@ -422,8 +422,15 @@ mod tests {
     //! most obviously repeat that mistake — its whole job is to spray datagrams
     //! at a multicast group — so the invariant is written here rather than left
     //! to be noticed: everything below is a pure function over a captured
-    //! datagram. [`discover`] itself is exercised by hand and by the integration
-    //! test, never by `cargo test`.
+    //! datagram. **[`discover`] is exercised by hand and by nothing else** —
+    //! not by these tests and not by the integration suite, which reaches a
+    //! media server through [`crate::dlna::Dlna::add_server`] rather than by
+    //! searching for one.
+    //!
+    //! An earlier version of this paragraph said `discover` was exercised "by
+    //! the integration test, never by `cargo test`", which was wrong twice over:
+    //! the integration test does not call it, and the integration test *is*
+    //! `cargo test`.
 
     use super::*;
 

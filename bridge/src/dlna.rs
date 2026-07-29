@@ -858,10 +858,22 @@ fn percent_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! Nothing here opens a socket. [`Dlna::ensure_discovered`] is the only
-    //! function in this module that reaches the network and it is not called
-    //! by any test — see [`crate::ssdp`]'s test module for why this crate
-    //! writes that down.
+    //! **Nothing here reaches off this machine**, which is the invariant that
+    //! matters — see [`crate::ssdp`]'s test module for why this crate writes it
+    //! down.
+    //!
+    //! Stated that way deliberately. An earlier version said "nothing here
+    //! opens a socket" and named [`Dlna::ensure_discovered`] as the only
+    //! function that reaches the network, and both halves were false:
+    //! `a_pinned_server_that_fails_is_still_reported` calls
+    //! [`Dlna::add_server`], which dials — and `add_server` reaches the network
+    //! too. The sentence was true of *multicast and the LAN* and false of
+    //! *sockets*, which is the failure mode that resists review, because a
+    //! reader checks it, finds it true of something, and moves on.
+    //!
+    //! What is actually true: the one dial in this module's tests is
+    //! `127.0.0.1:1`, where nothing listens, and `ensure_discovered` — the only
+    //! function here that multicasts — is called by no test at all.
 
     use super::*;
     use crate::upnp::{Item, Res};
