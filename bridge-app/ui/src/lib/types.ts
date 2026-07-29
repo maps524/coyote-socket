@@ -106,6 +106,23 @@ export type HttpStatus =
   | { state: 'serving' }
   | { state: 'failed'; detail: string }
 
+/**
+ * Whether the phone can get a secure context — what Web Bluetooth requires.
+ *
+ * Same shape as `HttpStatus` and for the same reason: it is set from the TLS
+ * bind, not from "a certificate was issued". Those two differ exactly when
+ * another bridge already holds the port, which is the ordinary case while
+ * developing one.
+ *
+ * `notConfigured` is separate from `failed` because they need different
+ * sentences — one is a choice, the other is a fault.
+ */
+export type TlsStatus =
+  | { state: 'starting' }
+  | { state: 'serving' }
+  | { state: 'notConfigured'; detail: string }
+  | { state: 'failed'; detail: string }
+
 export interface Status {
   snapshot: PlayerSnapshot
   urls: Urls
@@ -117,6 +134,7 @@ export interface Status {
    */
   pairingUrl: string
   http: HttpStatus
+  tls: TlsStatus
   endpoint: string
   recents: string[]
   staticDir: string | null

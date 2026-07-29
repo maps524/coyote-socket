@@ -243,10 +243,28 @@ async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>,
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: vec![format!("127.0.0.1:{port}")],
         on_token_rotated: None,
+        // Plain HTTP: these tests cover routing and authorization, not the
+        // secure context. `/install` correctly reports nothing to install.
+        tls: None,
+        devices: test_device_store(),
     });
     tokio::spawn(http::run(listener, ctx));
 
     (base, cmd_tx, token)
+}
+
+#[tokio::test]
+async fn pairing_is_refused_over_plaintext() {
+    // Issuing a long-lived credential in cleartext would hand it to the same
+    // eavesdropper the pairing token was already exposed to — and make that
+    // exposure permanent, since the cookie outlives the pairing moment. The
+    // token's exposure is a window; a credential's would be forever.
+    let (base, _cmd_tx, token) = spawn_full_stack(64).await;
+    let (status, _body) = get(&format!("{base}/pair/exchange?t={token}")).await;
+    assert_eq!(
+        status, 403,
+        "pairing must require a secure transport, exactly as rotation does"
+    );
 }
 
 async fn get(url: &str) -> (u16, String) {
@@ -403,6 +421,8 @@ async fn traversal_outside_the_static_root_is_refused() {
             token: std::sync::RwLock::new(Token::generate()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
+            tls: None,
+        devices: test_device_store(),
         }),
     ));
 
@@ -499,7 +519,11 @@ async fn a_websocket_without_a_token_cannot_open() {
 /// exactly the thing users are encouraged to share.
 ///
 /// This asserts the property rather than the fix, so a future call site that
-/// logs a URL fails here rather than shipping.
+/// logs a URL fails here rather than shipping — **but only over the routes it
+/// actually drives.** A token-carrying route added later and not added here is
+/// covered by the docstring's claim and not by the test, which is worse than an
+/// obviously narrow test. Every route that takes a token belongs in the list
+/// below.
 #[tokio::test]
 async fn the_token_never_appears_in_the_log() {
     coyote_bridge::logging::init(Some(std::env::temp_dir().join("coyote-bridge-log-test")));
@@ -510,6 +534,11 @@ async fn the_token_never_appears_in_the_log() {
     let _ = get(&format!("{base}/healthz?t=wrong")).await;
     let _ = get(&format!("{base}/pair")).await;
     let _ = get(&format!("{base}/pair/rotate?t={token}")).await;
+    // Refused here because it is plaintext, but the request line is logged
+    // before the transport is checked — which is exactly the interesting case:
+    // a route can leak the token without ever succeeding.
+    let _ = get(&format!("{base}/pair/exchange?t={token}")).await;
+    let _ = get(&format!("{base}/install?t={token}")).await;
 
     let history = coyote_bridge::logging::history().join("\n");
     assert!(
@@ -561,6 +590,10 @@ async fn the_relay_keeps_talking_while_the_player_says_nothing() {
             token: std::sync::RwLock::new(token.clone()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
+            // Plain HTTP: these tests cover routing and authorization, not
+            // the secure context. `/install` correctly reports nothing to install.
+            tls: None,
+        devices: test_device_store(),
         }),
     ));
 
@@ -631,6 +664,10 @@ async fn a_paused_player_keeps_the_relay_talking() {
             token: std::sync::RwLock::new(token.clone()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
+            // Plain HTTP: these tests cover routing and authorization, not
+            // the secure context. `/install` correctly reports nothing to install.
+            tls: None,
+        devices: test_device_store(),
         }),
     ));
 
@@ -720,6 +757,8 @@ async fn spawn_library_stack(root: std::path::PathBuf) -> (String, Token) {
             token: std::sync::RwLock::new(token.clone()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
+            tls: None,
+            devices: test_device_store(),
         }),
     ));
     (base, token)
@@ -1039,4 +1078,21 @@ async fn an_oversized_script_is_not_advertised() {
     assert_eq!(status, 404);
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A credential store in a scratch file, unique per process and per call.
+///
+/// Never the real one: these tests must not be able to pair a device into a
+/// developer's actual bridge, and two tests running in parallel must not fight
+/// over one file.
+fn test_device_store() -> std::sync::Arc<coyote_bridge::devices::DeviceStore> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "coyote-bridge-test-devices-{}-{n}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    std::sync::Arc::new(coyote_bridge::devices::DeviceStore::load(path))
 }

@@ -128,7 +128,7 @@ That is what makes it expensive. Reading the code confirms the guard is
 covering the case, a warning covering the condition, an assertion covering the
 regression — and every one of those observations is true and useless.
 
-### The five, and how they were found
+### The first five, and how they were found
 
 The first three were introduced **in the commits fixing §0 instances**, by
 someone who had read this section that morning and was consciously applying it.
@@ -142,6 +142,7 @@ code.
 | A warning that a file was excluded for exceeding the size cap | whenever a file was excluded | whenever the *script listing* changed, so a library whose only file was oversized said nothing |
 | **`ScanState::Failed`** — the whole three-state mechanism from §0 | whenever the library could not be read | whenever the directory's *mtime moved or it would not `stat`*, so a directory that stats fine but refuses `read_dir` never triggered a scan, produced no verdict, and went on reporting `scan: "ok"` with a frozen `checkedAtMs` |
 | A test asserting an oversized file is reported when it is the only entry | on the fix — the log in `poll` | on the precondition — `scan`'s return value, which is unchanged by reverting the fix |
+| The install page's trust check, reported as **"you are all set"** | as evidence about pairing | as evidence about the certificate only — see the sixth, below |
 
 Note how each one *nearly* works, and works in exactly the conditions you would
 test it in. The status test passes for every status that exists today. The
@@ -251,6 +252,66 @@ that has no path to it. **Both are invisible in a diff**, which is why they
 belong together: the diff shows the guard arriving and shows the surrounding
 lines unchanged, and neither fact is the one that matters. Ask both of every
 change that adds a check.
+
+### The sixth, and why running the code would not have caught it
+
+`/install?t=wrongtoken` rendered the complete setup flow, announced **"Trusted —
+you are all set"**, and passed the bad token into the button. A stale QR from an
+earlier run reaches it; so does one mistyped character. Everything afterwards
+failed as "bridge unreachable" — the confusion `/paired` had just been added to
+end, reachable from the *first screen* of the flow.
+
+The guard that was inert: the page's trust check answers *"does this phone trust
+the certificate"*, which can be perfectly true while the token is wrong. Two
+independent facts, one verified, both announced.
+
+**This is the instance that shows the mechanical fix above is not sufficient.**
+Running the code and reverting the fix catch a guard whose *implementation* is
+wrong. This one's implementation was fine — the trust probe worked exactly as
+written. What was wrong was its **scope**: it was asked about the certificate
+and its answer was reported as being about the whole flow. Someone doing both
+mechanical steps, conscientiously, would still not have found it, because both
+steps confirm the guard does what it says and neither asks whether what it says
+is the question that matters.
+
+Two reviews missed it for the same reason: both varied the conditions the page
+was *about* — an unbound listener, a missing certificate — and neither varied
+the token, because the token was not what the page was thought to be about.
+
+> **Reading finds bugs in the thing you are looking at.**
+
+The action that found it is cheap and is not reviewing: **take the input the
+feature is not "about" and make it wrong.** Run it, and read what the page then
+claims.
+
+### The same defect applies to reading code, not only to writing it
+
+The mDNS unit test was reported as a live hazard across two separate reviews,
+and in one propagated further. It was not live: it had carried `#[ignore]` for
+several commits. The claim rested on a grep that matched the call site fifteen
+lines below the attribute that disables it.
+
+> **A grep result is a string match, not a proof of execution.** Attributes,
+> `cfg`, feature gates and early returns all live outside the matched line, and
+> a search pattern can be constructed so that none of them can appear in the
+> output.
+
+That is this section read backwards. The guard was there; what was reported was
+the success path being reached, without checking whether the guard ran — the
+same defect with author and reviewer swapped. The reviewing version is cheaper
+to make and easier to repeat, because a grep that confirms a suspicion feels
+like evidence.
+
+It generalises past grep. A test result is also only evidence of what the test
+actually measured: a `biased` regression test elsewhere in this repo drained an
+opening burst by counting two messages, a third was added, and the test then
+reported one leaked frame per round, thirty times out of thirty — a clean
+systematic offset wearing the clothes of a lost coin toss. Read carelessly it
+said the feature was broken. It was the test that was wrong.
+
+The counter-question matches the one above: not *"does this line exist?"* or
+*"did this test pass?"* but **"what would have to be true for this to run, and
+is that what it measured?"**
 
 ---
 
@@ -449,77 +510,178 @@ a plausible thing to be doing.
 
 ---
 
-## 2. TLS, so the phone can use Web Bluetooth
+## 2. TLS — built. What is left is verification, not design
 
-### Why
+The local CA this section used to propose was implemented: `certs.rs`,
+`tls.rs`, `install.rs` and `mdns.rs`, with the install page on the plain-HTTP
+listener. See the README section "The phone needs HTTPS".
 
-Web Bluetooth requires a secure context. `localhost` is exempt, which is
-precisely what hides this during desktop testing — the phone is not localhost.
-Everything else in the app works fine over plain HTTP, so **HTTPS is required
-for the Coyote connection specifically, not for the app in general**, and the
-plain-HTTP path should stay because it is the easiest thing to debug.
+What was **measured**, rather than assumed:
 
-A design decision already settled says the bridge serves the PWA itself — no
-version skew, users can modify their own instance, no central dependency. The
-bridge owning TLS is the coherent consequence of that, not an add-on.
+| Claim | How it was checked |
+|---|---|
+| `coyote.local` resolves to the LAN address | Live responder; `ping coyote.local` → `192.168.0.9`, the Ethernet address rather than the WSL adapter |
+| Windows' own responder is not usable for this | `ping JUSTIN-G.local` → `172.21.160.1`, a virtual switch a phone cannot reach |
+| The certificate satisfies Apple's rules | `openssl` against the running listener: SAN present, `id-kp-serverAuth`, 365-day validity, ECDSA P-256 |
+| A strict client accepts it | `curl --cacert` and a rustls client both complete the handshake; both are refused without the CA |
+| `wss://` works on the TLS listener | Integration test. A secure page cannot open `ws://`, so this is the acceptance path, not a nicety |
+| The CA survives a restart | Second run logs "using the existing local CA"; the PEM is byte-identical |
 
-### Chosen approach: a local CA, delivered through the existing QR flow
+### Verified on a real iPhone, 2026-07-29
 
-Bridge generates a CA on first run, keeps the private key local, and serves the
-install page over plain HTTP. QR → install page → one tap → thereafter
-`https://<stable-name>:8443` with a valid certificate, permanently. `rcgen`
-does the certificate work in about thirty lines; the crypto is not the hard
-part.
+The acceptance condition was never "the certificate is well-formed" — it was
+**does Web Bluetooth work from the resulting origin**. It does.
 
-The hard parts, each of which needs handling explicitly:
+| Step | Result |
+|---|---|
+| `coyote.local` resolves from the phone | **Yes** |
+| Profile downloads and installs in Safari | **Yes** |
+| Certificate Trust Settings toggle appears and works | **Yes** |
+| Safari reports the origin trusted | **Yes** |
+| **Bluefy honours the system-store CA** | **Yes** |
+| **Coyote connected over Bluetooth from `https://coyote.local:8443`** | **Yes** |
 
-1. **iOS needs two steps in two places, and everyone misses the second.**
-   Installing the profile is Settings → Profile Downloaded → Install. The cert
-   is **not trusted** until Settings → General → About → **Certificate Trust
-   Settings** → enable full trust for the root. Skipping it fails
-   indistinguishably from a broken certificate. This cannot be automated, so
-   the install page must carry numbered steps with the exact path — and a
-   **"check my trust" button** that attempts an HTTPS fetch and reports yes or
-   no. A verification step that gives a clear answer is worth more than any
-   amount of instruction prose.
-2. **The address must be stable.** An IP SAN works until DHCP moves them, and a
-   changed address is a changed origin — the exact churn that rules out quick
-   tunnels, because it wipes OPFS, kills the PWA install and resets the
-   Bluetooth device grant. Prefer **mDNS `coyote.local`**, which iOS resolves
-   natively; put a DNS SAN in the leaf and the current IP as an additional SAN
-   for fallback, but put the hostname on the QR.
-3. **Apple rejects naive self-signed certs** (iOS 13+): SAN required and CN
-   ignored, `id-kp-serverAuth` in EKU, validity **≤398 days**, RSA ≥2048 or ECC
-   P-256/384. Each failure is silent about its cause. Verify against a real
-   iPhone before claiming it works.
-4. **Persist the CA.** A regenerated CA means a reinstall every launch. Store it
-   with the existing config and treat loss as a user-visible event rather than
-   silently minting a new one.
-5. **Renew ahead of expiry.** Re-issue the leaf from the stored CA on startup
-   when it is near expiry; the phone never reinstalls.
+Scope it as tightly as the DeoVR capture is scoped: **one handset, one iOS
+version, one Bluefy version, one network, once.** That is enough to build on
+and not enough to call universal. In particular, that Bluefy honours the iOS
+system trust store is an observation about the build that was installed that
+evening, not a documented guarantee from its author.
 
-### Security — not negotiable, and this is going open source
+**The mDNS responder is why any of this worked.** Windows' own responder was
+measured advertising `172.21.160.1` — the WSL virtual switch — for this
+machine's `.local` name. A phone handed that address cannot reach anything, and
+the failure would have presented as a certificate problem, because that is what
+every visible symptom points at. If this crate is ever refactored, the responder
+is not an optimisation to be dropped in favour of the OS.
 
-Installing a root CA lets that CA sign a certificate for **any** domain.
-Whoever holds the key can impersonate anything to that phone.
+### The failure mode to check first when someone else's phone does not work
 
-- **Generate the CA per-install, on the user's own machine.** Never ship a CA
-  key in the binary. A shipped key would let anyone who downloaded the release
-  MITM every user who ever installed it — catastrophic and unfixable after the
-  fact.
-- **The private key never leaves the machine.** Not in the QR, not over the
-  network, not in logs. The install page serves the **public** certificate only.
-- Name the certificate so it is identifiable in a Settings list months later,
-  and document removal.
-- State the trade on the install page rather than burying it. People should
-  know what they are granting.
+Unexercised now rather than wrong, and still the right first suspicion:
+
+> An untrusted `wss:` subresource fails **silently**. Certificate UI only exists
+> for top-level navigations, so the socket closes as code 1006 with no
+> interstitial and nothing the page can inspect. It reaches the user as "bridge
+> unreachable", which is indistinguishable from an unplugged router.
+
+The distinguishing test is whether the same origin loads in a top-level tab —
+which is exactly what `/secure-check` is for. **If that page loads, the
+certificate is trusted and the network is fine**, so a failing socket is about
+trust and nothing else.
+
+### Still open
+
+- **Revocation has no command yet, and the half-built version is a safety
+  defect.** `DeviceStore::revoke` and `DeviceStore::revoke_all` delete
+  credentials; `ClientRegistry::revoke` closes the live sockets. Nothing wires
+  either to an IPC command yet, so there is no button — and the way this ships
+  wrong is somebody adding the obvious one that calls the store and not the
+  registry.
+
+  **A live socket is authorised once, at upgrade, and never re-checked.**
+  That is why deleting the record cannot reach it, and why this is not a
+  tidiness item.
+
+  That failure is silent and it is the dangerous direction: the record is gone,
+  the panel says revoked, the user believes the device is disconnected — and the
+  phone keeps its relay and **keeps driving output** until the network happens
+  to drop it. Deleting a record stops the next connection; it does nothing to
+  the one that is running.
+
+  Both calls, store first, so a reconnect in the gap is refused rather than
+  re-admitted:
+
+  ```rust
+  state.devices.revoke(&id)?;              // durable before we go on
+  let closed = state.clients.revoke(&id);  // and stop what is running now
+  ```
+
+  **`revoke_all` has the same shape and the same hole.** It returns every id
+  precisely so the caller can close every socket; a caller that ignores the
+  return value un-pairs everything on disk and leaves every phone driving:
+
+  ```rust
+  for id in state.devices.revoke_all()? {
+      state.clients.revoke(&id);
+  }
+  ```
+
+  **`closed == 0` is not a failure and must not be reported as one.** It means
+  the device was offline, which is an ordinary way to revoke something. The
+  panel is correct either way, so the command needs no "was it connected"
+  special case.
+
+  **Owned by whichever branch merges last** — by role, not by name, because the
+  merge order has already changed once. That branch is the first point at which
+  both `DeviceStore` and `ClientRegistry` exist in one tree, and therefore the
+  first point at which this *can* be written. It is the same wiring job as
+  installing the credential resolver.
+
+  This entry must survive rebases intact. It is the one item where the next
+  commit can introduce a hardware-safety failure by doing the obvious thing.
+
+- **A principle worth keeping when the next convenience feature is proposed:**
+  *any credential a client can re-acquire without a person present is not
+  revocable, only rate-limited.* That is why the token was removed from the PWA
+  manifest's `start_url`, and it applies unchanged to a "remember this device"
+  option or a refresh-token design.
+
+- **Token exposure on the first hop, and what rotation does *not* fix.** The QR
+  points at plain HTTP by necessity, so the pairing token is readable by anyone
+  on the LAN at that moment.
+
+  **Correction to an earlier claim in this file.** It used to say rotation
+  narrowed that window "from forever to until the phone finishes pairing". That
+  was true of a shared token and is **false now**: rotation invalidates the
+  token, and does nothing to credentials already exchanged from it. Verified —
+  a cookie obtained before a rotation still authorises afterwards. An
+  eavesdropper who catches the QR token exchanges it once and holds access
+  rotation cannot reach.
+
+  Minting is deliberately not capped; pairing three devices from one QR is the
+  intended flow. The mitigation is that a sniffer's device is *visible* in the
+  clients panel and individually revocable, plus `DeviceStore::revoke_all` for
+  when you do not know which row is theirs.
+
+  **The two actions are not interchangeable and a UI must offer both:** rotate
+  to invalidate the QR, revoke-all to invalidate what the QR has already
+  produced. Offering only rotation promises something it does not deliver.
+
+- **Whether iOS partitions the Home Screen cookie jar. UNTESTED, and it decides
+  a real behaviour.** If an installed web app gets storage separate from the
+  Safari tab that paired, launching from the home screen arrives with no
+  credential and must pair again.
+
+  The obvious fix — putting the token in the manifest's `start_url` — was built
+  and then **deliberately removed**, for two reasons. The second is the one that
+  closes the idea permanently rather than conditionally:
+
+  1. It lets a revoked device silently re-pair itself on its next launch,
+     defeating the revocation the whole per-device design exists to provide.
+  2. **`serve_static` is ungated by design**, so a manifest carrying the token
+     would be readable at `GET /manifest.webmanifest` by anyone on the LAN with
+     no credential at all. That is not a subtle weakening — it is publishing the
+     pairing token on an open route.
+
+  Reason 1 alone invites the workaround "only inject on first launch". Reason 2
+  does not: the file is served to whoever asks, whenever they ask. If partitioning turns out to be real, the
+  answer is to make the home-screen launch pair explicitly and visibly, not to
+  hide a standing token in the manifest.
+
+  Testing it costs one home-screen install on the handset that already works.
+- **Renewal has never been observed.** The re-issue path is exercised by unit
+  tests against synthetic timestamps, not by a bridge that has run for a year or
+  had its DHCP lease move underneath it.
+- **HereSphere, media changes, on-device media** — unchanged from the spike.
 
 ### The documented alternative
 
 **Tailscale** gives a real certificate on a stable `*.ts.net` hostname via
-`tailscale cert` / Serve — no domain to buy, no cert to install on the phone,
-and it works off-LAN. It costs a dependency and an account on both machines.
-Worth knowing about for anyone already running it; not worth building instead.
+`tailscale cert` / Serve — no certificate to install on the phone, and it works
+off-LAN. It costs a dependency and an account on both machines.
+
+It is no longer the contingency, because the local CA works. It remains the
+answer for anyone who cannot or will not install a root certificate on their
+phone, which is a legitimate position and not one to argue with.
 
 **Cloudflare quick tunnels are the wrong default.** The hostname churns every
 restart, which is a new origin every launch, which makes the PWA amnesiac —

@@ -20,6 +20,26 @@ tao = { version = "0.35.3", optional = true }
 tray-icon = { version = "0.24.2", optional = true }
 getrandom = "0.2"
 
+# TLS, so the phone gets a secure context and Web Bluetooth is reachable at all.
+#
+# `ring` rather than the default `aws-lc-rs` throughout: aws-lc-rs needs cmake
+# and NASM on Windows, and this project builds on Windows. A build dependency
+# that has to be installed by hand is a worse trade than a slightly older
+# crypto backend, and `ring` covers everything needed here (ECDSA P-256, which
+# is also what Apple's certificate rules accept).
+rcgen = { version = "0.14.8", default-features = false, features = ["ring", "pem", "x509-parser"] }
+rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
+# Answers `coyote.local`. Windows' own responder cannot be used — it advertises
+# whichever interface it likes, which on a dev machine is a virtual adapter.
+mdns-sd = "0.20.3"
+# Certificate validity windows. rcgen's `not_before`/`not_after` are `time`
+# types, so this is already in the tree; it is named explicitly rather than
+# relied on transitively.
+time = { version = "0.3.54", default-features = false, features = ["std"] }
+x509-parser = "0.18.1"
+ring = "0.17.14"
+
 [dev-dependencies]
 # `test-util` gives the paused clock, so keepalive-cadence tests assert
 # instead of sleeping.

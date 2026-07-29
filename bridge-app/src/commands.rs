@@ -37,6 +37,13 @@ pub struct Status {
     /// Three-valued rather than an error-or-nothing, so the window can say
     /// "starting" instead of implying a QR works before anything has bound.
     pub http: crate::HttpStatus,
+    /// Whether the phone can get a secure context — what Web Bluetooth needs.
+    ///
+    /// Same three-plus-one shape as `http`, and set from the TLS bind rather
+    /// than from "a certificate was issued". Those differ exactly when another
+    /// bridge already holds the port, which is the common case while developing
+    /// one.
+    pub tls: crate::TlsStatus,
     pub endpoint: String,
     pub recents: Vec<String>,
     pub static_dir: Option<String>,
@@ -57,6 +64,11 @@ pub fn bridge_status(state: Shared) -> Status {
             .lock()
             .map(|s| s.clone())
             .unwrap_or(crate::HttpStatus::Starting),
+        tls: state
+            .tls_status
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or(crate::TlsStatus::Starting),
         endpoint: settings.endpoint.clone(),
         recents: settings.recents.clone(),
         static_dir: settings.static_dir.clone(),

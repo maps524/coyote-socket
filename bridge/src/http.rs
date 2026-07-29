@@ -24,20 +24,30 @@
 //!
 //! ## Seams deliberately left open
 //!
-//! - **TLS.** Everything here is plaintext HTTP. Web Bluetooth requires a
-//!   secure context, so the phone will need `https://` — via a certificate or
-//!   a tunnel — before this is usable for real. `localhost` is exempt, which
-//!   is why the desktop-browser path works today and the phone path does not.
 //! - **Auth.** `/healthz` and `/ws` require a bearer token carried on the
-//!   pairing URL; `/pair`, `/qr.svg` and the static app do not, because they
-//!   are how a phone *obtains* the token. Read [`crate::auth`] for what that
-//!   does and does not cover — in particular it is not confidentiality, since
-//!   the token travels in a URL in cleartext, and it is not a substitute for
-//!   TLS. It stops a page you visited from opening a WebSocket and driving
-//!   your player, which is a real attack that no CORS setting prevents.
+//!   pairing URL; `/pair`, `/qr.svg`, `/install`, `/ca.crt` and the static app
+//!   do not, because they are how a phone *obtains* the token or the means to
+//!   connect at all. Read [`crate::auth`] for what that does and does not
+//!   cover — in particular it is not confidentiality, since the token travels
+//!   in a URL in cleartext, and it is not a substitute for TLS. It stops a page
+//!   you visited from opening a WebSocket and driving your player, which is a
+//!   real attack that no CORS setting prevents.
 //! - **T-Code ingest.** `net.rs`'s protocol auto-detection is not carried over
 //!   here; the LAN T-Code listener the desktop app provides is a separate
 //!   port and a separate job.
+//!
+//! ## TLS is no longer one of them
+//!
+//! This module is transport-agnostic. The same routing table serves the plain
+//! listener and the TLS one ([`crate::tls`]), which is what makes `wss://`
+//! possible — and `wss://` is not optional, because a page served over HTTPS
+//! is forbidden from opening a `ws://` socket. A secure origin that could not
+//! open its own relay would load the app and then be unable to talk to it.
+//!
+//! TLS and the token are two halves answering different attackers, and neither
+//! covers the other's gap: TLS gives confidentiality and no authorization, the
+//! token gives authorization and no confidentiality. Nothing here should be
+//! read as "the bridge is secure".
 
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
@@ -91,6 +101,22 @@ pub struct Ctx {
     /// rebuild any URL that carries it.
     #[allow(clippy::type_complexity)]
     pub on_token_rotated: Option<Box<dyn Fn(&Token) + Send + Sync>>,
+    /// Public TLS material, when a certificate has been issued.
+    ///
+    /// `None` when the bridge is serving plain HTTP only, in which case
+    /// `/install` says there is nothing to install rather than 404ing — a
+    /// disabled feature and a missing page are different answers to give
+    /// someone who is trying to work out why their phone will not connect.
+    ///
+    /// Holds no key material of any kind; see [`crate::install::TlsPublicInfo`].
+    pub tls: Option<Arc<crate::install::TlsPublicInfo>>,
+    /// Per-device credentials. See [`crate::devices`].
+    ///
+    /// A device pairs once with the token and is issued a cookie; everything
+    /// afterwards authorises on that. The token remains what mints new devices,
+    /// so it does not go away — it simply stops being presented by devices that
+    /// have already paired.
+    pub devices: Arc<crate::devices::DeviceStore>,
 }
 
 impl Ctx {
@@ -278,7 +304,10 @@ where
             .map(|(_, path)| path)
             .unwrap_or("");
         let origin = header_value(&head, "origin");
-        if !authorised(target, origin, &ctx) {
+        // Cookies ride the upgrade automatically, which is the whole reason
+        // the credential is a cookie rather than something in `localStorage`.
+        let cookie = header_value(&head, "cookie");
+        if !authorised(target, origin, cookie, &ctx) {
             log_warn!("[ws] {addr} refused: bad or missing token");
             let mut stream = Prefixed::new(head, stream);
             let _ = respond(
@@ -321,6 +350,7 @@ where
     log_debug!("[http] {addr} {method} {}", redact_query(&path));
 
     let origin = header_value(&head, "origin").map(|o| o.to_string());
+    let cookie = header_value(&head, "cookie").map(|c| c.to_string());
     let mut stream = Prefixed::new(head, stream);
 
     if method != "GET" && method != "HEAD" {
@@ -334,7 +364,15 @@ where
         return;
     }
 
-    route(&mut stream, &path, origin.as_deref(), secure, &ctx).await;
+    route(
+        &mut stream,
+        &path,
+        origin.as_deref(),
+        cookie.as_deref(),
+        secure,
+        &ctx,
+    )
+    .await;
 }
 
 /// Strip the query string from a request target before it is logged.
@@ -351,14 +389,76 @@ fn redact_query(target: &str) -> String {
 }
 
 /// Whether a request carries a valid token and an acceptable `Origin`.
-fn authorised(path_and_query: &str, origin: Option<&str>, ctx: &Ctx) -> bool {
-    let presented = auth::token_from_query(path_and_query);
-    presented.is_some_and(|t| ctx.token().matches(t))
-        && auth::origin_is_acceptable(origin, &ctx.allowed_hosts)
+/// Two ways to be authorised, and the `Origin` check applies to both.
+///
+/// **A device credential is the normal case.** The pairing token is what a
+/// device presents *once*, to be issued one — after which it never presents the
+/// token again. Both are accepted because both are legitimate: a phone
+/// mid-pairing has only the token, and a paired phone has only the cookie.
+///
+/// The `Origin` allowlist is deliberately outside the `||`. It is the thing
+/// that stops a page you happened to visit from opening a WebSocket and driving
+/// your player, and a cookie makes that *more* important rather than less —
+/// browsers attach cookies automatically, so without the origin check a
+/// paired-device cookie would be exactly the ambient authority that CSRF
+/// exploits.
+fn authorised(path_and_query: &str, origin: Option<&str>, cookie: Option<&str>, ctx: &Ctx) -> bool {
+    if !auth::origin_is_acceptable(origin, &ctx.allowed_hosts) {
+        return false;
+    }
+
+    // The cookie path requires `Origin` to be **present**, not merely
+    // acceptable. The token path does not, and the difference is not an
+    // inconsistency — it is the whole defence.
+    //
+    // `origin_is_acceptable(None, …)` is `true` so that native clients (a
+    // script, `websocat`, the desktop app) can connect; they send no `Origin`
+    // and they still have to present a token an attacker cannot obtain.
+    //
+    // A cookie is different in kind, because **the browser attaches it for
+    // you**. `SameSite=Lax` deliberately sends it on cross-site *top-level
+    // navigations*, and a navigation carries no `Origin` header — so a page
+    // anywhere could do `location = 'https://coyote.local:8443/pair/rotate'`
+    // and arrive here with a valid cookie and no `Origin`, which under the old
+    // rule authorised. Demonstrated: two successive rotations from a drive-by,
+    // each invalidating the QR and locking out any device mid-pairing.
+    //
+    // Same-origin policy stops the attacker *reading* the response, so this is
+    // denial of service rather than disclosure — but a QR that silently stops
+    // working is exactly the failure this branch keeps trying to eliminate.
+    //
+    // Requiring the header costs nothing real: every browser sends `Origin` on
+    // `fetch` and on WebSocket upgrades, which is how the app actually talks to
+    // the bridge. Only navigations omit it, and no route here is meant to be
+    // reached by navigating to it with a credential.
+    // Keyed on a cookie being *present*, not on it being what authorises.
+    //
+    // Measured consequence: `token + no Origin + some unrelated cookie` is
+    // refused. Nothing real hits it — `curl`, `websocat` and the desktop app
+    // send no cookies at all — but the predicate is stricter than the reasoning
+    // above, and the honest version is *"try the token first; require `Origin`
+    // only when falling through to the cookie."* That is a reorder rather than
+    // a change of behaviour, and it is deliberately not made here: the current
+    // form fails closed, and a security predicate that is too strict is the
+    // direction to leave a residue in.
+    if cookie.is_some() && origin.is_none() {
+        return false;
+    }
+
+    if ctx.devices.verify(cookie).is_some() {
+        return true;
+    }
+    auth::token_from_query(path_and_query).is_some_and(|t| ctx.token().matches(t))
 }
 
-async fn route<W>(stream: &mut W, path: &str, origin: Option<&str>, secure: bool, ctx: &Ctx)
-where
+async fn route<W>(
+    stream: &mut W,
+    path: &str,
+    origin: Option<&str>,
+    cookie: Option<&str>,
+    secure: bool,
+    ctx: &Ctx,
+) where
     W: AsyncWrite + Unpin,
 {
     let full = path;
@@ -368,7 +468,7 @@ where
     let result = match path {
         // Gated: leaks the media URL, the LAN address and the link state.
         "/healthz" => {
-            if !authorised(full, origin, ctx) {
+            if !authorised(full, origin, cookie, ctx) {
                 respond(
                     stream,
                     Status::UNAUTHORIZED,
@@ -430,7 +530,7 @@ where
                     b"rotation requires a secure transport",
                 )
                 .await
-            } else if !authorised(full, origin, ctx) {
+            } else if !authorised(full, origin, cookie, ctx) {
                 respond(
                     stream,
                     Status::UNAUTHORIZED,
@@ -454,7 +554,7 @@ where
         // file in a directory the user chose, which is as personal as the media
         // URL that endpoint already protects.
         p if p.starts_with("/library/") => {
-            if !authorised(full, origin, ctx) {
+            if !authorised(full, origin, cookie, ctx) {
                 respond(
                     stream,
                     Status::UNAUTHORIZED,
@@ -465,6 +565,107 @@ where
             } else {
                 serve_library(stream, p, ctx).await
             }
+        }
+        // Trade the pairing token for a per-device credential. This is where
+        // the phone stops being "whoever holds the shared secret" and becomes
+        // a device the bridge can name and revoke individually.
+        //
+        // It is also the fix for the origin problem. Pairing happens on
+        // `http://host:8787` and the app runs on `https://host:8443`; different
+        // scheme and port means different origin, so **nothing in browser
+        // storage crosses**. An earlier design expected the token to survive in
+        // `localStorage` and it could not, which surfaced as a refused upgrade,
+        // close code 1006, and an app reporting "bridge unreachable". The token
+        // now crosses once, on the URL, into this endpoint — which sets a cookie
+        // on the origin that actually needs it.
+        //
+        // Secure transport only, for the same reason `/pair/rotate` is: issuing
+        // a long-lived credential over cleartext would hand it to the same
+        // eavesdropper the token was already exposed to, and make it permanent.
+        "/pair/exchange" => {
+            if !secure {
+                respond(
+                    stream,
+                    Status::FORBIDDEN,
+                    "text/plain; charset=utf-8",
+                    b"pairing requires a secure transport",
+                )
+                .await
+            } else if let Some(device) = ctx.devices.verify(cookie) {
+                // Already paired. Do **not** mint a second credential: this
+                // endpoint is the app's start URL, so it is hit on every launch,
+                // and minting per launch would fill the clients panel with
+                // duplicates of one phone and make revocation meaningless.
+                log_debug!("[devices] {} already paired; passing through", device.id);
+                redirect_to_app(stream, None).await
+            } else if !authorised(full, origin, cookie, ctx) {
+                respond(
+                    stream,
+                    Status::UNAUTHORIZED,
+                    "text/plain; charset=utf-8",
+                    b"unauthorized",
+                )
+                .await
+            } else {
+                match ctx.devices.mint() {
+                    Ok((cookie_value, _device)) => {
+                        redirect_to_app(
+                            stream,
+                            Some(crate::devices::set_cookie_header(&cookie_value)),
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        log_warn!("[devices] could not pair: {e}");
+                        respond(
+                            stream,
+                            Status::INTERNAL_ERROR,
+                            "text/plain; charset=utf-8",
+                            b"could not complete pairing",
+                        )
+                        .await
+                    }
+                }
+            }
+        }
+        // "Am I paired?" — ungated, and it has to be.
+        //
+        // Every other route that could answer this is itself gated, so an
+        // unpaired device could not find out *why* it was failing. The concrete
+        // case: if iOS gives a Home Screen install its own cookie jar, the app
+        // launches, static assets serve fine because they are ungated, and then
+        // the socket goes out with no cookie — 401, close 1006, "bridge
+        // unreachable". Indistinguishable from a dead network, and the user goes
+        // to check their Wi-Fi.
+        //
+        // One boolean turns that into "this device isn't paired — scan the QR
+        // again". Gating it would be the same bootstrap deadlock as `/install`:
+        // asking for a credential to find out whether you have one.
+        //
+        // It discloses nothing. An unpaired caller learns they are unpaired,
+        // which they already knew; a paired one learns they are paired. No id,
+        // no label, no count — those are behind `/healthz`.
+        //
+        // One honest residue: this is an **oracle for whether a device id
+        // exists**, because `verify` returns early on an unknown id and only
+        // reaches the hash comparison when one is found, so the two cases are
+        // distinguishable by timing. That is accepted rather than overlooked.
+        // Ids are public by design — they are rendered in the clients panel and
+        // appear in bug reports — and knowing one is provably insufficient:
+        // `devices::tests::a_minted_cookie_verifies_and_a_forged_one_does_not`
+        // presents a real id with a wrong secret and is refused. The oracle
+        // reveals something already published.
+        "/paired" => {
+            let paired = ctx.devices.verify(cookie).is_some();
+            let body = serde_json::json!({ "paired": paired }).to_string();
+            respond_with_headers(
+                stream,
+                Status::OK,
+                "application/json; charset=utf-8",
+                "Access-Control-Allow-Origin: *\r\n",
+                body.as_bytes(),
+            )
+            .await
         }
         "/qr.svg" => match qr::to_svg(&ctx.pairing_url()) {
             Ok(svg) => {
@@ -487,6 +688,145 @@ where
                 .await
             }
         },
+        // --- Getting the local CA onto the phone. ---
+        //
+        // Ungated, and for a stronger reason than "the certificate is public".
+        // It is that **gating it is a deadlock**: the phone cannot present a
+        // credential it has not been given, and this page is part of how it
+        // becomes able to hold one at all. That the CA certificate is also not
+        // a secret is a secondary comfort, not the reason — stating it the
+        // other way round invites someone to gate this later once they think
+        // of something secret to put here.
+        //
+        // See `crate::install` for what the page has to say and why the trust
+        // check is two-stage.
+        "/install" => match ctx.tls.as_ref() {
+            Some(tls) => {
+                // Ungated is not the same as unchecked.
+                //
+                // The page must be reachable without a credential so the
+                // certificate can be fetched — that part is a bootstrap. But
+                // rendering the *success path* for a token we can already see
+                // is wrong is a separate choice, and it was the wrong one:
+                // `/install?t=wrongtoken` walked the user through installing a
+                // certificate, told them they were all set, and handed them on
+                // with a credential that could not authorise. Every failure
+                // after that reads as "bridge unreachable".
+                //
+                // A stale QR from a previous run does it. So does one mistyped
+                // character.
+                let token = ctx.token();
+                let verdict = crate::install::classify_token(full, |t| token.matches(t));
+                if verdict == crate::install::TokenVerdict::Invalid {
+                    let body = crate::install::expired_page(&tls.hostname, tls.http_port);
+                    respond(stream, Status::GONE, "text/html; charset=utf-8", body.as_bytes()).await
+                } else {
+                    // The live token, not merely whatever the request carried.
+                    // The handoff crosses an origin boundary, so the URL is the
+                    // only thing that can carry it — see `install::app_query`.
+                    let query = crate::install::app_query(full, token.as_str());
+                    let body = crate::install::page(&tls.install_page(&query));
+                    respond(stream, Status::OK, "text/html; charset=utf-8", body.as_bytes()).await
+                }
+            }
+            None => {
+                respond(
+                    stream,
+                    Status::NOT_FOUND,
+                    "text/plain; charset=utf-8",
+                    // Careful about *why*. In the common case — another bridge
+                    // already holding 8443 — a certificate exists and it is the
+                    // listener that is missing, so "there is no certificate"
+                    // would send the reader looking in the wrong place.
+                    b"this bridge is not serving HTTPS, so there is nothing to install here. \
+                      Either TLS is switched off, or the HTTPS port could not be bound \
+                      (most often because another bridge is already using it). \
+                      The bridge log says which.",
+                )
+                .await
+            }
+        },
+        // The CA's public certificate. The content type is what makes iOS
+        // offer to install it rather than render it as text.
+        "/ca.crt" => match ctx.tls.as_ref() {
+            Some(tls) => {
+                respond(
+                    stream,
+                    Status::OK,
+                    crate::install::CA_CONTENT_TYPE,
+                    tls.ca_cert_pem.as_bytes(),
+                )
+                .await
+            }
+            None => respond(stream, Status::NOT_FOUND, "text/plain; charset=utf-8", b"no certificate").await,
+        },
+        // Served on both listeners, ungated, and deliberately boring.
+        //
+        // Over TLS, *reaching this at all* proves the client validated our
+        // certificate — which is only possible if the root is both installed
+        // and trusted. That is the entire signal; the body is irrelevant.
+        // Over plain HTTP it answers a different question, asked first: can the
+        // phone reach this machine by name at all? Separating those two is what
+        // lets the install page tell "your network is blocking mDNS" apart from
+        // "you missed the trust step", which are the same symptom otherwise.
+        //
+        // The cross-origin header is required rather than lax: the page asking
+        // is on the HTTP origin and the answer is on the HTTPS one, so the
+        // check is cross-origin by construction. Nothing is disclosed by it.
+        // The acceptance instrument. Meaningful only over TLS — asked over
+        // plain HTTP it always answers "not secure", which is true and useless.
+        // Ungated for the same reason as `/install`: it is a diagnostic a user
+        // needs precisely when nothing else is working.
+        "/secure-check" => {
+            let body = crate::install::secure_check_page();
+            respond(stream, Status::OK, "text/html; charset=utf-8", body.as_bytes()).await
+        }
+        "/trustcheck" => {
+            // The body carries this process's nonce, so the asking page can
+            // confirm it reached *this* bridge. Two instances both register
+            // `coyote.local`; without it, one bridge's install page can certify
+            // another's listener and send the phone there with a token it has
+            // never seen — arriving as a 401 and debugged as an auth bug.
+            let body = match ctx.tls.as_ref() {
+                Some(tls) => format!(
+                    "{} {}",
+                    crate::install::TRUSTCHECK_BODY,
+                    tls.instance_nonce
+                ),
+                None => crate::install::TRUSTCHECK_BODY.to_string(),
+            };
+            respond_with_headers(
+                stream,
+                Status::OK,
+                "text/plain; charset=utf-8",
+                "Access-Control-Allow-Origin: *\r\n",
+                body.as_bytes(),
+            )
+            .await
+        }
+        // Landing on the app over plain HTTP is always a wrong turn, so send
+        // them where they were going.
+        //
+        // The SPA fallback answers every unknown path with the app, which is
+        // what it is for — but on the plaintext listener it means every wrong
+        // turn in the pairing flow ends at an app that *looks* like it is
+        // working and can never reach the Coyote, because Web Bluetooth needs a
+        // secure context. That is the shape that produced the original QR
+        // incident: a scan led straight to the app and never mentioned the
+        // certificate.
+        //
+        // Only the root, and only when TLS is actually up, so the plain-HTTP
+        // path stays debuggable — which is a stated reason it exists.
+        "/" | "/index.html" if !secure && ctx.tls.is_some() => {
+            respond_with_headers(
+                stream,
+                Status::SEE_OTHER,
+                "text/plain; charset=utf-8",
+                "Location: /install\r\n",
+                b"the phone needs the setup page first",
+            )
+            .await
+        }
         // Ungated: static assets are the app itself, which has to load before
         // it can present anything. It reads the token from its own URL and
         // uses it for `/ws`, which is where the capability actually is.
@@ -718,14 +1058,43 @@ impl Status {
     }
 
     pub(crate) const OK: Self = Self::new(200, "OK");
+    /// The exchange is a side effect reached by GET, and 303 says plainly
+    /// "go and GET this other thing instead".
+    pub(crate) const SEE_OTHER: Self = Self::new(303, "See Other");
     pub(crate) const BAD_REQUEST: Self = Self::new(400, "Bad Request");
     pub(crate) const UNAUTHORIZED: Self = Self::new(401, "Unauthorized");
     pub(crate) const FORBIDDEN: Self = Self::new(403, "Forbidden");
     pub(crate) const NOT_FOUND: Self = Self::new(404, "Not Found");
     pub(crate) const METHOD_NOT_ALLOWED: Self = Self::new(405, "Method Not Allowed");
+    /// A pairing link this bridge does not recognise — usually a QR left over
+    /// from an earlier run. 410 rather than 404 says the page is fine and
+    /// *this link* is finished, which is what a stale QR actually is.
+    pub(crate) const GONE: Self = Self::new(410, "Gone");
     pub(crate) const PAYLOAD_TOO_LARGE: Self = Self::new(413, "Payload Too Large");
     pub(crate) const HEADERS_TOO_LARGE: Self = Self::new(431, "Request Header Fields Too Large");
     pub(crate) const INTERNAL_ERROR: Self = Self::new(500, "Internal Server Error");
+}
+
+/// Send the phone on to the app, optionally setting a cookie on the way.
+///
+/// A redirect rather than serving the app here, so **the token leaves the
+/// address bar**. Landing on `/pair/exchange?t=…` and staying there would leave
+/// a password-equivalent string in history, in the share sheet, and in whatever
+/// the user pastes when asking for help — for a credential that has already
+/// been superseded by the cookie.
+async fn redirect_to_app<W>(stream: &mut W, set_cookie: Option<String>) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let extra = set_cookie.unwrap_or_default() + "Location: /\r\n";
+    respond_with_headers(
+        stream,
+        Status::SEE_OTHER,
+        "text/plain; charset=utf-8",
+        &extra,
+        b"paired",
+    )
+    .await
 }
 
 pub(crate) async fn respond<W>(
@@ -737,21 +1106,57 @@ pub(crate) async fn respond<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    respond_with_headers(stream, status, content_type, "", body).await
+}
+
+/// As [`respond`], plus `extra` header lines (each `\r\n`-terminated).
+///
+/// One route needs a header the others must not have. Keeping it a per-route
+/// opt-in is the point: the blanket version of this was the bug.
+pub(crate) async fn respond_with_headers<W>(
+    stream: &mut W,
+    status: Status,
+    content_type: &str,
+    extra: &str,
+    body: &[u8],
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let Status {
         code: status,
         reason,
     } = status;
-    // No `Access-Control-Allow-Origin: *`. It was there to make a browser on
-    // another origin able to read these responses, which is precisely the
-    // thing that should not happen: it let any page in any tab read `/healthz`
-    // and learn the media URL and LAN address. Same-origin requests do not
-    // need the header, and nothing legitimate here is cross-origin.
+    // No blanket `Access-Control-Allow-Origin: *`. It was there to make a
+    // browser on another origin able to read these responses, which is
+    // precisely the thing that should not happen: it let any page in any tab
+    // read `/healthz` and learn the media URL and LAN address.
+    //
+    // `Referrer-Policy` is set explicitly rather than left to the browser
+    // default. The pairing URL carries the token in its query string, and a
+    // default of `strict-origin-when-cross-origin` still sends the full URL on
+    // *same-origin* requests — so every asset the install page loads would
+    // carry the token in a `Referer`. Stating the policy costs one header and
+    // does not depend on which browser is reading.
+    //
+    // Exactly one route is legitimately cross-origin — `/trustcheck`, which is
+    // *asked* from the plain-HTTP install page about the HTTPS listener, and so
+    // is cross-origin by construction. It passes the header through `extra`
+    // rather than reinstating it for everything.
+    //
+    // `Referrer-Policy` is explicit rather than left to the browser default.
+    // The pairing URL carries the token in its query string, and a default of
+    // `strict-origin-when-cross-origin` still sends the full URL on
+    // *same-origin* requests — so every asset the install page loads would
+    // carry the token in a `Referer`.
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Cache-Control: no-store\r\n\
          X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         {extra}\
          Connection: close\r\n\r\n",
         body.len()
     );
@@ -1032,10 +1437,17 @@ const MAX_HEAD_BYTES: usize = 16 * 1024;
 /// routed normally — and any header that had not arrived, including `Origin`,
 /// simply appeared absent. `origin_is_acceptable(None, …)` deliberately allows
 /// a missing `Origin` so native clients work, so a phone on flaky Wi-Fi whose
-/// head straddled a stall was served on half its headers. The token was still
-/// required, so this was never an auth bypass, but "served on partial
-/// headers" is not a state worth having, and its likely symptom was a
-/// mysterious 401 blamed on the token.
+/// head straddled a stall was served on half its headers.
+///
+/// **That was only ever safe because a token in the query was also required,
+/// and it no longer is.** A truncated head can now lose `Cookie` as easily as
+/// `Origin`, and a request arriving with a cookie and no `Origin` is precisely
+/// the CSRF shape `authorised` now refuses — so treating a partial head as a
+/// complete one would turn a stalled read into an authorisation decision made
+/// on headers that had not arrived yet.
+///
+/// Do not relax this on the grounds recorded in the previous sentence of this
+/// comment's earlier version. The premise it rested on is gone.
 enum Head {
     /// Terminated by `\r\n\r\n`. The only complete outcome.
     Complete(Vec<u8>),
@@ -1376,6 +1788,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_plaintext_root_sends_the_phone_to_setup_rather_than_the_app() {
+        // The SPA fallback answers every unknown path with the app, which is
+        // what it is for. On the plaintext listener it meant every wrong turn
+        // ended at an app that looks like it is working and can never reach the
+        // Coyote — the shape that produced the original QR incident, where a
+        // scan led straight to the app and never mentioned the certificate.
+        let mut ctx = test_ctx();
+        ctx.tls = Some(Arc::new(crate::install::TlsPublicInfo {
+            ca_cert_pem: String::new(),
+            ca_display_name: "test".into(),
+            hostname: "coyote.local".into(),
+            http_port: 8787,
+            https_port: 8443,
+            ip: None,
+            instance_nonce: "nonce".into(),
+        }));
+
+        let mut out = Vec::new();
+        route(&mut out, "/", None, None, false, &ctx).await;
+        let response = String::from_utf8_lossy(&out);
+        assert!(response.starts_with("HTTP/1.1 303"), "got: {response}");
+        assert!(response.contains("Location: /install"));
+
+        // Over TLS the root is the app, and must stay so.
+        let mut secure_out = Vec::new();
+        route(&mut secure_out, "/", None, None, true, &ctx).await;
+        let secure = String::from_utf8_lossy(&secure_out);
+        assert!(
+            !secure.contains("Location: /install"),
+            "the secure origin serves the app, not the setup page"
+        );
+    }
+
     fn test_ctx() -> Ctx {
         let (_snap_tx, snapshot_rx) = watch::channel(PlayerSnapshot::new("127.0.0.1:23554".into()));
         let (cmd_tx, _cmd_rx) = mpsc::channel(4);
@@ -1388,6 +1834,15 @@ mod tests {
             token: std::sync::RwLock::new(Token::generate()),
             allowed_hosts: vec!["192.168.0.9:8787".into()],
             on_token_rotated: None,
+            tls: None,
+            // A scratch store: these tests must not be able to pair a device
+            // into a developer's real bridge.
+            devices: Arc::new(crate::devices::DeviceStore::load(
+                std::env::temp_dir().join(format!(
+                    "coyote-bridge-unit-devices-{}.json",
+                    std::process::id()
+                )),
+            )),
         }
     }
 
@@ -1436,11 +1891,11 @@ mod tests {
         let ctx = test_ctx();
         let old = ctx.token();
         let target = format!("/healthz?t={old}");
-        assert!(authorised(&target, None, &ctx));
+        assert!(authorised(&target, None, None, &ctx));
 
         ctx.rotate_token();
         assert!(
-            !authorised(&target, None, &ctx),
+            !authorised(&target, None, None, &ctx),
             "a revoked token must be refused"
         );
     }

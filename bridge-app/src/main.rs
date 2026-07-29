@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use coyote_bridge::auth;
 use coyote_bridge::supervisor::{self, BridgeHandle};
 use coyote_bridge::wire::{Tap, WireEvent};
-use coyote_bridge::{http, log_info, log_warn, logging};
+use coyote_bridge::{http, log_info, log_warn, logging, mdns, tls};
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 use tokio::net::TcpListener;
@@ -76,6 +76,11 @@ pub struct AppState {
     /// the other direction — a trust-check page that rendered in full and then
     /// blamed the certificate for a listener that had never bound.
     pub http_status: Mutex<HttpStatus>,
+    /// Per-device credentials, so revoke means "this phone" rather than
+    /// "everything". See `coyote_bridge::devices`.
+    pub devices: Arc<coyote_bridge::devices::DeviceStore>,
+    /// Whether the phone can get a secure context. See [`TlsStatus`].
+    pub tls_status: Mutex<TlsStatus>,
     /// The serving context, once the listener is up. Holds the live token, so
     /// anything that needs the current pairing URL asks here rather than
     /// caching a copy that revocation cannot reach.
@@ -99,6 +104,29 @@ impl HttpStatus {
     }
 }
 
+/// Whether the phone can get a secure context, which is what Web Bluetooth
+/// requires.
+///
+/// The same three states as [`HttpStatus`], and for the same reason. This began
+/// as a `tls_ready: bool` on `Urls`, set from "a certificate was issued" before
+/// the TLS listener had bound — so a taken 8443 left the window saying the
+/// phone was ready to pair while nothing was listening. Exactly the shape
+/// `HttpStatus` exists to prevent, reintroduced one field over.
+///
+/// `NotConfigured` is separate from `Failed` because they need different
+/// sentences: one is a choice, the other is a fault.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum TlsStatus {
+    /// The bind has not returned yet.
+    Starting,
+    /// Listening, with a certificate the phone can install.
+    Serving,
+    /// Deliberately off, or no certificate could be made.
+    NotConfigured { detail: String },
+    Failed { detail: String },
+}
+
 pub struct FakePlayer {
     /// Tauri's handle, not tokio's: the task is spawned on Tauri's runtime so
     /// it shares a reactor with everything else here.
@@ -116,6 +144,7 @@ pub struct Urls {
     /// What this machine should open.
     pub local: String,
     pub http_port: u16,
+    pub https_port: u16,
 }
 
 impl AppState {
@@ -171,21 +200,100 @@ fn main() {
             let token = settings.token();
             settings.save(&settings_path);
 
-            let advertised = http::local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-            let base = format!("http://{advertised}:{http_port}");
+            let https_port = settings.https_port;
+            // `None` when there is no routable address, and it stays `None`.
+            // Loopback was the old fallback and it is the worst option: it goes
+            // into the certificate's IP SAN *and* gets announced as
+            // `coyote.local`, so a phone that resolves the name connects to
+            // itself and reports the bridge unreachable — while everything on
+            // this machine looks correct.
+            let advertised = http::local_ip();
+
+            // The certificate has to exist before the QR is built, because it
+            // decides where the QR points. A failure here costs the phone Web
+            // Bluetooth and nothing else, so it is reported rather than fatal.
+            // Kept separate from `prepared` so the window can distinguish
+            // "deliberately off" from "could not make one", which need
+            // different sentences.
+            let mut tls_unavailable: Option<String> = None;
+            let prepared = match tls::prepare(&config_dir, http_port, https_port, advertised) {
+                Ok(prepared) => Some(prepared),
+                Err(e) => {
+                    log_warn!(
+                        "[app] could not set up TLS ({e}); serving plain HTTP only. \
+                         The phone will not be able to use Bluetooth until this is fixed."
+                    );
+                    tls_unavailable = Some(e);
+                    None
+                }
+            };
+
+            // Answers `coyote.local`, so the phone's saved URL survives DHCP
+            // moving this machine. Windows' own responder is not usable here —
+            // it advertises a virtual adapter. See `coyote_bridge::mdns`.
+            // The responder follows the address. A certificate that moved
+            // while the name did not would leave `coyote.local` stable and
+            // wrong, which is worse than unstable and right — nothing about
+            // that failure points at DNS.
+            let (advertised_tx, advertised_rx) =
+                tokio::sync::watch::channel(advertised.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+            let advertise = tls::Advertise {
+                pinned: None,
+                mdns_tx: Some(advertised_tx),
+            };
+            let mut using_mdns = false;
+            if prepared.is_some() {
+                // Skipped without an address: announcing a name we cannot back
+                // with a reachable one is worse than not answering.
+                if let Some(responder) = advertised.and_then(|ip| mdns::start(ip, https_port)) {
+                    using_mdns = true;
+                    // Tauri's spawn, not tokio's: `setup()` runs before any
+                    // runtime has been entered, so a bare `tokio::spawn` here
+                    // panics with "there is no reactor running" — on the
+                    // default launch path.
+                    tauri::async_runtime::spawn(mdns::follow(responder, advertised_rx));
+                }
+            }
+
+            // The name goes on the QR, not the address — now that the name is
+            // proven on a real iPhone. It survives DHCP moving this machine,
+            // which is the entire reason the responder exists; an IP would hand
+            // the phone a bookmark that breaks on the next lease, and a changed
+            // origin wipes OPFS, the PWA install and the Bluetooth grant.
+            //
+            // The address remains the fallback for networks that eat multicast.
+            let pairing_host = if using_mdns {
+                coyote_bridge::certs::BRIDGE_HOSTNAME.to_string()
+            } else {
+                advertised
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "127.0.0.1".to_string())
+            };
+            let base = format!("http://{pairing_host}:{http_port}");
+
             let urls = Urls {
                 // Without the token. The full URL grants access, so it is
                 // derived on demand from the live token rather than captured
                 // here where revocation could not reach it.
-                pairing_base: base.clone(),
+                //
+                // The path is part of the base: when TLS is up the QR points at
+                // the install page on **plain HTTP**, not at HTTPS. A phone that
+                // has not yet trusted the local CA meets a full-page certificate
+                // interstitial with no route back to the instructions —
+                // stranded exactly when it needs help. The install page hands it
+                // on to HTTPS once trust is verified.
+                pairing_base: coyote_bridge::install::pairing_base(&base, prepared.is_some()),
                 local: format!("http://127.0.0.1:{http_port}"),
                 http_port,
+                https_port,
             };
-            let allowed_hosts = vec![
-                format!("{advertised}:{http_port}"),
-                format!("127.0.0.1:{http_port}"),
-                format!("localhost:{http_port}"),
-            ];
+            // Recorded before `tls_unavailable` is moved into `serve_http`.
+            let tls_missing = tls_unavailable.is_some();
+
+            // Every origin the phone can legitimately present. Omitting the
+            // HTTPS ones would let the app load and then have its own
+            // WebSocket refused, which reads as a bridge fault and is not one.
+            let allowed_hosts = tls::browser_origins(advertised, http_port, https_port);
 
             // One live tap, shared by the player client and the fake player,
             // so a cross-check run reads as a single conversation rather than
@@ -207,7 +315,14 @@ fn main() {
                 settings_path,
                 fake_player: Mutex::new(None),
                 urls: urls.clone(),
+                devices: Arc::new(coyote_bridge::devices::DeviceStore::load(
+                    coyote_bridge::devices::devices_path(&config_dir),
+                )),
                 http_status: Mutex::new(HttpStatus::Starting),
+                // `Starting` even when no certificate exists: the listener has
+                // not been attempted yet either way, and the state is corrected
+                // below once the answer is actually known.
+                tls_status: Mutex::new(TlsStatus::Starting),
                 http_ctx: Mutex::new(None),
             });
             app.manage(Arc::clone(&state));
@@ -227,6 +342,9 @@ fn main() {
                 http_port,
                 token,
                 allowed_hosts,
+                prepared,
+                advertise,
+                tls_unavailable,
             );
             forward_events(app.handle().clone(), bridge, wire_rx);
             tray::install(app.handle(), &urls)?;
@@ -237,6 +355,11 @@ fn main() {
                 "[app] bridge window ready; phone should open {}",
                 auth::redact_url(&state.pairing_url())
             );
+            if tls_missing {
+                log_warn!(
+                    "[app] no certificate — the phone can open the app but not use Bluetooth"
+                );
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -327,9 +450,16 @@ fn serve_http(
     port: u16,
     token: auth::Token,
     allowed_hosts: Vec<String>,
+    prepared: Option<tls::Prepared>,
+    advertise: tls::Advertise,
+    // Why no certificate exists, when none does. Carried so the window can say
+    // which of the two it is — a choice or a fault.
+    tls_unavailable: Option<String>,
 ) {
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
     let pairing_base = state.urls.pairing_base.clone();
+    let https_port = state.urls.https_port;
+    let devices = Arc::clone(&state.devices);
     let snapshot_rx = state.bridge.snapshot_rx.clone();
     let cmd_tx = state.bridge.cmd_tx.clone();
 
@@ -353,6 +483,53 @@ fn serve_http(
         match TcpListener::bind(bind).await {
             Ok(listener) => {
                 log_info!("[app] serving the phone app on http://{bind}");
+
+                // Bind TLS *before* building the context, so `ctx.tls`
+                // describes a listener that exists rather than one we meant to
+                // start. With it the other way round, a port already in use
+                // left the install page fully rendered and its trust check
+                // reporting a stage-2 failure as "you missed the trust step" —
+                // sending the user to reinstall a certificate that was never
+                // the problem, with nothing anywhere saying HTTPS was not
+                // running.
+                let (https, tls_state) = match prepared {
+                    Some(prepared) => {
+                        match tls::bind(IpAddr::V4(Ipv4Addr::UNSPECIFIED), https_port).await {
+                            Ok(listener) => (Some((listener, prepared)), TlsStatus::Serving),
+                            Err(e) => {
+                                log_warn!(
+                                    "[app] {e}; serving plain HTTP only, so the phone cannot use \
+                                     Bluetooth. The install page will say HTTPS is not running \
+                                     rather than blaming the certificate."
+                                );
+                                (
+                                    None,
+                                    TlsStatus::Failed {
+                                        detail: format!(
+                                            "{e}. Another bridge is probably already using port {https_port}."
+                                        ),
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    None => (
+                        None,
+                        TlsStatus::NotConfigured {
+                            detail: tls_unavailable
+                                .unwrap_or_else(|| "no certificate was created".to_string()),
+                        },
+                    ),
+                };
+                // Set from the bind result, never from the intent. A window
+                // saying the phone is ready to pair while nothing is listening
+                // on 8443 sends the user off to debug their phone, their Wi-Fi
+                // and eventually the certificate — everything except the
+                // listener that never started.
+                if let Ok(mut slot) = state.tls_status.lock() {
+                    *slot = tls_state;
+                }
+
                 let ctx = Arc::new(http::Ctx {
                     snapshot_rx,
                     cmd_tx,
@@ -362,6 +539,8 @@ fn serve_http(
                     token: std::sync::RwLock::new(token),
                     allowed_hosts,
                     on_token_rotated: Some(on_token_rotated),
+                    tls: https.as_ref().map(|(_, p)| Arc::clone(&p.public)),
+                    devices,
                 });
                 // Published before serving starts, so anything asking for the
                 // current pairing URL gets the live token rather than a copy.
@@ -374,6 +553,22 @@ fn serve_http(
                 if let Ok(mut slot) = state.http_status.lock() {
                     *slot = HttpStatus::Serving;
                 }
+
+                // Both listeners share one context and one routing table.
+                // Plain HTTP is not a fallback to be retired: it carries the
+                // install page, which is the only thing an unpaired phone can
+                // reach.
+                if let Some((listener, prepared)) = https {
+                    log_info!("[app] serving TLS on port {https_port}");
+                    let (certs_tx, certs_rx) = tokio::sync::watch::channel(prepared.material);
+                    tauri::async_runtime::spawn(tls::keep_current(
+                        prepared.ca,
+                        certs_tx,
+                        advertise,
+                    ));
+                    tauri::async_runtime::spawn(tls::run(listener, Arc::clone(&ctx), certs_rx));
+                }
+
                 http::run(listener, ctx).await;
 
                 // `http::run` loops forever, so reaching here means the
@@ -391,7 +586,8 @@ fn serve_http(
                 // window can say the QR will not work rather than showing a
                 // QR that leads nowhere.
                 let message = format!(
-                    "could not serve on {bind}: {e}. If another bridge is                      already running, this one cannot take the port."
+                    "could not serve on {bind}: {e}. If another bridge is already \
+                     running, this one cannot take the port."
                 );
                 log_warn!("[app] {message}");
                 if let Ok(mut slot) = state.http_status.lock() {
