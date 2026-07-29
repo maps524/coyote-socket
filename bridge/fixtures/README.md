@@ -77,3 +77,59 @@ decision to make deliberately rather than by omission.** Substituting a
 placeholder filename would keep the framing and cadence evidence intact and
 cost only the "the filename survives" observation, which could be restated in
 prose.
+
+## `ums-browse-2026-07-29.soap.xml`
+
+A verbatim `Browse` response from **Universal Media Server 15.7.0** (Linux),
+`ObjectID` 134, `RequestedCount` 3. Committed whole, unparsed and untrimmed.
+
+It is the evidence for `upnp.rs`'s claims about what a real ContentDirectory
+returns, and it exists because a hand-written fixture was being cited for them.
+
+### What it settles
+
+- **Every video carries six `<res>`: one `video/mp4` and five thumbnails**, two
+  PNG and three JPEG. That ratio is why `choose_res` filters resources by the
+  item's `upnp:class` before ranking anything — without it a video whose own
+  resource leaves `DLNA.ORG_OP` unstated can lose to a 160x160 PNG, and the
+  picker hands a still image to a `<video>` element.
+- **A container carries thumbnails too**, five of them, which is why the counts
+  differ depending on whether you count per item or per document.
+- **UMS offers no Matroska at all.** See below.
+
+### The correction it forced
+
+`upnp.rs` used to say that Universal Media Server lists `video/x-matroska`
+ahead of `video/mp4` for the same item. It does not. That claim came from
+`BROWSE_RESPONSE` in the module's own tests — a **hand-written** document,
+written specifically to exercise the Matroska exclusion — and it travelled from
+there into a doc comment and then into a pull-request description as evidence
+about a real server.
+
+The exclusion is still right for servers that do offer Matroska. The claim about
+this one was not, and only fetching the real bytes caught it.
+
+### The rule that follows
+
+**A fixture is an assertion about the world, not an observation of it.** It
+agrees with you because you wrote it to. The trap is that a fixture and a
+capture are indistinguishable at the point of use — same directory, same
+extension, same shape — so a test passing against a hand-written response feels
+exactly like a test passing against a recorded one.
+
+- Hand-written fixtures say **"hand-written"** in a comment, at the top.
+  `BROWSE_RESPONSE` now does.
+- Captures say what they came from, when, and which version.
+- **Never cite a fixture as evidence about the world.** It is evidence about the
+  code's behaviour on an input, which is a different sentence.
+- **Keep captures whole.** A trimmed capture is a fixture again: what was
+  trimmed was chosen, and the choice is the assertion. This file is mostly
+  thumbnails, which is exactly the part that would have been cut as noise — and
+  exactly the part that mattered.
+
+## `proxy-probe.html`
+
+Not a recording. A page that loads a proxied video, plays it, seeks, and reads a
+frame back through a canvas, so that "seeked" means a decoded picture rather
+than a `currentTime` that changed. `../README.md` has how to run it and the trap
+that `--dump-dom` does not work for media.
