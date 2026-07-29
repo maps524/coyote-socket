@@ -58,7 +58,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::log_info;
+use crate::{log_info, log_warn};
 
 /// The cookie the app presents on every request and every socket upgrade.
 pub const COOKIE_NAME: &str = "coyote_device";
@@ -118,17 +118,61 @@ pub struct DeviceStore {
 }
 
 impl DeviceStore {
+    /// Load the credential file, distinguishing **"no file"** from
+    /// **"unreadable file"**.
+    ///
+    /// These are not the same event and must not produce the same silence. No
+    /// file is a first run. An unreadable file is every paired device being
+    /// un-paired at once — and the phone's symptom is a refused socket, close
+    /// 1006, "bridge unreachable", which is precisely the misattribution this
+    /// whole change exists to remove.
+    ///
+    /// `LocalCa::load_or_generate` already gives losing the CA this treatment.
+    /// This is the same class of loss and it was being swallowed by an
+    /// `.ok().unwrap_or_default()` chain.
+    ///
+    /// It still starts empty, because refusing to run would be worse — but the
+    /// operator is told, and the damaged file is kept rather than overwritten
+    /// so it can be inspected.
     pub fn load(path: PathBuf) -> Self {
-        let devices = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<DeviceFile>(&text).ok())
-            .map(|file| {
-                file.devices
+        let devices = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<DeviceFile>(&text) {
+                Ok(file) => file
+                    .devices
                     .into_iter()
                     .map(|d| (d.id.clone(), d))
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect(),
+                Err(e) => {
+                    // Keep the damaged file. The next write renames over it, so
+                    // copy it aside first — this is the only evidence of what
+                    // the devices were.
+                    let salvage = path.with_extension("corrupt");
+                    let saved = std::fs::copy(&path, &salvage).is_ok();
+                    log_warn!(
+                        "[devices] {} could not be parsed ({e}), so NO devices are paired and \
+                         every phone must pair again. {} \
+                         A phone in this state reports the bridge as unreachable; it is not.",
+                        path.display(),
+                        if saved {
+                            format!("The damaged file was copied to {}.", salvage.display())
+                        } else {
+                            "The damaged file could not be copied aside.".to_string()
+                        }
+                    );
+                    HashMap::new()
+                }
+            },
+            // A missing file is an ordinary first run and says nothing.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => {
+                log_warn!(
+                    "[devices] {} could not be read ({e}), so no devices are paired and every \
+                     phone must pair again.",
+                    path.display()
+                );
+                HashMap::new()
+            }
+        };
         Self {
             path,
             devices: RwLock::new(devices),
@@ -258,6 +302,40 @@ impl DeviceStore {
         Ok(removed)
     }
 
+    /// Un-pair every device at once.
+    ///
+    /// # Why this has to exist next to token rotation
+    ///
+    /// Rotating the pairing token stops the *token* being usable. It does
+    /// **nothing** to credentials already issued from it — verified: a cookie
+    /// obtained before a rotation still authorises afterwards.
+    ///
+    /// That matters because of how the token is exposed. The QR necessarily
+    /// points at plain HTTP, so anyone on the LAN at that moment can read it.
+    /// Before per-device credentials, rotating closed that window. Now an
+    /// eavesdropper who catches the token can exchange it once for a credential
+    /// of their own, and **rotation does not reach it**. Rotation stops future
+    /// pairings; only this stops the ones already made.
+    ///
+    /// So the honest pair of actions is: *rotate* to invalidate the QR, and
+    /// *revoke all* to invalidate what the QR has already produced. Neither
+    /// implies the other, and a UI offering only rotation promises something it
+    /// does not deliver.
+    ///
+    /// Like [`Self::revoke`], this is only half. **The caller must also close
+    /// the live sockets** — `ClientRegistry::revoke` for each returned id.
+    pub fn revoke_all(&self) -> Result<Vec<String>, String> {
+        let ids = self.commit(|devices| {
+            let ids: Vec<String> = devices.keys().cloned().collect();
+            devices.clear();
+            ids
+        })?;
+        if !ids.is_empty() {
+            log_info!("[devices] revoked all {} paired device(s)", ids.len());
+        }
+        Ok(ids)
+    }
+
     /// Change the credential set: write the new state to disk, **then** commit
     /// it to memory.
     ///
@@ -299,7 +377,17 @@ impl DeviceStore {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let tmp = self.path.with_extension(format!("tmp{}", std::process::id()));
+        // Unique **per call**, not per process. `process::id()` alone gave every
+        // concurrent writer in this process the same temp path, so two threads
+        // wrote the same file and both renamed it — measured as half of four
+        // concurrent mints failing, and at 64 the file left as invalid JSON
+        // with every credential lost. A counter is what makes the name unique;
+        // the pid only separates processes sharing a directory.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = self
+            .path
+            .with_extension(format!("tmp{}.{seq}", std::process::id()));
         std::fs::write(&tmp, text).map_err(|e| format!("writing devices: {e}"))?;
         std::fs::rename(&tmp, &self.path).map_err(|e| format!("installing devices: {e}"))?;
         Ok(())
@@ -487,6 +575,74 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_pairings_all_survive_a_reload() {
+        // Measured before the fix: at four-way concurrency half the mints
+        // returned Err; at 64, of 60 cookies handed out **none** survived a
+        // reload and the file was left as invalid JSON. Two causes — the
+        // snapshot and the replace were not one step, and every concurrent
+        // writer in the process built the *same* temp path from `process::id()`
+        // alone, so threads wrote one file and both renamed it.
+        //
+        // Not exotic: the clients panel drives `set_label` and `revoke` from the
+        // UI while sockets are pairing.
+        let s = std::sync::Arc::new(store("concurrent"));
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let s = std::sync::Arc::clone(&s);
+            handles.push(std::thread::spawn(move || s.mint().expect("mint must not fail under concurrency")));
+        }
+        let cookies: Vec<String> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread").0)
+            .collect();
+
+        assert_eq!(cookies.len(), 16);
+        assert_eq!(s.list().len(), 16, "every mint must be in the store");
+
+        // The real assertion: a credential handed to a phone must still work
+        // after a restart. Anything less means a device that paired
+        // successfully is told to pair again.
+        let path = s.path.clone();
+        drop(s);
+        let reloaded = DeviceStore::load(path.clone());
+        for cookie in &cookies {
+            let header = format!("{COOKIE_NAME}={cookie}");
+            assert!(
+                reloaded.verify(Some(&header)).is_some(),
+                "a credential issued to a phone must survive a reload"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_reported_rather_than_silently_emptied() {
+        // A corrupt file un-pairs every device at once. Starting empty is the
+        // right behaviour — refusing to run would be worse — but doing it
+        // silently means the operator's only clue is a phone reporting the
+        // bridge as unreachable, which is the misattribution this whole change
+        // exists to remove.
+        let path = std::env::temp_dir().join(format!(
+            "coyote-bridge-devices-corrupt-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, "{ not valid json").expect("write");
+
+        let s = DeviceStore::load(path.clone());
+        assert!(s.list().is_empty());
+        // The damaged file is preserved, because the next write renames over it
+        // and it is the only evidence of what was paired.
+        assert!(
+            path.with_extension("corrupt").exists(),
+            "the unreadable file must be kept for inspection"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("corrupt"));
+    }
+
+    #[test]
     fn a_revoke_that_cannot_be_written_does_not_take_effect_in_memory() {
         // The order matters and it used to be wrong. Mutating memory first and
         // persisting after means a failed write leaves the two disagreeing —
@@ -519,6 +675,28 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&s.path);
+    }
+
+    #[test]
+    fn revoke_all_reaches_what_token_rotation_cannot() {
+        // Rotation invalidates the QR. It does nothing to credentials already
+        // exchanged from it — so an eavesdropper who caught the token on the
+        // plain-HTTP first hop keeps access that rotation cannot touch. This is
+        // the action that reaches them.
+        let s = store("revoke-all");
+        let (a, _) = s.mint().expect("a");
+        let (b, _) = s.mint().expect("b");
+
+        let ids = s.revoke_all().expect("revoke all");
+        assert_eq!(ids.len(), 2, "the caller needs every id, to close every socket");
+        assert!(s.list().is_empty());
+
+        for cookie in [&a, &b] {
+            let header = format!("{COOKIE_NAME}={cookie}");
+            assert!(s.verify(Some(&header)).is_none());
+        }
+
+        let _ = std::fs::remove_file(&s.path);
     }
 
     #[test]

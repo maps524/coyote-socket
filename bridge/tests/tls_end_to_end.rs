@@ -573,3 +573,108 @@ async fn a_paired_device_opens_a_socket_with_no_token() {
     let first = ws.next().await.expect("a frame").expect("not an error");
     assert!(first.to_text().unwrap().contains("hello"));
 }
+
+#[tokio::test]
+async fn a_cookie_with_no_origin_header_does_not_authorise() {
+    // `SameSite=Lax` sends the cookie on cross-site **top-level navigations**,
+    // and a navigation carries no `Origin`. So before this, any page anywhere
+    // could `location = 'https://coyote.local:8443/pair/rotate'` and arrive
+    // with a valid cookie and no Origin — which authorised. Two successive
+    // drive-by rotations were demonstrated, each invalidating the QR and
+    // locking out any device mid-pairing.
+    //
+    // Same-origin policy stops the attacker reading the response, so it is
+    // denial of service rather than disclosure. That is still the failure this
+    // branch keeps trying to eliminate: a QR that silently stops working.
+    let (addr, ca_pem, token, _store) = serve_https("csrf-no-origin").await;
+    let origin = format!("https://127.0.0.1:{}", addr.port());
+    let cookie = pair(addr, &ca_pem, &token, &origin).await;
+
+    let with_origin =
+        https_get_with(addr, &ca_pem, "/healthz", Some(&origin), Some(&cookie)).await;
+    assert!(with_origin.starts_with("HTTP/1.1 200"));
+
+    let navigated = https_get_with(addr, &ca_pem, "/healthz", None, Some(&cookie)).await;
+    assert!(
+        navigated.starts_with("HTTP/1.1 401"),
+        "a cookie presented without an Origin is a navigation, not the app: {navigated}"
+    );
+}
+
+#[tokio::test]
+async fn a_native_client_with_a_token_still_needs_no_origin() {
+    // The other half of the rule, and the reason it is conditional rather than
+    // blanket. Scripts, `websocat` and the desktop app send no `Origin` and
+    // must keep working — they present a token, which an attacking page cannot
+    // obtain. Only the cookie path gets ambient authority from the browser, so
+    // only the cookie path needs the header.
+    let (addr, ca_pem, token, _store) = serve_https("csrf-native").await;
+    let response = https_get_with(
+        addr,
+        &ca_pem,
+        &format!("/healthz?t={}", token.as_str()),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "a native client with a token must not need an Origin: {response}"
+    );
+}
+
+#[tokio::test]
+async fn an_unpaired_device_can_find_out_that_it_is_unpaired() {
+    // The diagnosability hole. Every other route that could answer "am I
+    // paired?" is itself gated, so an unpaired device could not learn why it
+    // was failing — it just got 401, close 1006, and reported the bridge as
+    // unreachable, which is indistinguishable from a dead network.
+    //
+    // The concrete case is iOS giving a Home Screen install its own cookie jar:
+    // static assets are ungated so the app loads perfectly, and only the socket
+    // fails.
+    let (addr, ca_pem, token, _store) = serve_https("paired-probe").await;
+    let origin = format!("https://127.0.0.1:{}", addr.port());
+
+    let before = https_get_with(addr, &ca_pem, "/paired", Some(&origin), None).await;
+    assert!(before.starts_with("HTTP/1.1 200"), "must be ungated: {before}");
+    assert!(
+        before.contains(r#""paired":false"#),
+        "an unpaired device must be told so: {before}"
+    );
+
+    let cookie = pair(addr, &ca_pem, &token, &origin).await;
+    let after = https_get_with(addr, &ca_pem, "/paired", Some(&origin), Some(&cookie)).await;
+    assert!(after.contains(r#""paired":true"#), "got: {after}");
+}
+
+#[tokio::test]
+async fn the_paired_probe_discloses_nothing_beyond_the_answer() {
+    // It is ungated, so it must not leak. An unpaired caller learns they are
+    // unpaired, which they already knew. No id, no label, no count — those stay
+    // behind `/healthz`.
+    let (addr, ca_pem, token, _store) = serve_https("paired-discloses").await;
+    let origin = format!("https://127.0.0.1:{}", addr.port());
+    let cookie = pair(addr, &ca_pem, &token, &origin).await;
+    let id = cookie.split_once('=').unwrap().1.split_once('.').unwrap().0;
+
+    let body = https_get_with(addr, &ca_pem, "/paired", Some(&origin), Some(&cookie)).await;
+    assert!(!body.contains(id), "the device id must not appear: {body}");
+    assert!(!body.contains("createdMs"));
+    assert!(!body.contains("label"));
+}
+
+#[tokio::test]
+async fn responses_do_not_leak_the_token_through_a_referer() {
+    // The pairing URL carries the token in its query string, and a browser
+    // default of `strict-origin-when-cross-origin` still sends the full URL as
+    // `Referer` on *same-origin* requests — so every asset the install page
+    // loads would carry it. Stating the policy does not depend on which browser
+    // is reading.
+    let (addr, ca_pem, _token, _store) = serve_https("referrer").await;
+    let response = https_get_with(addr, &ca_pem, "/trustcheck", None, None).await;
+    assert!(
+        response.to_lowercase().contains("referrer-policy: no-referrer"),
+        "the policy must be explicit: {response}"
+    );
+}

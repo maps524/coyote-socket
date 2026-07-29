@@ -568,12 +568,26 @@ revocable, only rate-limited.** That is why the token was removed from the PWA
 manifest's `start_url`, and it applies unchanged to a "remember this device"
 option or a refresh-token design.
 
-- **Token exposure on the first hop.** The QR points at plain HTTP by
-  necessity, so the pairing token is readable by anyone on the LAN at that
-  moment. Per-device credentials narrow what that buys — a sniffer can pair a
-  device of their own, which is visible in the clients panel and individually
-  revocable, rather than silently becoming the same principal as the phone —
-  but it does not close it.
+- **Token exposure on the first hop, and what rotation does *not* fix.** The QR
+  points at plain HTTP by necessity, so the pairing token is readable by anyone
+  on the LAN at that moment.
+
+  **Correction to an earlier claim in this file.** It used to say rotation
+  narrowed that window "from forever to until the phone finishes pairing". That
+  was true of a shared token and is **false now**: rotation invalidates the
+  token, and does nothing to credentials already exchanged from it. Verified —
+  a cookie obtained before a rotation still authorises afterwards. An
+  eavesdropper who catches the QR token exchanges it once and holds access
+  rotation cannot reach.
+
+  Minting is deliberately not capped; pairing three devices from one QR is the
+  intended flow. The mitigation is that a sniffer's device is *visible* in the
+  clients panel and individually revocable, plus `DeviceStore::revoke_all` for
+  when you do not know which row is theirs.
+
+  **The two actions are not interchangeable and a UI must offer both:** rotate
+  to invalidate the QR, revoke-all to invalidate what the QR has already
+  produced. Offering only rotation promises something it does not deliver.
 
 - **Whether iOS partitions the Home Screen cookie jar. UNTESTED, and it decides
   a real behaviour.** If an installed web app gets storage separate from the
@@ -581,10 +595,18 @@ option or a refresh-token design.
   credential and must pair again.
 
   The obvious fix — putting the token in the manifest's `start_url` — was built
-  and then **deliberately removed**, because it lets a revoked device silently
-  re-pair itself on its next launch. That defeats the revocation the whole
-  per-device design exists to provide, and a speculative convenience is not
-  worth a hole in a security property. If partitioning turns out to be real, the
+  and then **deliberately removed**, for two reasons. The second is the one that
+  closes the idea permanently rather than conditionally:
+
+  1. It lets a revoked device silently re-pair itself on its next launch,
+     defeating the revocation the whole per-device design exists to provide.
+  2. **`serve_static` is ungated by design**, so a manifest carrying the token
+     would be readable at `GET /manifest.webmanifest` by anyone on the LAN with
+     no credential at all. That is not a subtle weakening — it is publishing the
+     pairing token on an open route.
+
+  Reason 1 alone invites the workaround "only inject on first launch". Reason 2
+  does not: the file is served to whoever asks, whenever they ask. If partitioning turns out to be real, the
   answer is to make the home-screen launch pair explicitly and visibly, not to
   hide a standing token in the manifest.
 

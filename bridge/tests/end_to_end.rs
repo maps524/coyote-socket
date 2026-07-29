@@ -519,7 +519,11 @@ async fn a_websocket_without_a_token_cannot_open() {
 /// exactly the thing users are encouraged to share.
 ///
 /// This asserts the property rather than the fix, so a future call site that
-/// logs a URL fails here rather than shipping.
+/// logs a URL fails here rather than shipping — **but only over the routes it
+/// actually drives.** A token-carrying route added later and not added here is
+/// covered by the docstring's claim and not by the test, which is worse than an
+/// obviously narrow test. Every route that takes a token belongs in the list
+/// below.
 #[tokio::test]
 async fn the_token_never_appears_in_the_log() {
     coyote_bridge::logging::init(Some(std::env::temp_dir().join("coyote-bridge-log-test")));
@@ -530,6 +534,11 @@ async fn the_token_never_appears_in_the_log() {
     let _ = get(&format!("{base}/healthz?t=wrong")).await;
     let _ = get(&format!("{base}/pair")).await;
     let _ = get(&format!("{base}/pair/rotate?t={token}")).await;
+    // Refused here because it is plaintext, but the request line is logged
+    // before the transport is checked — which is exactly the interesting case:
+    // a route can leak the token without ever succeeding.
+    let _ = get(&format!("{base}/pair/exchange?t={token}")).await;
+    let _ = get(&format!("{base}/install?t={token}")).await;
 
     let history = coyote_bridge::logging::history().join("\n");
     assert!(

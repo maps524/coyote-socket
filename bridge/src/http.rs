@@ -406,6 +406,35 @@ fn authorised(path_and_query: &str, origin: Option<&str>, cookie: Option<&str>, 
     if !auth::origin_is_acceptable(origin, &ctx.allowed_hosts) {
         return false;
     }
+
+    // The cookie path requires `Origin` to be **present**, not merely
+    // acceptable. The token path does not, and the difference is not an
+    // inconsistency — it is the whole defence.
+    //
+    // `origin_is_acceptable(None, …)` is `true` so that native clients (a
+    // script, `websocat`, the desktop app) can connect; they send no `Origin`
+    // and they still have to present a token an attacker cannot obtain.
+    //
+    // A cookie is different in kind, because **the browser attaches it for
+    // you**. `SameSite=Lax` deliberately sends it on cross-site *top-level
+    // navigations*, and a navigation carries no `Origin` header — so a page
+    // anywhere could do `location = 'https://coyote.local:8443/pair/rotate'`
+    // and arrive here with a valid cookie and no `Origin`, which under the old
+    // rule authorised. Demonstrated: two successive rotations from a drive-by,
+    // each invalidating the QR and locking out any device mid-pairing.
+    //
+    // Same-origin policy stops the attacker *reading* the response, so this is
+    // denial of service rather than disclosure — but a QR that silently stops
+    // working is exactly the failure this branch keeps trying to eliminate.
+    //
+    // Requiring the header costs nothing real: every browser sends `Origin` on
+    // `fetch` and on WebSocket upgrades, which is how the app actually talks to
+    // the bridge. Only navigations omit it, and no route here is meant to be
+    // reached by navigating to it with a credential.
+    if cookie.is_some() && origin.is_none() {
+        return false;
+    }
+
     if ctx.devices.verify(cookie).is_some() {
         return true;
     }
@@ -588,6 +617,35 @@ async fn route<W>(
                     }
                 }
             }
+        }
+        // "Am I paired?" — ungated, and it has to be.
+        //
+        // Every other route that could answer this is itself gated, so an
+        // unpaired device could not find out *why* it was failing. The concrete
+        // case: if iOS gives a Home Screen install its own cookie jar, the app
+        // launches, static assets serve fine because they are ungated, and then
+        // the socket goes out with no cookie — 401, close 1006, "bridge
+        // unreachable". Indistinguishable from a dead network, and the user goes
+        // to check their Wi-Fi.
+        //
+        // One boolean turns that into "this device isn't paired — scan the QR
+        // again". Gating it would be the same bootstrap deadlock as `/install`:
+        // asking for a credential to find out whether you have one.
+        //
+        // It discloses nothing. An unpaired caller learns they are unpaired,
+        // which they already knew; a paired one learns they are paired. No id,
+        // no label, no count — those are behind `/healthz`.
+        "/paired" => {
+            let paired = ctx.devices.verify(cookie).is_some();
+            let body = serde_json::json!({ "paired": paired }).to_string();
+            respond_with_headers(
+                stream,
+                200,
+                "application/json; charset=utf-8",
+                "Access-Control-Allow-Origin: *\r\n",
+                body.as_bytes(),
+            )
+            .await
         }
         "/qr.svg" => match qr::to_svg(&ctx.pairing_url()) {
             Ok(svg) => {
@@ -1011,6 +1069,13 @@ where
     // precisely the thing that should not happen: it let any page in any tab
     // read `/healthz` and learn the media URL and LAN address.
     //
+    // `Referrer-Policy` is set explicitly rather than left to the browser
+    // default. The pairing URL carries the token in its query string, and a
+    // default of `strict-origin-when-cross-origin` still sends the full URL on
+    // *same-origin* requests — so every asset the install page loads would
+    // carry the token in a `Referer`. Stating the policy costs one header and
+    // does not depend on which browser is reading.
+    //
     // Exactly one route is legitimately cross-origin — `/trustcheck`, which is
     // *asked* from the plain-HTTP install page about the HTTPS listener, and so
     // is cross-origin by construction. It passes the header through `extra`
@@ -1309,10 +1374,17 @@ const MAX_HEAD_BYTES: usize = 16 * 1024;
 /// routed normally — and any header that had not arrived, including `Origin`,
 /// simply appeared absent. `origin_is_acceptable(None, …)` deliberately allows
 /// a missing `Origin` so native clients work, so a phone on flaky Wi-Fi whose
-/// head straddled a stall was served on half its headers. The token was still
-/// required, so this was never an auth bypass, but "served on partial
-/// headers" is not a state worth having, and its likely symptom was a
-/// mysterious 401 blamed on the token.
+/// head straddled a stall was served on half its headers.
+///
+/// **That was only ever safe because a token in the query was also required,
+/// and it no longer is.** A truncated head can now lose `Cookie` as easily as
+/// `Origin`, and a request arriving with a cookie and no `Origin` is precisely
+/// the CSRF shape `authorised` now refuses — so treating a partial head as a
+/// complete one would turn a stalled read into an authorisation decision made
+/// on headers that had not arrived yet.
+///
+/// Do not relax this on the grounds recorded in the previous sentence of this
+/// comment's earlier version. The premise it rested on is gone.
 enum Head {
     /// Terminated by `\r\n\r\n`. The only complete outcome.
     Complete(Vec<u8>),
