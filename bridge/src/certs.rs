@@ -128,10 +128,19 @@ pub struct CertMaterial {
     pub server_config: Arc<ServerConfig>,
 }
 
-/// A loaded CA, kept so leaves can be re-issued without touching disk again.
+/// Where the issuer's identity comes from when signing a leaf.
+///
+/// A freshly generated CA still has its parameters in hand. A loaded one must
+/// take them from the certificate on disk — never from the environment, because
+/// the environment can change under a CA that cannot.
+enum IssuerSource {
+    Generated(Box<CertificateParams>),
+    Stored(String),
+}
+
 pub struct LocalCa {
     key_pair: KeyPair,
-    params: CertificateParams,
+    issuer_source: IssuerSource,
     cert_pem: String,
     display_name: String,
     /// Whether this CA was just created. The caller surfaces that differently
@@ -160,7 +169,11 @@ impl LocalCa {
         let key_path = dir.join(CA_KEY_FILE);
 
         if cert_path.exists() || key_path.exists() {
-            match Self::load(&cert_path, &key_path) {
+            // `verify_pair` is part of loading, not a separate nicety. Every
+            // way this can be broken on disk produces the same downstream
+            // symptom — the trust check telling the user they missed step 3 —
+            // so it has to be caught where the message can still be accurate.
+            match Self::load(&cert_path, &key_path).and_then(|ca| ca.verify_pair().map(|_| ca)) {
                 Ok(ca) => {
                     log_info!(
                         "[tls] using the existing local CA from {} — phones that already trust it need no action",
@@ -190,22 +203,60 @@ impl LocalCa {
         let key_pair =
             KeyPair::from_pem(&key_pem).map_err(|e| format!("parsing private key: {e}"))?;
 
-        // The distinguished name is rebuilt rather than parsed back out of the
-        // certificate: it is derived deterministically from the same inputs, so
-        // reconstructing it avoids a whole X.509 parser in the dependency tree
-        // for information we already know. It must match the stored
-        // certificate's subject, which is why `ca_params` is the single place
-        // the name is composed.
-        let display_name = display_name_for_host();
-        let params = ca_params(&display_name)?;
+        // The issuer is parsed **out of the stored certificate**, never rebuilt
+        // from the environment.
+        //
+        // An earlier version reconstructed the distinguished name from the
+        // machine's hostname, on the reasoning that it was derived
+        // deterministically from known inputs. It is not: renaming the machine
+        // changes `COMPUTERNAME`, which changed the reconstructed DN, which made
+        // every newly issued leaf claim an issuer that did not match the stored
+        // CA's subject. Path building then failed on every phone
+        // (`unable to get local issuer certificate`) while the log cheerfully
+        // reported "using the existing local CA — phones that already trust it
+        // need no action". A service install where `HOSTNAME` is unset hit the
+        // same thing through the fallback string.
+        //
+        // Parsing costs a feature flag. Reconstruction cost correctness.
+        let display_name = subject_common_name(&cert_pem).unwrap_or_else(display_name_for_host);
 
         Ok(Self {
             key_pair,
-            params,
+            issuer_source: IssuerSource::Stored(cert_pem.clone()),
             cert_pem,
             display_name,
             freshly_generated: false,
         })
+    }
+
+    /// Prove the loaded key and certificate are actually a pair.
+    ///
+    /// They can disagree: `generate` writes two files, and two instances racing
+    /// against an empty directory can interleave so that one CA's key sits
+    /// beside another's certificate. Both files parse, loading succeeds, and
+    /// every served chain then fails `certificate signature failure` — which
+    /// reaches the user as the trust check saying they missed step 3, so they
+    /// reinstall a certificate that was never the problem and it never works.
+    ///
+    /// Comparing the certificate's `SubjectPublicKeyInfo` with the one derived
+    /// from the loaded private key is exact and total: if they match, the key
+    /// signed that certificate; if they do not, nothing this CA signs will ever
+    /// validate. It costs a few hundred bytes of parsing at startup.
+    fn verify_pair(&self) -> Result<(), String> {
+        use rcgen::PublicKeyData;
+
+        let der = pem_to_der(&self.cert_pem)?;
+        let (_, parsed) = x509_parser::parse_x509_certificate(&der)
+            .map_err(|e| format!("parsing the stored CA certificate: {e}"))?;
+
+        let in_cert = parsed.tbs_certificate.subject_pki.raw;
+        let from_key = self.key_pair.subject_public_key_info();
+
+        if in_cert == from_key.as_slice() {
+            Ok(())
+        } else {
+            Err("the stored private key does not match the stored certificate".to_string())
+        }
     }
 
     fn generate(dir: &Path) -> Result<Self, String> {
@@ -219,9 +270,26 @@ impl LocalCa {
         let cert_pem = cert.pem();
 
         std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-        write_private(&dir.join(CA_KEY_FILE), &key_pair.serialize_pem())?;
-        std::fs::write(dir.join(CA_CERT_FILE), &cert_pem)
+
+        // Write to temporaries and rename into place. Two bridges starting
+        // together against an empty directory would otherwise interleave — one
+        // writing its key between the other's key and certificate — leaving a
+        // key and a certificate that both parse and are not a pair. Rename is
+        // atomic on both platforms, so a reader sees either the old file or the
+        // complete new one and never a half-written pair.
+        let key_tmp = dir.join(format!("{CA_KEY_FILE}.tmp{}", std::process::id()));
+        let cert_tmp = dir.join(format!("{CA_CERT_FILE}.tmp{}", std::process::id()));
+        write_private(&key_tmp, &key_pair.serialize_pem())?;
+        std::fs::write(&cert_tmp, &cert_pem)
             .map_err(|e| format!("writing the CA certificate: {e}"))?;
+        // Certificate first: if the process dies between the two renames, the
+        // next run sees a certificate without a key, which `load` rejects and
+        // reports — rather than a key without a certificate, which looks like a
+        // fresh directory and would silently mint a second CA.
+        std::fs::rename(&cert_tmp, dir.join(CA_CERT_FILE))
+            .map_err(|e| format!("installing the CA certificate: {e}"))?;
+        std::fs::rename(&key_tmp, dir.join(CA_KEY_FILE))
+            .map_err(|e| format!("installing the CA private key: {e}"))?;
 
         log_info!(
             "[tls] generated a new local CA \"{display_name}\" in {}. \
@@ -231,7 +299,7 @@ impl LocalCa {
 
         Ok(Self {
             key_pair,
-            params,
+            issuer_source: IssuerSource::Generated(Box::new(params)),
             cert_pem,
             display_name,
             freshly_generated: true,
@@ -279,17 +347,29 @@ impl LocalCa {
         ];
 
         let now = OffsetDateTime::now_utc();
-        // Backdated an hour so a phone whose clock runs slightly behind does
-        // not reject a certificate issued seconds ago.
-        params.not_before = now - Duration::hours(1);
+        // Backdated a day, not an hour. A phone whose clock is behind rejects a
+        // certificate that is not yet valid, and reports it exactly like an
+        // untrusted one — so the user is told they missed the trust step and
+        // reinstalls a certificate that was always fine. An hour covers drift;
+        // a day covers a phone that has been in a drawer or a machine whose RTC
+        // is out. It costs nothing.
+        params.not_before = now - Duration::days(1);
         params.not_after = now + Duration::days(LEAF_VALIDITY_DAYS);
 
         let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
             .map_err(|e| format!("generating the leaf key: {e}"))?;
-        let issuer = Issuer::from_params(&self.params, &self.key_pair);
-        let leaf = params
-            .signed_by(&leaf_key, &issuer)
-            .map_err(|e| format!("signing the leaf: {e}"))?;
+        let leaf = match &self.issuer_source {
+            IssuerSource::Generated(ca_params) => {
+                let issuer = Issuer::from_params(ca_params.as_ref(), &self.key_pair);
+                params.signed_by(&leaf_key, &issuer)
+            }
+            IssuerSource::Stored(pem) => {
+                let issuer = Issuer::from_ca_cert_pem(pem, &self.key_pair)
+                    .map_err(|e| format!("reading the stored CA as an issuer: {e}"))?;
+                params.signed_by(&leaf_key, &issuer)
+            }
+        }
+        .map_err(|e| format!("signing the leaf: {e}"))?;
 
         // Chain is leaf-then-CA. Sending the root is redundant for a device
         // that has already installed it and harmless for one that has not, and
@@ -355,9 +435,27 @@ fn ca_params(display_name: &str) -> Result<CertificateParams, String> {
     ];
 
     let now = OffsetDateTime::now_utc();
-    params.not_before = now - Duration::hours(1);
+    params.not_before = now - Duration::days(1);
     params.not_after = now + Duration::days(CA_VALIDITY_DAYS);
     Ok(params)
+}
+
+/// The common name recorded in a stored certificate.
+///
+/// This is what the install page tells the user to look for in iOS's
+/// Certificate Trust Settings, so it has to be what is actually *in* the
+/// certificate rather than what this machine would generate today. They differ
+/// the moment the machine is renamed.
+fn subject_common_name(cert_pem: &str) -> Option<String> {
+    let der = pem_to_der(cert_pem).ok()?;
+    // Bound to a local and converted to an owned `String` before `der` goes out
+    // of scope: everything x509-parser hands back borrows the DER it parsed.
+    let name = {
+        let (_, parsed) = x509_parser::parse_x509_certificate(&der).ok()?;
+        let cn = parsed.tbs_certificate.subject.iter_common_name().next()?;
+        cn.as_str().ok()?.to_string()
+    };
+    Some(name)
 }
 
 /// A name the user can recognise in Settings months from now.
@@ -451,6 +549,34 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 /// its own — one place to back up, one place to clear.
 pub fn tls_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("tls")
+}
+
+/// Where the headless binary keeps its CA when nobody said.
+///
+/// **Not the working directory.** That default put a private key in whatever
+/// folder the binary happened to be run from, which for a developer is a git
+/// checkout — one `git add -A` away from publishing a key that can impersonate
+/// any site to every phone that trusted it. The `.gitignore` covers the same
+/// ground, but a default that is safe only because of a `.gitignore` in one
+/// repository is not safe.
+///
+/// Falls back to the OS temp directory, which is wrong in a different and much
+/// louder way: the CA vanishes and the user is told the phone must reinstall.
+/// Better than quietly writing a key somewhere it can be published.
+pub fn default_config_dir() -> PathBuf {
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
+        })
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+        });
+
+    match base {
+        Some(base) => base.join("com.coyotesocket.bridge"),
+        None => std::env::temp_dir().join("com.coyotesocket.bridge"),
+    }
 }
 
 #[cfg(test)]
@@ -552,6 +678,82 @@ mod tests {
         assert!(
             needs_reissue(&names, &[ip], long_ago),
             "a bridge left running for a year must renew without the phone reinstalling"
+        );
+    }
+
+    #[test]
+    fn renaming_the_machine_does_not_break_the_chain() {
+        // Regression. The issuer used to be rebuilt from `COMPUTERNAME`, so a
+        // rename changed the reconstructed DN, every new leaf claimed an issuer
+        // that did not match the stored CA's subject, and path building failed
+        // on every phone — while the log said "using the existing local CA,
+        // phones need no action". Silent and permanent.
+        let dir = temp_dir("rename");
+        let first = LocalCa::load_or_generate(&dir).expect("generate");
+        let original_name = first.display_name().to_string();
+        drop(first);
+
+        std::env::set_var("COMPUTERNAME", "A-COMPLETELY-DIFFERENT-NAME");
+        let reloaded = LocalCa::load_or_generate(&dir).expect("reload after rename");
+
+        assert_eq!(
+            reloaded.display_name(),
+            original_name,
+            "the name must come from the stored certificate, not the environment — \
+             it is what the install page tells the user to look for in Settings"
+        );
+        // And it must still be able to sign.
+        reloaded
+            .issue_leaf(&[IpAddr::V4(Ipv4Addr::new(192, 168, 0, 9))])
+            .expect("a renamed machine must still issue working leaves");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_key_that_does_not_match_the_certificate_is_refused() {
+        // Reachable by two bridges starting together against an empty
+        // directory. Both files parse, so loading used to succeed and every
+        // served chain then failed `certificate signature failure` — which
+        // reaches the user as "you missed the trust step", so they reinstall a
+        // certificate that was never the problem and it never works.
+        let dir_a = temp_dir("pair-a");
+        let dir_b = temp_dir("pair-b");
+        let _a = LocalCa::load_or_generate(&dir_a).expect("A");
+        let _b = LocalCa::load_or_generate(&dir_b).expect("B");
+
+        // A's certificate beside B's key.
+        let frankendir = temp_dir("pair-mixed");
+        std::fs::create_dir_all(&frankendir).unwrap();
+        std::fs::copy(dir_a.join(CA_CERT_FILE), frankendir.join(CA_CERT_FILE)).unwrap();
+        std::fs::copy(dir_b.join(CA_KEY_FILE), frankendir.join(CA_KEY_FILE)).unwrap();
+
+        let loaded = LocalCa::load(
+            &frankendir.join(CA_CERT_FILE),
+            &frankendir.join(CA_KEY_FILE),
+        )
+        .expect("both files parse individually — that is the trap");
+        assert!(
+            loaded.verify_pair().is_err(),
+            "a mismatched key and certificate must be caught at load, where the \
+             message can still be accurate"
+        );
+
+        for d in [&dir_a, &dir_b, &frankendir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn the_default_ca_location_is_never_the_working_directory() {
+        // A private key written into a git checkout is one `git add -A` from
+        // being published, after which anyone can impersonate any site to every
+        // phone that trusted that build.
+        let dir = default_config_dir();
+        assert_ne!(dir, PathBuf::from("."));
+        assert!(
+            dir.is_absolute(),
+            "the default must not be relative to wherever the binary was launched"
         );
     }
 

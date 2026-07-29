@@ -478,10 +478,39 @@ Specifically unverified:
   multicast entirely;
 - whether the two-step install (profile, then Certificate Trust Settings) reads
   clearly enough to be followed without someone standing over it;
-- **whether Web Bluetooth actually functions from the resulting origin.** That
-  is the acceptance condition, and nothing short of the phone answers it.
+- **whether Bluefy honours a CA installed in the iOS system trust store.** See
+  below. This is the real open question.
 
 Treat the certificate machinery as proven and the iOS flow as a hypothesis.
+
+### What is settled, and should not be re-litigated
+
+**iOS Safari has no Web Bluetooth.** Established by this project's capability
+probe, and the reason Bluefy is in the plan. A missing `navigator.bluetooth` in
+Safari is the expected reading of a known constraint, not a discovery.
+
+**The phone is a proven Bluetooth host.** Real output was driven to a Coyote
+from Bluefy on that handset. So a failure in this flow is a failure of *this*
+work, not evidence that the architecture needs rethinking.
+
+### The open risk, stated in advance because it will not look like itself
+
+**Does Bluefy honour a CA installed in the iOS system trust store?** It is
+third-party and its certificate handling is unverified by us. If it is
+`WKWebView`-based it should inherit system trust — but "should" is carrying the
+weight, and this project has spent a day finding things that should have worked.
+
+The failure mode is genuinely confusing, so predict it rather than diagnose it:
+
+> The certificate is valid. Safari's trust check says **Trusted**. Bluefy still
+> refuses — and because a `wss:` subresource gets **no interstitial**, it fails
+> silently as close code 1006, i.e. "bridge unreachable". It looks exactly like
+> a network fault and is not one.
+
+If that happens the answer is **not** "TLS didn't work" and **not** "rethink the
+architecture". It is: *Bluefy needs the CA by another route, or the origin needs
+a publicly-trusted certificate* — for which Tailscale's `*.ts.net`, documented
+below, is the cheapest option that requires no domain purchase.
 
 ### Still open
 

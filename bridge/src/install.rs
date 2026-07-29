@@ -72,6 +72,14 @@ pub struct TlsPublicInfo {
     pub https_port: u16,
     /// LAN address, for networks where multicast does not survive.
     pub ip: Option<IpAddr>,
+    /// Random per-process value, echoed by `/trustcheck`.
+    ///
+    /// Without it the trust check cannot tell *this* bridge from any other host
+    /// answering `coyote.local:8443` with a certificate the phone trusts. Two
+    /// bridges on one machine both register the name, so B's install page can
+    /// probe A's listener, report "Trusted", and send the phone to A carrying
+    /// B's token — which arrives as a 401 and gets debugged as an auth bug.
+    pub instance_nonce: String,
 }
 
 /// What the install page needs to render itself and its links.
@@ -84,6 +92,9 @@ pub struct InstallPage<'a> {
     pub https_port: u16,
     /// How the certificate will appear in iOS's Settings list.
     pub ca_display_name: &'a str,
+    /// Echoed by `/trustcheck`, so the page can confirm it reached *this*
+    /// bridge rather than another one answering the same name.
+    pub instance_nonce: &'a str,
     /// The query string from the pairing URL, `?t=…` included, or empty.
     ///
     /// Carried through verbatim rather than reconstructed: the pairing token is
@@ -104,6 +115,7 @@ impl TlsPublicInfo {
             http_port: self.http_port,
             https_port: self.https_port,
             ca_display_name: &self.ca_display_name,
+            instance_nonce: &self.instance_nonce,
             query,
         }
     }
@@ -129,6 +141,22 @@ impl<'a> InstallPage<'a> {
 
     fn https_probe_url(&self) -> String {
         format!("https://{}:{}/trustcheck", self.hostname, self.https_port)
+    }
+
+    /// The Bluetooth check, on the HTTPS origin, with the query preserved.
+    ///
+    /// Routed through [`to_https_origin`] rather than formatted inline so there
+    /// is exactly one place that rewrites an origin, and it is the one that has
+    /// tests.
+    pub fn secure_check_url(&self) -> String {
+        to_https_origin(
+            &format!(
+                "http://{}:{}/secure-check{}",
+                self.hostname, self.http_port, self.query
+            ),
+            self.hostname,
+            self.https_port,
+        )
     }
 
     fn ip_fallback_url(&self) -> Option<String> {
@@ -174,15 +202,23 @@ pub fn split_query(path: &str) -> (&str, &str) {
 /// check that could only be run from the same origin would answer nothing.
 pub const TRUSTCHECK_BODY: &str = "trusted";
 
+/// A random per-process value for [`TlsPublicInfo::instance_nonce`].
+pub fn new_instance_nonce() -> String {
+    let mut bytes = [0u8; 8];
+    // Failure here is not worth aborting a bridge over; a fixed value only
+    // costs the ability to tell two instances apart, which is what the nonce
+    // buys and not something anything depends on for safety.
+    let _ = getrandom::getrandom(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn page(cfg: &InstallPage<'_>) -> String {
     let https_url = html_escape(&cfg.https_url());
-    let secure_check_url = html_escape(&format!(
-        "https://{}:{}/secure-check",
-        cfg.hostname, cfg.https_port
-    ));
+    let secure_check_url = html_escape(&cfg.secure_check_url());
     let http_probe = html_escape(&cfg.http_probe_url());
     let https_probe = html_escape(&cfg.https_probe_url());
     let ca_name = html_escape(cfg.ca_display_name);
+    let nonce = html_escape(cfg.instance_nonce);
     let host = html_escape(cfg.hostname);
     let fallback = match cfg.ip_fallback_url() {
         Some(url) => format!(
@@ -231,10 +267,20 @@ Bluetooth &mdash; that is a browser rule, not a choice this app makes. Installin
 the certificate below is what provides one, and you only do it once.</p>
 
 <div class="row">
-  <a class="btn primary" href="/ca.crt" download="coyote-bridge-ca.crt">Download the certificate</a>
+  <a class="btn primary" href="/ca.crt">Download the certificate</a>
 </div>
 <p class="hint">On an iPhone this must be done in <strong>Safari</strong>. Other browsers
 download the file without offering to install it.</p>
+
+<div class="trade">
+<p><strong>You will need two browsers, and that is expected.</strong> Install the
+certificate here in <strong>Safari</strong> — it is the only iOS browser that offers to
+install one. Then open the app in <strong>Bluefy</strong>, because
+<strong>Safari does not support Web Bluetooth at all</strong> and never has.</p>
+<p class="hint">If you open the app in Safari it will load and simply not find the
+Coyote. That is not a certificate problem and re-installing will not fix it.
+The certificate you install here is trusted system-wide, so Bluefy gets it too.</p>
+</div>
 
 <h2>On iPhone or iPad, in this order</h2>
 <ol>
@@ -250,6 +296,15 @@ download the file without offering to install it.</p>
 <p class="hint">Until step 3 is done the certificate is installed but not trusted, and
 the connection fails in exactly the same way as if you had never installed it.
 That is why the button below exists.</p>
+
+<p class="hint"><strong>And it will not fail the way you expect.</strong> Browsing to
+an untrusted address shows a warning page you can read. The app does not browse —
+it opens a socket, and an untrusted socket is refused <em>silently</em>, with no
+warning and no mention of certificates. It surfaces as
+&ldquo;bridge unreachable&rdquo;, so the natural reaction is to go and check the
+Wi‑Fi. Same certificate, same address, two completely different-looking failures.
+If this page works and the app still cannot connect, suspect trust, not the
+network.</p>
 
 <h2>Did it work?</h2>
 <div class="row">
@@ -314,7 +369,20 @@ authority from the computer as well.</p>
       // Stage two: the same machine over TLS. Reaching it means the phone
       // validated our certificate, which means the root is installed AND
       // trusted. Nothing else produces this result.
-      return probe('{https_probe}').then(function () {{
+      return probe('{https_probe}').then(function (r) {{
+        return r.text();
+      }}).then(function (body) {{
+        // Confirm it is *this* bridge. Two instances both register
+        // `coyote.local`, so without the nonce this page could cheerfully
+        // certify a different bridge's listener and then send the phone there
+        // carrying a token that bridge has never heard of.
+        if (body.indexOf('{nonce}') < 0) {{
+          say('Reached a different bridge.',
+              'Something else on this network is answering “{host}” over HTTPS. ' +
+              'The certificate is fine, but the phone would be sent to the wrong ' +
+              'bridge. Stop the other instance, or use the numeric address below.');
+          return;
+        }}
         say('Trusted — you are all set.',
             'Your phone accepts this bridge’s certificate. You can open the app now.');
         next.className = 'row show';
@@ -383,6 +451,13 @@ code { background: color-mix(in srgb, currentColor 12%, transparent); padding: .
 <p class="hint">This is the question the certificate exists to make answerable.
 Everything else only sets it up.</p>
 
+<p class="hint"><strong>Why this page matters more than it looks.</strong> If the app
+reports the bridge as unreachable, that is <em>not</em> evidence about the network.
+An untrusted certificate makes the app's socket fail silently — no warning, no
+mention of certificates, just a dead connection. This page is the only thing that
+can tell the two apart: <strong>if this page loads at all, the certificate is
+trusted and the network is fine.</strong></p>
+
 <div class="row"><span class="k">Origin</span><code id="origin"></code></div>
 <div class="row"><span class="k">Secure context</span><span id="secure"></span></div>
 <div class="row"><span class="k">Web Bluetooth API</span><span id="api"></span></div>
@@ -391,9 +466,15 @@ Everything else only sets it up.</p>
 <div id="out" role="status" aria-live="polite"></div>
 
 <p class="hint" id="safari" style="display:none">
-<strong>You are probably in Safari.</strong> Safari on iOS does not implement Web
-Bluetooth at all — no certificate fixes that. Try <strong>Bluefy</strong> or another
-WebKit browser that adds it, and open this same URL there.</p>
+<strong>Expected, if you are in Safari.</strong> Safari on iOS does not implement Web
+Bluetooth — that is a known, settled limitation and no certificate changes it.
+Open this same URL in <strong>Bluefy</strong>, which does.</p>
+
+<p class="hint" id="untrusted" style="display:none">
+<strong>Worth reporting.</strong> Secure context is false here. If Safari reported
+&ldquo;Trusted&rdquo; for the same address, then this browser is not honouring the
+certificate you installed in iOS Settings — which is a different problem from a bad
+certificate, and re-installing will not fix it.</p>
 
 <script>
 (function () {
@@ -402,7 +483,12 @@ WebKit browser that adds it, and open this same URL there.</p>
   document.getElementById('origin').textContent = location.origin;
   document.getElementById('secure').textContent = secure ? 'yes' : 'NO — the certificate is not trusted here';
   document.getElementById('api').textContent = api ? 'available' : 'MISSING in this browser';
+  // Two different findings, and they must not be confused. No API in a secure
+  // context is the known Safari limitation. A browser that has the API but does
+  // not consider this origin secure is the open question — whether a
+  // third-party WebKit shell honours a CA installed in the iOS system store.
   if (secure && !api) { document.getElementById('safari').style.display = 'block'; }
+  if (!secure && api) { document.getElementById('untrusted').style.display = 'block'; }
 
   var out = document.getElementById('out');
   function say(t) { out.textContent = t; out.className = 'show'; }
@@ -461,6 +547,7 @@ mod tests {
             http_port: 8787,
             https_port: 8443,
             ca_display_name: "CoyoteSocket Bridge on JUSTIN-G",
+            instance_nonce: "abc123nonce",
             query,
         }
     }
@@ -567,6 +654,51 @@ mod tests {
         // and useless. It has to be reached on the origin under test.
         let page = page(&ctx(""));
         assert!(page.contains("https://coyote.local:8443/secure-check"));
+    }
+
+    #[test]
+    fn the_bluetooth_check_link_goes_through_the_tested_rewrite() {
+        // `to_https_origin` had tests and no callers, so a reviewer sent to
+        // check it was checking code nothing ran. It is now the only thing that
+        // builds this URL, and it preserves the query while doing so.
+        let page = page(&ctx("?t=tok"));
+        assert!(page.contains("https://coyote.local:8443/secure-check?t=tok"));
+    }
+
+    #[test]
+    fn the_trust_check_confirms_it_reached_this_bridge_and_not_another() {
+        // Two bridges both register `coyote.local`. Without the nonce, one
+        // instance's install page can certify the other's listener and send the
+        // phone there with a token that bridge has never seen — arriving as a
+        // 401 and debugged as an auth bug.
+        let page = page(&ctx(""));
+        assert!(page.contains("abc123nonce"));
+        assert!(page.contains("Reached a different bridge."));
+    }
+
+    #[test]
+    fn both_pages_say_a_failing_socket_is_not_evidence_about_the_network() {
+        // An untrusted certificate makes the app's WebSocket fail silently —
+        // no interstitial, no mention of certificates — so it presents as
+        // "bridge unreachable" and sends the user to check their Wi-Fi. These
+        // two pages are the only things that can tell trust from network.
+        let install = page(&ctx(""));
+        assert!(install.contains("suspect trust, not the"));
+        let check = secure_check_page();
+        assert!(check.contains("if this page loads at all, the certificate is"));
+    }
+
+    #[test]
+    fn the_certificate_link_does_not_carry_a_download_attribute() {
+        // iOS Safari honours `download` by saving to Files, which is the
+        // opposite of the profile-install prompt the content type is chosen to
+        // trigger. mkcert and Caddy both link plainly for the same reason.
+        let page = page(&ctx(""));
+        assert!(page.contains(r#"href="/ca.crt""#));
+        assert!(
+            !page.contains("download="),
+            "a download attribute defeats the iOS profile-install prompt"
+        );
     }
 
     #[test]

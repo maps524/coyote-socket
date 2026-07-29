@@ -108,13 +108,14 @@ async fn serve_https(tag: &str) -> (SocketAddr, String, Token) {
         http_port: 8787,
         https_port: addr.port(),
         ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        instance_nonce: install::new_instance_nonce(),
     });
 
     let ctx = Arc::new(http::Ctx {
         snapshot_rx,
         cmd_tx,
         static_dir: None,
-        pairing_url: format!("http://127.0.0.1:8787/install?t={}", token.as_str()),
+        pairing_base: "http://127.0.0.1:8787/install".to_string(),
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: tls::browser_origins(
             Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),

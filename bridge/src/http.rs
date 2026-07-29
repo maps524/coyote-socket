@@ -567,15 +567,28 @@ where
         // needs precisely when nothing else is working.
         "/secure-check" => {
             let body = crate::install::secure_check_page();
-            respond(stream, 200, "text/html; charset=utf-8", body.as_bytes()).await
+            respond(stream, Status::OK, "text/html; charset=utf-8", body.as_bytes()).await
         }
         "/trustcheck" => {
+            // The body carries this process's nonce, so the asking page can
+            // confirm it reached *this* bridge. Two instances both register
+            // `coyote.local`; without it, one bridge's install page can certify
+            // another's listener and send the phone there with a token it has
+            // never seen — arriving as a 401 and debugged as an auth bug.
+            let body = match ctx.tls.as_ref() {
+                Some(tls) => format!(
+                    "{} {}",
+                    crate::install::TRUSTCHECK_BODY,
+                    tls.instance_nonce
+                ),
+                None => crate::install::TRUSTCHECK_BODY.to_string(),
+            };
             respond_with_headers(
                 stream,
                 Status::OK,
                 "text/plain; charset=utf-8",
                 "Access-Control-Allow-Origin: *\r\n",
-                crate::install::TRUSTCHECK_BODY.as_bytes(),
+                body.as_bytes(),
             )
             .await
         }
@@ -1516,6 +1529,7 @@ mod tests {
             token: std::sync::RwLock::new(Token::generate()),
             allowed_hosts: vec!["192.168.0.9:8787".into()],
             on_token_rotated: None,
+            tls: None,
         }
     }
 

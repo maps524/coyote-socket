@@ -271,6 +271,31 @@ serves the public certificate from `/install`. The phone installs it once.
 - **Both listeners stay up.** Everything except Web Bluetooth works over plain
   HTTP and it is far easier to debug.
 
+### You will need two browsers on iOS, and that is not a bug
+
+- **Install the certificate in Safari.** It is the only iOS browser that offers
+  to install a configuration profile.
+- **Open the app in Bluefy.** **Safari does not implement Web Bluetooth and
+  never has** — a settled limitation, established by this project's capability
+  probe, and the reason Bluefy is in the plan at all. Opening the app in Safari
+  gives a page that loads and simply never finds the Coyote.
+
+The certificate is installed into the iOS system trust store, so any browser on
+the device should inherit it. **Whether Bluefy actually honours it is not yet
+verified** — see FOLLOW-UPS.
+
+### The failure you will actually hit looks like a network problem
+
+Browsing to an untrusted HTTPS address shows an interstitial you can read. The
+app does not browse — it opens a `wss://` socket, and **an untrusted socket in a
+WKWebView is refused silently**: no interstitial, no error text, no mention of
+certificates. It surfaces as close code 1006, which the app reports as "bridge
+unreachable", which sends the user to check their Wi-Fi.
+
+Same certificate, same host, two completely different-looking failures. That is
+why `/secure-check` exists: **if that page loads, the certificate is trusted and
+the network is fine**, so a failing socket is about trust and not about the LAN.
+
 ### On iOS there are two steps, and the second is the one that gets missed
 
 Installing the profile does **not** trust it. The certificate is inert until

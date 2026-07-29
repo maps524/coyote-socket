@@ -48,10 +48,69 @@ use crate::{log_info, log_warn};
 /// their phone at all.
 const SERVICE_TYPE: &str = "_http._tcp.local.";
 
+/// Instance name. Constant because re-registering under the same name *updates*
+/// the record; a name that varied would leave stale entries behind on every
+/// address change.
+const INSTANCE_NAME: &str = "CoyoteSocket Bridge";
+
 /// The registration handle. Dropping it withdraws the name from the network,
 /// so callers must keep it alive for as long as the bridge is serving.
 pub struct Responder {
-    _daemon: ServiceDaemon,
+    daemon: ServiceDaemon,
+    https_port: u16,
+}
+
+impl Responder {
+    /// Announce `ip` for [`BRIDGE_HOSTNAME`], replacing any previous answer.
+    ///
+    /// Re-registering under the same instance name updates the record rather
+    /// than adding a second one, and the announcement is multicast immediately,
+    /// so listeners converge without waiting for their caches to expire.
+    pub fn announce(&self, ip: IpAddr) -> bool {
+        let host_fqdn = format!("{BRIDGE_HOSTNAME}.");
+        let info = match ServiceInfo::new(
+            SERVICE_TYPE,
+            INSTANCE_NAME,
+            &host_fqdn,
+            ip,
+            self.https_port,
+            HashMap::<String, String>::new(),
+        ) {
+            Ok(info) => info,
+            Err(e) => {
+                log_warn!("[mdns] could not describe the service ({e}); {BRIDGE_HOSTNAME} will not resolve");
+                return false;
+            }
+        };
+
+        if let Err(e) = self.daemon.register(info) {
+            log_warn!("[mdns] could not register {BRIDGE_HOSTNAME} ({e}); the bridge is still reachable at {ip}");
+            return false;
+        }
+        true
+    }
+}
+
+/// Keep the announced address in step with the machine's actual one.
+///
+/// Without this the stable name fails in exactly the situation it exists for:
+/// DHCP moves the machine, a fresh certificate is issued for the new address —
+/// so the phone never reinstalls, which is the part that holds — and
+/// `coyote.local` goes on announcing an address nothing is listening on. The
+/// name would be stable and wrong, which is worse than unstable and right,
+/// because nothing in the failure points at DNS.
+pub fn follow(responder: Responder, mut rx: tokio::sync::watch::Receiver<IpAddr>) {
+    tokio::spawn(async move {
+        // Held for the lifetime of the task: dropping the responder withdraws
+        // the name from the network.
+        let responder = responder;
+        while rx.changed().await.is_ok() {
+            let ip = *rx.borrow_and_update();
+            if responder.announce(ip) {
+                log_info!("[mdns] {BRIDGE_HOSTNAME} now answers with {ip}");
+            }
+        }
+    });
 }
 
 /// Start answering `coyote.local` with `ip`.
@@ -75,31 +134,13 @@ pub fn start(ip: IpAddr, https_port: u16) -> Option<Responder> {
         }
     };
 
-    // mdns-sd requires the trailing dot: a hostname here is a DNS name, not a
-    // display string, and it rejects one without it.
-    let host_fqdn = format!("{BRIDGE_HOSTNAME}.");
-    let info = match ServiceInfo::new(
-        SERVICE_TYPE,
-        "CoyoteSocket Bridge",
-        &host_fqdn,
-        ip,
-        https_port,
-        HashMap::<String, String>::new(),
-    ) {
-        Ok(info) => info,
-        Err(e) => {
-            log_warn!("[mdns] could not describe the service ({e}); {BRIDGE_HOSTNAME} will not resolve");
-            return None;
-        }
-    };
-
-    if let Err(e) = daemon.register(info) {
-        log_warn!("[mdns] could not register {BRIDGE_HOSTNAME} ({e}); the bridge is still reachable at {ip}");
+    let responder = Responder { daemon, https_port };
+    if !responder.announce(ip) {
         return None;
     }
 
     log_info!("[mdns] answering {BRIDGE_HOSTNAME} with {ip} on port {https_port}");
-    Some(Responder { _daemon: daemon })
+    Some(responder)
 }
 
 #[cfg(test)]

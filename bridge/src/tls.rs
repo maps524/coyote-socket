@@ -92,13 +92,23 @@ pub async fn run(listener: TcpListener, ctx: Arc<http::Ctx>, certs_rx: watch::Re
 /// working for no reason", and neither requires the phone to do anything: the
 /// CA is unchanged, so a device that trusted the old leaf trusts the new one.
 /// That is the whole reason the CA is persisted and the leaf is not.
-pub async fn keep_current(ca: Arc<LocalCa>, certs_tx: watch::Sender<CertMaterial>) {
+/// `advertise` pins the address when the user supplied one, in which case it
+/// never changes and this only ever renews on expiry.
+///
+/// `mdns_tx` carries a changed address to the mDNS responder. Both have to move
+/// together: a new certificate on an address the name does not resolve to is no
+/// more usable than the reverse.
+pub async fn keep_current(
+    ca: Arc<LocalCa>,
+    certs_tx: watch::Sender<CertMaterial>,
+    advertise: Advertise,
+) {
     let mut issued_at = time::OffsetDateTime::now_utc();
 
     loop {
         tokio::time::sleep(REISSUE_CHECK).await;
 
-        let ips: Vec<IpAddr> = http::local_ip().into_iter().collect();
+        let ips: Vec<IpAddr> = advertise.resolve().into_iter().collect();
         let current = certs_tx.borrow().leaf_names.clone();
         if !certs::needs_reissue(&current, &ips, issued_at) {
             continue;
@@ -113,12 +123,45 @@ pub async fn keep_current(ca: Arc<LocalCa>, certs_tx: watch::Sender<CertMaterial
                 );
                 issued_at = time::OffsetDateTime::now_utc();
                 let _ = certs_tx.send(material);
+                // The name has to follow the address, or `coyote.local` stays
+                // stable and wrong — which is worse than unstable and right,
+                // because nothing about the failure points at DNS.
+                if let (Some(tx), Some(ip)) = (&advertise.mdns_tx, ips.first()) {
+                    let _ = tx.send(*ip);
+                }
             }
             // Keep serving the old certificate. It is still valid — this ran
             // because it was *approaching* expiry, not past it — and dropping
             // TLS entirely would be a far worse outcome than a stale IP SAN.
             Err(e) => log_warn!("[tls] could not re-issue the certificate ({e}); continuing with the current one"),
         }
+    }
+}
+
+/// How the bridge decides which address to put its name on.
+///
+/// One value, resolved once and threaded, rather than three independent calls
+/// to [`http::local_ip`]. They only *usually* agree: the certificate's IP SAN,
+/// the mDNS record, the QR and the allowed origins all have to name the same
+/// interface, and when `local_ip` returns `None` the fallbacks previously
+/// diverged — mDNS took loopback while the leaf got no IP SAN at all.
+#[derive(Clone, Default)]
+pub struct Advertise {
+    /// Pinned by `--advertise`. Overrides detection entirely.
+    pub pinned: Option<IpAddr>,
+    /// Where to publish a detected change, when mDNS is running.
+    pub mdns_tx: Option<watch::Sender<IpAddr>>,
+}
+
+impl Advertise {
+    /// The address to advertise, or `None` if there is none to be had.
+    ///
+    /// Detection uses the default route, which is the right answer on an
+    /// ordinary LAN and the wrong one behind a VPN — a full-tunnel VPN makes
+    /// this report the tunnel address, which the phone cannot reach. `--advertise`
+    /// exists for that case, and for multi-homed machines generally.
+    pub fn resolve(&self) -> Option<IpAddr> {
+        self.pinned.or_else(http::local_ip)
     }
 }
 
@@ -140,10 +183,10 @@ pub fn prepare(
     config_dir: &std::path::Path,
     http_port: u16,
     https_port: u16,
+    ip: Option<IpAddr>,
 ) -> Result<Prepared, String> {
     let dir = certs::tls_dir(config_dir);
     let ca = LocalCa::load_or_generate(&dir)?;
-    let ip = http::local_ip();
     let ips: Vec<IpAddr> = ip.into_iter().collect();
     let material = ca.issue_leaf(&ips)?;
 
@@ -154,6 +197,7 @@ pub fn prepare(
         http_port,
         https_port,
         ip,
+        instance_nonce: crate::install::new_instance_nonce(),
     });
 
     Ok(Prepared {

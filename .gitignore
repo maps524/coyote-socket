@@ -60,3 +60,17 @@ bridge-app/ui/dist/
 bridge-app/target/
 bridge-app/gen/
 bridge/target/
+
+# Local certificate authority. NEVER commit this.
+#
+# The bridge generates a CA per install and keeps its private key on disk. A key
+# that reached a public repository would let anyone sign a certificate for any
+# domain and present it to every phone that had trusted that build — and it
+# could not be undone afterwards, because the key would already be out.
+#
+# `--tls-dir` defaults to a real config directory so this cannot happen by
+# accident. This is the belt to that pair of braces, for anyone who points it at
+# a checkout on purpose.
+tls/
+**/ca-private-key.pem
+**/ca-cert.pem
