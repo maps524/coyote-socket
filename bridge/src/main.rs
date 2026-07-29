@@ -402,6 +402,24 @@ fn main() {
                     None => None,
                 };
 
+                // Identity comes from the credential store, and this is the one
+                // place that connects the two. Without it every paired device
+                // authorises normally and then renders as "we could not
+                // establish who this is" — `serve_conn` logs loudly if that
+                // ever happens, but installing it is what makes the log
+                // unnecessary.
+                let clients = Arc::new(coyote_bridge::clients::ClientRegistry::new());
+                let credential_store = Arc::clone(&devices);
+                clients.set_credential_resolver(Arc::new(move |cookie: Option<&str>| {
+                    credential_store
+                        .verify(cookie)
+                        .map(|d| coyote_bridge::clients::Credential {
+                            id: d.id,
+                            label: d.label,
+                            created_ms: Some(d.created_ms),
+                        })
+                }));
+
                 let ctx = Arc::new(http::Ctx {
                     snapshot_rx: bridge.snapshot_rx.clone(),
                     cmd_tx: bridge.cmd_tx.clone(),
@@ -413,6 +431,7 @@ fn main() {
                     on_token_rotated: None,
                     tls: https.is_some().then_some(tls_public).flatten(),
                     devices,
+                    clients,
                 });
 
                 // Both listeners share one routing table and one context. Plain

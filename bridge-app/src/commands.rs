@@ -4,6 +4,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use coyote_bridge::clients::ClientsView;
 use coyote_bridge::fake_player::{serve, FakePlayerConfig};
 use coyote_bridge::probe::{self, Reachability};
 use coyote_bridge::state::{LinkState, PlayerCommand, PlayerSnapshot};
@@ -50,6 +51,10 @@ pub struct Status {
     pub library_dir: Option<String>,
     pub fake_player: Option<String>,
     pub version: &'static str,
+    /// Who is connected to the phone-facing WebSocket, and how much of that is
+    /// known rather than inferred. Pushed on change as well, so this is only
+    /// the value the window starts from.
+    pub clients: ClientsView,
 }
 
 #[tauri::command]
@@ -79,6 +84,7 @@ pub fn bridge_status(state: Shared) -> Status {
             .ok()
             .and_then(|f| f.as_ref().map(|f| f.endpoint.clone())),
         version: env!("CARGO_PKG_VERSION"),
+        clients: state.clients.view(),
     }
 }
 

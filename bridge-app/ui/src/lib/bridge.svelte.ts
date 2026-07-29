@@ -12,7 +12,13 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import type { PlayerSnapshot, Reachability, Status, WireEvent } from './types'
+import type {
+  ClientsView,
+  PlayerSnapshot,
+  Reachability,
+  Status,
+  WireEvent,
+} from './types'
 
 /**
  * How many wire events to keep in the window.
@@ -43,9 +49,34 @@ function emptySnapshot(): PlayerSnapshot {
   }
 }
 
+/**
+ * What to render before the backend has said anything.
+ *
+ * Zero connections and zero reported devices, which is the truth at that
+ * moment: no socket has been accepted. Not a spinner and not a blank — an
+ * empty panel that is correct is better than one that implies it does not know.
+ */
+function emptyClients(): ClientsView {
+  return {
+    connections: 0,
+    browsers: { state: 'reported', count: 0 },
+    clients: [],
+    anyUnidentified: false,
+    credentialsAvailable: false,
+  }
+}
+
 class Bridge {
   snapshot = $state<PlayerSnapshot>(emptySnapshot())
   status = $state<Status | null>(null)
+  /**
+   * Who is connected to the phone-facing WebSocket.
+   *
+   * Pushed by Rust on every connect, disconnect and identification — never
+   * polled. Deliberately not pushed on the once-a-second keepalive, so this
+   * changes when the set of clients changes and at no other time.
+   */
+  clients = $state<ClientsView>(emptyClients())
   wire = $state<WireEvent[]>([])
   log = $state<string[]>([])
 
@@ -87,6 +118,10 @@ class Bridge {
       this.pushWire(event.payload)
     })
 
+    await listen<ClientsView>('clients', (event) => {
+      this.clients = event.payload
+    })
+
     await listen<string>('log-line', (event) => {
       this.log = [...this.log, event.payload].slice(-LOG_LIMIT)
     })
@@ -114,6 +149,7 @@ class Bridge {
   async refresh() {
     this.status = await invoke<Status>('bridge_status')
     this.snapshot = this.status.snapshot
+    this.clients = this.status.clients
   }
 
   private async run<T>(action: () => Promise<T>): Promise<T | null> {

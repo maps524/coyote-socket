@@ -25,6 +25,8 @@
 //!   cannot be mistaken for each other.
 //! - `wire` — a live tap on the raw framing. The spike's actual deliverable.
 //! - `http` — static serving + WebSocket relay. Tested.
+//! - `clients` — who is connected to that relay, and an explicit account of
+//!   what part of that is known rather than inferred.
 //! - `fake_player` — the stand-in that makes the above testable at all, and
 //!   the target to point MultiFunPlayer at for an independent check.
 //! - `tray`, `qr` — the pairing affordance.
@@ -56,6 +58,7 @@
 pub mod auth;
 pub mod capture;
 pub mod certs;
+pub mod clients;
 pub mod codec;
 pub mod devices;
 pub mod fake_player;

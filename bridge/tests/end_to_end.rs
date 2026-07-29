@@ -247,6 +247,7 @@ async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>,
         // secure context. `/install` correctly reports nothing to install.
         tls: None,
         devices: test_device_store(),
+        clients: Default::default(),
     });
     tokio::spawn(http::run(listener, ctx));
 
@@ -423,6 +424,7 @@ async fn traversal_outside_the_static_root_is_refused() {
             on_token_rotated: None,
             tls: None,
         devices: test_device_store(),
+        clients: Default::default(),
         }),
     ));
 
@@ -594,6 +596,7 @@ async fn the_relay_keeps_talking_while_the_player_says_nothing() {
             // the secure context. `/install` correctly reports nothing to install.
             tls: None,
         devices: test_device_store(),
+        clients: Default::default(),
         }),
     ));
 
@@ -668,6 +671,7 @@ async fn a_paused_player_keeps_the_relay_talking() {
             // the secure context. `/install` correctly reports nothing to install.
             tls: None,
         devices: test_device_store(),
+        clients: Default::default(),
         }),
     ));
 
@@ -759,6 +763,7 @@ async fn spawn_library_stack(root: std::path::PathBuf) -> (String, Token) {
             on_token_rotated: None,
             tls: None,
             devices: test_device_store(),
+        clients: Default::default(),
         }),
     ));
     (base, token)
@@ -1095,4 +1100,125 @@ fn test_device_store() -> std::sync::Arc<coyote_bridge::devices::DeviceStore> {
     ));
     let _ = std::fs::remove_file(&path);
     std::sync::Arc::new(coyote_bridge::devices::DeviceStore::load(path))
+// ---------------------------------------------------------------------------
+// Who is connected
+// ---------------------------------------------------------------------------
+//
+// The unit tests in `clients.rs` cover the counting rules. These check the two
+// things only the real surface can prove: that a live WebSocket actually
+// registers, and that `/healthz` carries the answer — which is the headless
+// build's only way to see it.
+
+/// Poll `/healthz` until the client view satisfies `done`, or give up.
+///
+/// The relay reads a client message between snapshots, so identification is
+/// not synchronous with the send that caused it.
+async fn clients_until(
+    base: &str,
+    token: &Token,
+    done: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..60 {
+        let (_, body) = get(&format!("{base}/healthz?t={token}")).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        last = v["clients"].clone();
+        if done(&last) {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the client view never settled; last was {last}");
+}
+
+/// A connected client is visible in `/healthz`, and the snapshot's own keys are
+/// untouched beside it. The addition has to be additive: a consumer reading
+/// `positionS` off the top level predates this field.
+#[tokio::test]
+async fn healthz_reports_a_connected_client_without_disturbing_the_snapshot() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+
+    let (_, body) = get(&format!("{base}/healthz?t={token}")).await;
+    let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(before["clients"]["connections"], 0);
+    assert_eq!(before["clients"]["browsers"]["state"], "reported");
+    assert_eq!(before["clients"]["browsers"]["count"], 0);
+
+    let ws_url = format!(
+        "{}/ws?t={token}&c=phone-aaaaaaaa",
+        base.replace("http://", "ws://")
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let hello: serde_json::Value = serde_json::from_str(&next_text(&mut ws).await).unwrap();
+    assert_eq!(hello["type"], "hello");
+    // A client cannot present an id it was never told about.
+    assert_eq!(hello["identify"]["param"], "c");
+
+    let after = clients_until(&base, &token, |v| v["connections"] == 1).await;
+    assert_eq!(after["browsers"]["state"], "reported");
+    assert_eq!(after["browsers"]["count"], 1);
+    assert_eq!(after["clients"][0]["id"], "phone-aaaaaaaa");
+    assert_eq!(after["clients"][0]["connected"], true);
+
+    // Everything the snapshot said before is still where it was.
+    let (_, body) = get(&format!("{base}/healthz?t={token}")).await;
+    let whole: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(whole["type"], "player");
+    assert!(whole.get("positionS").is_some());
+    assert_eq!(whole["endpoint"], before["endpoint"]);
+}
+
+/// A client that presents nothing is reported as unidentified, and the device
+/// count degrades to a floor rather than guessing. This is today's default —
+/// no client sends an id yet.
+#[tokio::test]
+async fn a_client_that_does_not_identify_makes_the_count_a_floor() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+    let ws_url = format!("{}/ws?t={token}", base.replace("http://", "ws://"));
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let _ = next_text(&mut ws).await;
+
+    let view = clients_until(&base, &token, |v| v["connections"] == 1).await;
+    assert_eq!(view["browsers"]["state"], "atLeast");
+    assert_eq!(view["browsers"]["unidentified"], 1);
+    assert_eq!(view["anyUnidentified"], true);
+    assert_eq!(view["clients"][0]["identified"], false);
+}
+
+/// A `hello` sent after the socket opened claims it, and leaves no second row.
+#[tokio::test]
+async fn a_hello_over_the_socket_identifies_the_client() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+    let ws_url = format!("{}/ws?t={token}", base.replace("http://", "ws://"));
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let _ = next_text(&mut ws).await;
+
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"type":"hello","clientId":"phone-bbbbbbbb","label":"Test phone"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let view = clients_until(&base, &token, |v| v["browsers"]["state"] == "reported").await;
+    assert_eq!(view["browsers"]["count"], 1);
+    assert_eq!(view["clients"].as_array().unwrap().len(), 1, "no ghost row");
+    assert_eq!(view["clients"][0]["label"], "Test phone");
+}
+
+/// A dropped socket stops counting as connected. It leaves a row saying it was
+/// here, which is what makes a reconnect readable rather than inferred.
+#[tokio::test]
+async fn a_disconnect_stops_counting_but_leaves_a_trace() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+    let ws_url = format!(
+        "{}/ws?t={token}&c=phone-cccccccc",
+        base.replace("http://", "ws://")
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let _ = next_text(&mut ws).await;
+    ws.close(None).await.unwrap();
+
+    let view = clients_until(&base, &token, |v| v["connections"] == 0).await;
+    assert_eq!(view["clients"][0]["connected"], false);
+    assert!(view["clients"][0]["disconnectedAtMs"].is_number());
 }
