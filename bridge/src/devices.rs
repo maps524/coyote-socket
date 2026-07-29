@@ -152,11 +152,9 @@ impl DeviceStore {
             label: None,
         };
 
-        {
-            let mut devices = self.devices.write().map_err(|_| "device store poisoned")?;
-            devices.insert(id.clone(), stored);
-        }
-        self.persist()?;
+        self.commit(|devices| {
+            devices.insert(stored.id.clone(), stored.clone());
+        })?;
 
         log_info!("[devices] paired a new device ({id})");
         Ok((
@@ -211,14 +209,18 @@ impl DeviceStore {
 
     /// Name a device. `label` is expected to be sanitised by the caller.
     pub fn set_label(&self, id: &str, label: Option<String>) -> Result<(), String> {
-        {
-            let mut devices = self.devices.write().map_err(|_| "device store poisoned")?;
-            let Some(device) = devices.get_mut(id) else {
-                return Err(format!("no device {id}"));
-            };
-            device.label = label;
+        let found = self.commit(|devices| match devices.get_mut(id) {
+            Some(device) => {
+                device.label = label;
+                true
+            }
+            None => false,
+        })?;
+        if found {
+            Ok(())
+        } else {
+            Err(format!("no device {id}"))
         }
-        self.persist()
     }
 
     /// Delete a credential so it can never be presented **again**.
@@ -249,33 +251,50 @@ impl DeviceStore {
     /// module and this one deliberately does not depend on it — so it is
     /// enforced by saying so at the only place a caller will look.
     pub fn revoke(&self, id: &str) -> Result<bool, String> {
-        let removed = {
-            let mut devices = self.devices.write().map_err(|_| "device store poisoned")?;
-            devices.remove(id).is_some()
-        };
+        let removed = self.commit(|devices| devices.remove(id).is_some())?;
         if removed {
-            // Persist before returning. A revoke that is not on disk when the
-            // process dies is a device that comes back from the dead — the same
-            // shape as the settings race, and worse, because the user believes
-            // they removed it.
-            self.persist()?;
             log_info!("[devices] revoked {id}");
         }
         Ok(removed)
     }
 
-    /// Write the whole list under a temporary file and rename.
+    /// Change the credential set: write the new state to disk, **then** commit
+    /// it to memory.
     ///
-    /// Read-modify-write of an in-memory map under a lock, then one atomic
-    /// replace — so a concurrent writer cannot interleave and resurrect an
-    /// entry that was just revoked.
-    fn persist(&self) -> Result<(), String> {
-        let devices = self.devices.read().map_err(|_| "device store poisoned")?;
+    /// The order is the whole point, and it was wrong before.
+    ///
+    /// Mutating the map first and persisting afterwards means that when the
+    /// write fails, memory and disk disagree — and memory is what every check
+    /// consults. For `revoke` that is a safety defect rather than an
+    /// inconsistency: the device disappears from the panel, the user is told it
+    /// is gone, and the next restart reloads it from the file and lets it back
+    /// in. The user has no reason to look again.
+    ///
+    /// Committing to memory only after the bytes are on disk means the failure
+    /// mode is "the revoke did not happen and said so", which is recoverable by
+    /// pressing the button again.
+    ///
+    /// The write lock is held across the file write. That is deliberate: it is
+    /// a few hundred bytes, and it makes the disk write and the memory swap one
+    /// atomic step rather than two that a concurrent caller can interleave.
+    fn commit<T>(
+        &self,
+        change: impl FnOnce(&mut HashMap<String, StoredDevice>) -> T,
+    ) -> Result<T, String> {
+        let mut devices = self.devices.write().map_err(|_| "device store poisoned")?;
+        let mut next = devices.clone();
+        let outcome = change(&mut next);
+        self.persist_map(&next)?;
+        *devices = next;
+        Ok(outcome)
+    }
+
+    /// Write a credential set to disk under a temporary file and rename.
+    fn persist_map(&self, devices: &HashMap<String, StoredDevice>) -> Result<(), String> {
         let file = DeviceFile {
             devices: devices.values().cloned().collect(),
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-        drop(devices);
 
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -465,6 +484,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_revoke_that_cannot_be_written_does_not_take_effect_in_memory() {
+        // The order matters and it used to be wrong. Mutating memory first and
+        // persisting after means a failed write leaves the two disagreeing —
+        // and memory is what every check consults. For revoke that is a safety
+        // defect, not an inconsistency: the device vanishes from the panel, the
+        // user is told it is gone, and the next restart reloads it from the
+        // file and lets it back in. Nobody looks twice.
+        //
+        // Failing loudly and changing nothing is recoverable; succeeding
+        // visibly and changing nothing durable is not.
+        let s = store("revoke-write-fails");
+        let (cookie, device) = s.mint().expect("mint");
+
+        // Make the write fail: replace the file's parent with something that
+        // cannot hold it. A directory where the file should be does the job on
+        // both platforms — the rename cannot clobber it.
+        std::fs::remove_file(&s.path).ok();
+        std::fs::create_dir_all(&s.path).expect("occupy the path with a directory");
+
+        let result = s.revoke(&device.id);
+        assert!(result.is_err(), "an unwritable store must report failure");
+
+        // And the credential must still work, because nothing durable changed.
+        // A device that stops being honoured while the record survives on disk
+        // is the same divergence pointing the other way.
+        let header = format!("{COOKIE_NAME}={cookie}");
+        assert!(
+            s.verify(Some(&header)).is_some(),
+            "a failed revoke must leave the device exactly as it was"
+        );
+
+        let _ = std::fs::remove_dir_all(&s.path);
     }
 
     #[test]

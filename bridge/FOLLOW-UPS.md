@@ -529,8 +529,44 @@ trust and nothing else.
   let closed = state.clients.revoke(&id);  // and stop what is running now
   ```
 
+  **`closed == 0` is not a failure and must not be reported as one.** It means
+  the device was offline, which is an ordinary way to revoke something. The
+  panel is correct either way, so the command needs no "was it connected"
+  special case.
+
   Owned by whoever merges second, together with installing the credential
   resolver — the two are the same wiring job.
+
+---
+
+## 3. The bug family this session kept producing
+
+Five instances across two crates in one evening, and they are the same bug:
+
+| Where | The state that lied |
+|---|---|
+| TLS bind ordering | `ctx.tls` said HTTPS was up before the listener bound |
+| `http_error` | "no error" also meant "not asked yet" |
+| `Urls.tls_ready` | computed from intent, never corrected by the bind |
+| Clients panel | a revoked row kept its **verified** tag for ten minutes |
+| `DeviceStore` write order | memory revoked, disk unchanged — the device returns on restart |
+
+**The diagnosis, which is more useful than the list:** *the safe-looking state
+is almost always the one you get by not writing code.* The new mechanism gets
+written because it is obviously the work — bind the listener, close the socket,
+delete the record. The existing value keeps being whatever it already was, and
+nobody chose it, so nobody checks it.
+
+Both halves of the fix follow from that. It is nearly always **making an
+existing value change**, not adding a mechanism. And the review question that
+finds these is not "what did this change?" but **"what did this leave alone
+that now means something different?"**
+
+Related, and worth keeping when the next convenience feature is proposed:
+**any credential a client can re-acquire without a person present is not
+revocable, only rate-limited.** That is why the token was removed from the PWA
+manifest's `start_url`, and it applies unchanged to a "remember this device"
+option or a refresh-token design.
 
 - **Token exposure on the first hop.** The QR points at plain HTTP by
   necessity, so the pairing token is readable by anyone on the LAN at that
