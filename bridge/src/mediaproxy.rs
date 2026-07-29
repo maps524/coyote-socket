@@ -367,13 +367,26 @@ where
     // than a denylist: an upstream `Set-Cookie`, `Access-Control-Allow-Origin`
     // or `Content-Encoding` reaching the phone would be someone else's header
     // arriving with this origin's authority.
+    //
+    // **Every entry on this list is a claim that forwarding it is harmless, and
+    // those claims are the part nobody reviews** — see `FOLLOW-UPS.md` §0d,
+    // which this list is the specimen for. `Content-Type` used to be here for
+    // the obvious reason and is now supplied from the validated `<res>` MIME
+    // instead. `Content-Disposition` was here for no reason at all: a media
+    // element ignores it, and on a URL a browser can navigate to it is an
+    // attacker-chosen filename on a download from this origin. Removed rather
+    // than reasoned about, because nothing needed it.
+    //
+    // What remains is what a `<video>` genuinely reads. `ETag` and
+    // `Last-Modified` stay because `If-Range` revalidation is the client's, and
+    // stripping them would silently turn a conditional range into an
+    // unconditional one.
     for name in [
         "content-length",
         "content-range",
         "accept-ranges",
         "etag",
         "last-modified",
-        "content-disposition",
     ] {
         if let Some(v) = head.get(name) {
             headers.push((canonical(name), v.to_string()));
@@ -764,6 +777,29 @@ mod tests {
         assert!(!head_text.contains("Access-Control-Allow-Origin"), "{head_text}");
         assert!(!head_text.to_ascii_lowercase().contains("server: ums"), "{head_text}");
         assert!(head_text.contains("Content-Type: video/mp4"));
+    }
+
+    /// `Content-Disposition` is not forwarded, and nothing needs it.
+    ///
+    /// A media element ignores it; on a URL a browser can navigate to it is an
+    /// attacker-chosen filename on a download from this origin. It was on the
+    /// allowlist because it looked like a content header — which is §0d in one
+    /// line: every entry is a claim that forwarding it is harmless, and nobody
+    /// reviews a list for what is on it.
+    #[tokio::test]
+    async fn an_upstream_content_disposition_is_dropped() {
+        let (head_text, _) = relay_to_string(
+            "GET",
+            "HTTP/1.1 200 OK
+Content-Type: video/mp4
+Content-Length: 1
+             Content-Disposition: attachment; filename=\"totally-not-a-virus.exe\"",
+            b"A",
+            None,
+        )
+        .await;
+        assert!(!head_text.to_ascii_lowercase().contains("content-disposition"), "{head_text}");
+        assert!(!head_text.contains("totally-not-a-virus"), "{head_text}");
     }
 
     /// An unlengthed body must not carry a `Content-Length`, or the browser
