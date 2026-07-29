@@ -86,7 +86,9 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 ///
 /// The leaf is issued for `127.0.0.1` alongside the usual names so the client
 /// can actually connect to it; the hostname SAN is exercised separately.
-async fn serve_https(tag: &str) -> (SocketAddr, String, Token) {
+async fn serve_https(
+    tag: &str,
+) -> (SocketAddr, String, Token, Arc<coyote_bridge::devices::DeviceStore>) {
     let dir = scratch(tag);
     let ca = LocalCa::load_or_generate(&dir).expect("CA");
     let material = ca
@@ -100,6 +102,7 @@ async fn serve_https(tag: &str) -> (SocketAddr, String, Token) {
     let (_snap_tx, snapshot_rx) = watch::channel(PlayerSnapshot::new(String::new()));
     let (cmd_tx, _cmd_rx) = mpsc::channel(4);
     let token = Token::generate();
+    let device_store = test_device_store();
 
     let public = Arc::new(install::TlsPublicInfo {
         ca_cert_pem: ca_pem.clone(),
@@ -115,6 +118,7 @@ async fn serve_https(tag: &str) -> (SocketAddr, String, Token) {
         snapshot_rx,
         cmd_tx,
         static_dir: None,
+        library: None,
         pairing_base: "http://127.0.0.1:8787/install".to_string(),
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: tls::browser_origins(
@@ -124,6 +128,7 @@ async fn serve_https(tag: &str) -> (SocketAddr, String, Token) {
         ),
         on_token_rotated: None,
         tls: Some(public),
+        devices: Arc::clone(&device_store),
     });
 
     let (certs_tx, certs_rx) = watch::channel(material);
@@ -131,7 +136,7 @@ async fn serve_https(tag: &str) -> (SocketAddr, String, Token) {
     std::mem::forget(certs_tx);
     tokio::spawn(tls::run(listener, ctx, certs_rx));
 
-    (addr, ca_pem, token)
+    (addr, ca_pem, token, device_store)
 }
 
 async fn https_get(addr: SocketAddr, server_name: &str, ca_pem: &str, path: &str) -> String {
@@ -158,7 +163,7 @@ async fn https_get(addr: SocketAddr, server_name: &str, ca_pem: &str, path: &str
 
 #[tokio::test]
 async fn a_strict_client_completes_the_handshake_and_gets_a_response() {
-    let (addr, ca_pem, _token) = serve_https("handshake").await;
+    let (addr, ca_pem, _token, _store) = serve_https("handshake").await;
 
     // Validated against the IP SAN. Reaching `/trustcheck` at all is exactly
     // the signal the install page's second stage relies on.
@@ -176,7 +181,7 @@ async fn the_trust_check_is_readable_cross_origin() {
     // different port — so without this header the check cannot read its own
     // answer and would report "not trusted" for a perfectly trusted
     // certificate. That would be worse than having no check at all.
-    let (addr, ca_pem, _token) = serve_https("cors").await;
+    let (addr, ca_pem, _token, _store) = serve_https("cors").await;
     let response = https_get(addr, "127.0.0.1", &ca_pem, "/trustcheck").await;
     assert!(
         response.to_lowercase().contains("access-control-allow-origin"),
@@ -189,7 +194,7 @@ async fn a_client_that_does_not_know_the_ca_is_refused() {
     // The other half of the claim: the certificate is trusted *because* the CA
     // is, not because it is accepted by anything that asks. If this passed, the
     // install step would be pointless and the security story fictional.
-    let (addr, _ca_pem, _token) = serve_https("stranger").await;
+    let (addr, _ca_pem, _token, _store) = serve_https("stranger").await;
 
     let config = ClientConfig::builder()
         .with_root_certificates(RootCertStore::empty())
@@ -210,7 +215,7 @@ async fn the_install_page_is_reachable_without_a_token() {
     // been given, so if this ever starts returning 401 the entire flow
     // deadlocks — and it would deadlock silently, at the one moment the user
     // has no way to diagnose it.
-    let (addr, ca_pem, _token) = serve_https("ungated").await;
+    let (addr, ca_pem, _token, _store) = serve_https("ungated").await;
 
     let page = https_get(addr, "127.0.0.1", &ca_pem, "/install").await;
     assert!(page.starts_with("HTTP/1.1 200"), "got: {}", &page[..60.min(page.len())]);
@@ -235,7 +240,7 @@ async fn the_state_relay_is_reachable_as_wss_with_a_token_and_an_origin() {
     // The Origin sent here is the HTTPS one the phone will actually present.
     // If `tls::browser_origins` ever stops including it, this fails here rather
     // than on someone's phone at the last step.
-    let (addr, ca_pem, token) = serve_https("wss").await;
+    let (addr, ca_pem, token, _store) = serve_https("wss").await;
 
     let config = ClientConfig::builder()
         .with_root_certificates(ca_roots(&ca_pem))
@@ -277,7 +282,7 @@ async fn the_state_relay_still_refuses_a_bad_token_over_tls() {
     // TLS must not become an accidental bypass. Encrypting the transport
     // changes nothing about authorization, and this is the assertion that says
     // so in code rather than in a comment.
-    let (addr, ca_pem, _token) = serve_https("wss-refused").await;
+    let (addr, ca_pem, _token, _store) = serve_https("wss-refused").await;
 
     let config = ClientConfig::builder()
         .with_root_certificates(ca_roots(&ca_pem))
@@ -308,7 +313,7 @@ async fn the_certificate_covers_the_mdns_hostname() {
     // meant to be stable. Checked by making rustls validate against that name —
     // it enforces SAN matching, so this passing means the SAN is present and
     // correct.
-    let (addr, ca_pem, _token) = serve_https("hostname").await;
+    let (addr, ca_pem, _token, _store) = serve_https("hostname").await;
 
     let config = ClientConfig::builder()
         .with_root_certificates(ca_roots(&ca_pem))
@@ -328,7 +333,7 @@ async fn a_name_the_certificate_does_not_cover_is_rejected() {
     // Guards against the lazy fix for the previous test — a wildcard, or SAN
     // matching quietly disabled. The certificate should be valid for the names
     // we chose and no others.
-    let (addr, ca_pem, _token) = serve_https("wrongname").await;
+    let (addr, ca_pem, _token, _store) = serve_https("wrongname").await;
 
     let config = ClientConfig::builder()
         .with_root_certificates(ca_roots(&ca_pem))
@@ -341,4 +346,230 @@ async fn a_name_the_certificate_does_not_cover_is_rejected() {
         connector.connect(name, tcp).await.is_err(),
         "the leaf must not validate for a name it was never issued for"
     );
+}
+
+/// A credential store in a scratch file, unique per process and per call.
+///
+/// Never the real one: these tests must not be able to pair a device into a
+/// developer's actual bridge, and two tests running in parallel must not fight
+/// over one file.
+fn test_device_store() -> std::sync::Arc<coyote_bridge::devices::DeviceStore> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "coyote-bridge-test-devices-{}-{n}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    std::sync::Arc::new(coyote_bridge::devices::DeviceStore::load(path))
+}
+
+// ---------------------------------------------------------------------------
+// Pair once, then never present the token again
+// ---------------------------------------------------------------------------
+
+/// A GET that can send an `Origin` and a `Cookie`, returning the raw response.
+async fn https_get_with(
+    addr: SocketAddr,
+    ca_pem: &str,
+    path: &str,
+    origin: Option<&str>,
+    cookie: Option<&str>,
+) -> String {
+    let config = ClientConfig::builder()
+        .with_root_certificates(ca_roots(ca_pem))
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+    let name = ServerName::try_from("127.0.0.1".to_string()).unwrap();
+    let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let mut stream = connector.connect(name, tcp).await.expect("handshake");
+
+    let mut request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+    if let Some(origin) = origin {
+        request.push_str(&format!("Origin: {origin}\r\n"));
+    }
+    if let Some(cookie) = cookie {
+        request.push_str(&format!("Cookie: {cookie}\r\n"));
+    }
+    request.push_str("\r\n");
+
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut body = Vec::new();
+    let _ = stream.read_to_end(&mut body).await;
+    String::from_utf8_lossy(&body).to_string()
+}
+
+/// Pull the credential out of a `Set-Cookie` header.
+fn set_cookie_value(response: &str) -> Option<String> {
+    response.lines().find_map(|line| {
+        let rest = line.strip_prefix("Set-Cookie: ")?;
+        Some(rest.split(';').next()?.trim().to_string())
+    })
+}
+
+/// Pair, and return the cookie the bridge issued.
+async fn pair(addr: SocketAddr, ca_pem: &str, token: &Token, origin: &str) -> String {
+    let response = https_get_with(
+        addr,
+        ca_pem,
+        &format!("/pair/exchange?t={}", token.as_str()),
+        Some(origin),
+        None,
+    )
+    .await;
+    set_cookie_value(&response).expect("pairing must issue a credential")
+}
+
+#[tokio::test]
+async fn a_token_is_exchanged_once_for_a_credential_that_works_on_its_own() {
+    // The whole feature. Pair once with the token; afterwards the phone
+    // presents only a cookie — which is what makes per-device revocation
+    // possible, and what stops the token needing to survive an origin change
+    // that browser storage cannot cross.
+    let (addr, ca_pem, token, _store) = serve_https("exchange").await;
+    let origin = format!("https://127.0.0.1:{}", addr.port());
+
+    let response = https_get_with(
+        addr,
+        &ca_pem,
+        &format!("/pair/exchange?t={}", token.as_str()),
+        Some(&origin),
+        None,
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 303"), "got: {response}");
+    // The token must not survive in the address bar: it is password-equivalent
+    // and it has just been superseded.
+    assert!(response.contains("Location: /\r\n"));
+    assert!(
+        response.contains("HttpOnly") && response.contains("Secure"),
+        "the credential must be script-invisible and TLS-only: {response}"
+    );
+
+    let cookie = set_cookie_value(&response).expect("a credential must be issued");
+
+    // And now the cookie alone authorises, with no token anywhere.
+    let health = https_get_with(addr, &ca_pem, "/healthz", Some(&origin), Some(&cookie)).await;
+    assert!(
+        health.starts_with("HTTP/1.1 200"),
+        "a paired device must not need the token again: {health}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_launch_does_not_mint_a_second_device() {
+    // `/pair/exchange` is the app's start URL, so it is hit on every launch.
+    // Minting per launch would fill the clients panel with duplicates of one
+    // phone and make "revoke this device" meaningless.
+    let (addr, ca_pem, token, store) = serve_https("exchange-idempotent").await;
+    let origin = format!("https://127.0.0.1:{}", addr.port());
+
+    let cookie = pair(addr, &ca_pem, &token, &origin).await;
+    assert_eq!(store.list().len(), 1);
+
+    let second = https_get_with(addr, &ca_pem, "/pair/exchange", Some(&origin), Some(&cookie)).await;
+    assert!(second.starts_with("HTTP/1.1 303"), "got: {second}");
+    assert!(
+        set_cookie_value(&second).is_none(),
+        "an already-paired device must pass through, not be re-issued"
+    );
+    assert_eq!(store.list().len(), 1, "one phone must be one device");
+}
+
+#[tokio::test]
+async fn a_cookie_from_a_foreign_origin_does_not_authorise() {
+    // Browsers attach cookies automatically, so without the Origin check a
+    // credential would be exactly the ambient authority CSRF exploits: any page
+    // in any tab could drive the player. A cookie makes this check *more*
+    // important than the token did, not less.
+    let (addr, ca_pem, token, _store) = serve_https("exchange-origin").await;
+    let origin = format!("https://127.0.0.1:{}", addr.port());
+    let cookie = pair(addr, &ca_pem, &token, &origin).await;
+
+    let attacker = https_get_with(
+        addr,
+        &ca_pem,
+        "/healthz",
+        Some("https://evil.example"),
+        Some(&cookie),
+    )
+    .await;
+    assert!(
+        attacker.starts_with("HTTP/1.1 401"),
+        "a cookie presented from a foreign origin must not authorise: {attacker}"
+    );
+}
+
+#[tokio::test]
+async fn revoking_one_device_leaves_another_working() {
+    // Per-device revocation is the entire reason this replaced a single shared
+    // token. Revoke must mean "stop trusting the tablet", not "un-pair
+    // everything" — which is what made auto-rotation unacceptable.
+    let (addr, ca_pem, token, store) = serve_https("exchange-revoke").await;
+    let origin = format!("https://127.0.0.1:{}", addr.port());
+
+    let phone = pair(addr, &ca_pem, &token, &origin).await;
+    let tablet = pair(addr, &ca_pem, &token, &origin).await;
+    assert_eq!(store.list().len(), 2);
+
+    let phone_id = phone
+        .split_once('=')
+        .unwrap()
+        .1
+        .split_once('.')
+        .unwrap()
+        .0
+        .to_string();
+    assert!(store.revoke(&phone_id).expect("revoke"));
+
+    let refused = https_get_with(addr, &ca_pem, "/healthz", Some(&origin), Some(&phone)).await;
+    assert!(
+        refused.starts_with("HTTP/1.1 401"),
+        "the revoked device must be refused: {refused}"
+    );
+
+    let still_ok = https_get_with(addr, &ca_pem, "/healthz", Some(&origin), Some(&tablet)).await;
+    assert!(
+        still_ok.starts_with("HTTP/1.1 200"),
+        "the other device must be unaffected: {still_ok}"
+    );
+}
+
+#[tokio::test]
+async fn a_paired_device_opens_a_socket_with_no_token() {
+    // The acceptance path for this feature: the relay is where the capability
+    // actually is, and a paired phone must reach it presenting only its cookie.
+    let (addr, ca_pem, token, _store) = serve_https("exchange-wss").await;
+    let origin = format!("https://127.0.0.1:{}", addr.port());
+    let cookie = pair(addr, &ca_pem, &token, &origin).await;
+
+    let config = ClientConfig::builder()
+        .with_root_certificates(ca_roots(&ca_pem))
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+    let name = ServerName::try_from("127.0.0.1".to_string()).unwrap();
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let tls_stream = connector.connect(name, tcp).await.expect("handshake");
+
+    let url = format!("wss://127.0.0.1:{}/ws", addr.port());
+    let request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+        url.as_str(),
+    )
+    .map(|mut req| {
+        req.headers_mut()
+            .insert("Origin", origin.parse().unwrap());
+        req.headers_mut().insert("Cookie", cookie.parse().unwrap());
+        req
+    })
+    .unwrap();
+
+    let (mut ws, _response) = tokio_tungstenite::client_async(request, tls_stream)
+        .await
+        .expect("a paired device must open a socket with only its cookie");
+
+    use futures::StreamExt;
+    let first = ws.next().await.expect("a frame").expect("not an error");
+    assert!(first.to_text().unwrap().contains("hello"));
 }

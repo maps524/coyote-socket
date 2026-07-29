@@ -57,6 +57,7 @@ pub mod auth;
 pub mod capture;
 pub mod certs;
 pub mod codec;
+pub mod devices;
 pub mod fake_player;
 pub mod http;
 pub mod icon;

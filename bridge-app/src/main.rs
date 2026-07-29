@@ -76,6 +76,9 @@ pub struct AppState {
     /// the other direction — a trust-check page that rendered in full and then
     /// blamed the certificate for a listener that had never bound.
     pub http_status: Mutex<HttpStatus>,
+    /// Per-device credentials, so revoke means "this phone" rather than
+    /// "everything". See `coyote_bridge::devices`.
+    pub devices: Arc<coyote_bridge::devices::DeviceStore>,
     /// Whether the phone can get a secure context. See [`TlsStatus`].
     pub tls_status: Mutex<TlsStatus>,
     /// The serving context, once the listener is up. Holds the live token, so
@@ -312,6 +315,9 @@ fn main() {
                 settings_path,
                 fake_player: Mutex::new(None),
                 urls: urls.clone(),
+                devices: Arc::new(coyote_bridge::devices::DeviceStore::load(
+                    coyote_bridge::devices::devices_path(&config_dir),
+                )),
                 http_status: Mutex::new(HttpStatus::Starting),
                 // `Starting` even when no certificate exists: the listener has
                 // not been attempted yet either way, and the state is corrected
@@ -453,6 +459,7 @@ fn serve_http(
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
     let pairing_base = state.urls.pairing_base.clone();
     let https_port = state.urls.https_port;
+    let devices = Arc::clone(&state.devices);
     let snapshot_rx = state.bridge.snapshot_rx.clone();
     let cmd_tx = state.bridge.cmd_tx.clone();
 
@@ -533,6 +540,7 @@ fn serve_http(
                     allowed_hosts,
                     on_token_rotated: Some(on_token_rotated),
                     tls: https.as_ref().map(|(_, p)| Arc::clone(&p.public)),
+                    devices,
                 });
                 // Published before serving starts, so anything asking for the
                 // current pairing URL gets the live token rather than a copy.

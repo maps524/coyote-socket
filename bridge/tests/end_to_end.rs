@@ -246,10 +246,25 @@ async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>,
         // Plain HTTP: these tests cover routing and authorization, not the
         // secure context. `/install` correctly reports nothing to install.
         tls: None,
+        devices: test_device_store(),
     });
     tokio::spawn(http::run(listener, ctx));
 
     (base, cmd_tx, token)
+}
+
+#[tokio::test]
+async fn pairing_is_refused_over_plaintext() {
+    // Issuing a long-lived credential in cleartext would hand it to the same
+    // eavesdropper the pairing token was already exposed to — and make that
+    // exposure permanent, since the cookie outlives the pairing moment. The
+    // token's exposure is a window; a credential's would be forever.
+    let (base, _cmd_tx, token) = spawn_full_stack(64).await;
+    let (status, _body) = get(&format!("{base}/pair/exchange?t={token}")).await;
+    assert_eq!(
+        status, 403,
+        "pairing must require a secure transport, exactly as rotation does"
+    );
 }
 
 async fn get(url: &str) -> (u16, String) {
@@ -407,6 +422,7 @@ async fn traversal_outside_the_static_root_is_refused() {
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
             tls: None,
+        devices: test_device_store(),
         }),
     ));
 
@@ -568,6 +584,7 @@ async fn the_relay_keeps_talking_while_the_player_says_nothing() {
             // Plain HTTP: these tests cover routing and authorization, not
             // the secure context. `/install` correctly reports nothing to install.
             tls: None,
+        devices: test_device_store(),
         }),
     ));
 
@@ -641,6 +658,7 @@ async fn a_paused_player_keeps_the_relay_talking() {
             // Plain HTTP: these tests cover routing and authorization, not
             // the secure context. `/install` correctly reports nothing to install.
             tls: None,
+        devices: test_device_store(),
         }),
     ));
 
@@ -730,6 +748,8 @@ async fn spawn_library_stack(root: std::path::PathBuf) -> (String, Token) {
             token: std::sync::RwLock::new(token.clone()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
+            tls: None,
+            devices: test_device_store(),
         }),
     ));
     (base, token)
@@ -1049,4 +1069,21 @@ async fn an_oversized_script_is_not_advertised() {
     assert_eq!(status, 404);
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A credential store in a scratch file, unique per process and per call.
+///
+/// Never the real one: these tests must not be able to pair a device into a
+/// developer's actual bridge, and two tests running in parallel must not fight
+/// over one file.
+fn test_device_store() -> std::sync::Arc<coyote_bridge::devices::DeviceStore> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "coyote-bridge-test-devices-{}-{n}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    std::sync::Arc::new(coyote_bridge::devices::DeviceStore::load(path))
 }

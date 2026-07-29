@@ -123,9 +123,20 @@ impl TlsPublicInfo {
 
 impl<'a> InstallPage<'a> {
     /// Where the phone should end up once the certificate is trusted.
+    /// Points at `/pair/exchange`, not at the app root.
+    ///
+    /// This is the single crossing of the origin boundary, and it is the whole
+    /// pairing flow in one link: the token travels on the URL, the HTTPS origin
+    /// exchanges it for a cookie, and the redirect drops the token out of the
+    /// address bar. After this the phone never presents the token again.
+    ///
+    /// Sending the phone straight to `/` with the token on it was the previous
+    /// design and it did not work: the app has no way to make the token durable
+    /// on that origin, so a later launch from the home screen arrived with
+    /// nothing and reported the bridge unreachable.
     pub fn https_url(&self) -> String {
         format!(
-            "https://{}:{}/{}",
+            "https://{}:{}/pair/exchange{}",
             self.hostname, self.https_port, self.query
         )
     }
@@ -176,6 +187,44 @@ pub fn pairing_base(http_origin: &str, tls_available: bool) -> String {
         format!("{http_origin}/install")
     } else {
         http_origin.to_string()
+    }
+}
+
+/// The query to put on the link that sends the phone from here to the app.
+///
+/// **This is the one place the pairing flow can silently break, and it did.**
+///
+/// The handoff crosses an origin boundary by design: the install page is on
+/// `http://host:8787` and the app is on `https://host:8443`. Different scheme
+/// *and* different port, so they are different origins, so **nothing in browser
+/// storage crosses** — not `localStorage`, not cookies, not IndexedDB. A token
+/// saved while pairing is invisible to the app. The origin change is the entire
+/// point of the flow and it is also what loses the token.
+///
+/// The URL is therefore the only carrier, and it has to work even when the
+/// incoming request had no token on it — someone re-opening `/install` from
+/// history, or typing it, or following a link that dropped the query. Falling
+/// back to the live token means the handoff is correct by construction rather
+/// than correct only when the user arrived the expected way.
+///
+/// Handing the token out here is not a new exposure: `/pair` and `/qr.svg` are
+/// already ungated and already render it, because they are how a phone obtains
+/// it at all. This is the same posture, applied to the same LAN.
+///
+/// The symptom when this is wrong is maximally unhelpful: the upgrade is
+/// refused, the browser reports close code 1006 with no reason, and the client
+/// can only say "bridge unreachable" — which reads as a dead network.
+pub fn app_query(incoming_path_and_query: &str, token: &str) -> String {
+    let query = split_query(incoming_path_and_query).1;
+    if crate::auth::token_from_query(incoming_path_and_query).is_some() {
+        // Already carries one. Preserve it verbatim, along with anything else
+        // in the query, rather than re-deriving it.
+        return query.to_string();
+    }
+    match query {
+        "" => format!("?t={token}"),
+        // Keep whatever else was there; only the token is missing.
+        other => format!("{other}&t={token}"),
     }
 }
 
@@ -675,6 +724,41 @@ mod tests {
     }
 
     #[test]
+    fn the_handoff_carries_a_token_even_when_the_request_had_none() {
+        // The live bug. `localStorage` does not cross an origin boundary, and
+        // the handoff crosses one by design — different scheme AND different
+        // port. So the URL is the only carrier, and it has to work for someone
+        // who reopened /install from history without the query.
+        assert_eq!(app_query("/install", "livetoken"), "?t=livetoken");
+    }
+
+    #[test]
+    fn a_token_already_on_the_request_is_preserved_verbatim() {
+        // A phone that arrived by QR carries the token it was paired with.
+        // Re-deriving would be equivalent today and wrong the moment a
+        // rotation is in flight.
+        assert_eq!(app_query("/install?t=fromqr", "livetoken"), "?t=fromqr");
+    }
+
+    #[test]
+    fn other_query_parameters_survive_the_token_being_added() {
+        assert_eq!(
+            app_query("/install?next=%2Fsettings", "livetoken"),
+            "?next=%2Fsettings&t=livetoken"
+        );
+    }
+
+    #[test]
+    fn the_app_link_is_absolute_and_tokened() {
+        // End to end through the page: this is the href the user actually taps.
+        let page = page(&ctx(&app_query("/install", "livetoken")));
+        assert!(
+            page.contains("https://coyote.local:8443/pair/exchange?t=livetoken"),
+            "the Open-the-app link must carry the token to the exchange endpoint —              that single crossing is the only way the token reaches the HTTPS origin"
+        );
+    }
+
+    #[test]
     fn the_pairing_token_survives_the_move_to_https() {
         // The single most breakable contract between this work and the pairing
         // token: a QR that loads a page which then fails to authorize looks
@@ -712,8 +796,8 @@ mod tests {
     fn the_continue_link_carries_the_token_through_to_the_app() {
         let page = page(&ctx("?t=secret-token"));
         assert!(
-            page.contains("https://coyote.local:8443/?t=secret-token"),
-            "the app link must carry the pairing token or the phone cannot authorize"
+            page.contains("https://coyote.local:8443/pair/exchange?t=secret-token"),
+            "the app link must carry the pairing token or the phone cannot pair"
         );
     }
 

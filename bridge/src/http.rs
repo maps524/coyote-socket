@@ -110,6 +110,13 @@ pub struct Ctx {
     ///
     /// Holds no key material of any kind; see [`crate::install::TlsPublicInfo`].
     pub tls: Option<Arc<crate::install::TlsPublicInfo>>,
+    /// Per-device credentials. See [`crate::devices`].
+    ///
+    /// A device pairs once with the token and is issued a cookie; everything
+    /// afterwards authorises on that. The token remains what mints new devices,
+    /// so it does not go away — it simply stops being presented by devices that
+    /// have already paired.
+    pub devices: Arc<crate::devices::DeviceStore>,
 }
 
 impl Ctx {
@@ -297,7 +304,10 @@ where
             .map(|(_, path)| path)
             .unwrap_or("");
         let origin = header_value(&head, "origin");
-        if !authorised(target, origin, &ctx) {
+        // Cookies ride the upgrade automatically, which is the whole reason
+        // the credential is a cookie rather than something in `localStorage`.
+        let cookie = header_value(&head, "cookie");
+        if !authorised(target, origin, cookie, &ctx) {
             log_warn!("[ws] {addr} refused: bad or missing token");
             let mut stream = Prefixed::new(head, stream);
             let _ = respond(
@@ -340,6 +350,7 @@ where
     log_debug!("[http] {addr} {method} {}", redact_query(&path));
 
     let origin = header_value(&head, "origin").map(|o| o.to_string());
+    let cookie = header_value(&head, "cookie").map(|c| c.to_string());
     let mut stream = Prefixed::new(head, stream);
 
     if method != "GET" && method != "HEAD" {
@@ -353,7 +364,15 @@ where
         return;
     }
 
-    route(&mut stream, &path, origin.as_deref(), secure, &ctx).await;
+    route(
+        &mut stream,
+        &path,
+        origin.as_deref(),
+        cookie.as_deref(),
+        secure,
+        &ctx,
+    )
+    .await;
 }
 
 /// Strip the query string from a request target before it is logged.
@@ -370,14 +389,37 @@ fn redact_query(target: &str) -> String {
 }
 
 /// Whether a request carries a valid token and an acceptable `Origin`.
-fn authorised(path_and_query: &str, origin: Option<&str>, ctx: &Ctx) -> bool {
-    let presented = auth::token_from_query(path_and_query);
-    presented.is_some_and(|t| ctx.token().matches(t))
-        && auth::origin_is_acceptable(origin, &ctx.allowed_hosts)
+/// Two ways to be authorised, and the `Origin` check applies to both.
+///
+/// **A device credential is the normal case.** The pairing token is what a
+/// device presents *once*, to be issued one — after which it never presents the
+/// token again. Both are accepted because both are legitimate: a phone
+/// mid-pairing has only the token, and a paired phone has only the cookie.
+///
+/// The `Origin` allowlist is deliberately outside the `||`. It is the thing
+/// that stops a page you happened to visit from opening a WebSocket and driving
+/// your player, and a cookie makes that *more* important rather than less —
+/// browsers attach cookies automatically, so without the origin check a
+/// paired-device cookie would be exactly the ambient authority that CSRF
+/// exploits.
+fn authorised(path_and_query: &str, origin: Option<&str>, cookie: Option<&str>, ctx: &Ctx) -> bool {
+    if !auth::origin_is_acceptable(origin, &ctx.allowed_hosts) {
+        return false;
+    }
+    if ctx.devices.verify(cookie).is_some() {
+        return true;
+    }
+    auth::token_from_query(path_and_query).is_some_and(|t| ctx.token().matches(t))
 }
 
-async fn route<W>(stream: &mut W, path: &str, origin: Option<&str>, secure: bool, ctx: &Ctx)
-where
+async fn route<W>(
+    stream: &mut W,
+    path: &str,
+    origin: Option<&str>,
+    cookie: Option<&str>,
+    secure: bool,
+    ctx: &Ctx,
+) where
     W: AsyncWrite + Unpin,
 {
     let full = path;
@@ -387,7 +429,7 @@ where
     let result = match path {
         // Gated: leaks the media URL, the LAN address and the link state.
         "/healthz" => {
-            if !authorised(full, origin, ctx) {
+            if !authorised(full, origin, cookie, ctx) {
                 respond(
                     stream,
                     Status::UNAUTHORIZED,
@@ -449,7 +491,7 @@ where
                     b"rotation requires a secure transport",
                 )
                 .await
-            } else if !authorised(full, origin, ctx) {
+            } else if !authorised(full, origin, cookie, ctx) {
                 respond(
                     stream,
                     Status::UNAUTHORIZED,
@@ -473,7 +515,7 @@ where
         // file in a directory the user chose, which is as personal as the media
         // URL that endpoint already protects.
         p if p.starts_with("/library/") => {
-            if !authorised(full, origin, ctx) {
+            if !authorised(full, origin, cookie, ctx) {
                 respond(
                     stream,
                     Status::UNAUTHORIZED,
@@ -483,6 +525,68 @@ where
                 .await
             } else {
                 serve_library(stream, p, ctx).await
+            }
+        }
+        // Trade the pairing token for a per-device credential. This is where
+        // the phone stops being "whoever holds the shared secret" and becomes
+        // a device the bridge can name and revoke individually.
+        //
+        // It is also the fix for the origin problem. Pairing happens on
+        // `http://host:8787` and the app runs on `https://host:8443`; different
+        // scheme and port means different origin, so **nothing in browser
+        // storage crosses**. An earlier design expected the token to survive in
+        // `localStorage` and it could not, which surfaced as a refused upgrade,
+        // close code 1006, and an app reporting "bridge unreachable". The token
+        // now crosses once, on the URL, into this endpoint — which sets a cookie
+        // on the origin that actually needs it.
+        //
+        // Secure transport only, for the same reason `/pair/rotate` is: issuing
+        // a long-lived credential over cleartext would hand it to the same
+        // eavesdropper the token was already exposed to, and make it permanent.
+        "/pair/exchange" => {
+            if !secure {
+                respond(
+                    stream,
+                    Status::FORBIDDEN,
+                    "text/plain; charset=utf-8",
+                    b"pairing requires a secure transport",
+                )
+                .await
+            } else if let Some(device) = ctx.devices.verify(cookie) {
+                // Already paired. Do **not** mint a second credential: this
+                // endpoint is the app's start URL, so it is hit on every launch,
+                // and minting per launch would fill the clients panel with
+                // duplicates of one phone and make revocation meaningless.
+                log_debug!("[devices] {} already paired; passing through", device.id);
+                redirect_to_app(stream, None).await
+            } else if !authorised(full, origin, cookie, ctx) {
+                respond(
+                    stream,
+                    Status::UNAUTHORIZED,
+                    "text/plain; charset=utf-8",
+                    b"unauthorized",
+                )
+                .await
+            } else {
+                match ctx.devices.mint() {
+                    Ok((cookie_value, _device)) => {
+                        redirect_to_app(
+                            stream,
+                            Some(crate::devices::set_cookie_header(&cookie_value)),
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        log_warn!("[devices] could not pair: {e}");
+                        respond(
+                            stream,
+                            Status::INTERNAL_ERROR,
+                            "text/plain; charset=utf-8",
+                            b"could not complete pairing",
+                        )
+                        .await
+                    }
+                }
             }
         }
         "/qr.svg" => match qr::to_svg(&ctx.pairing_url()) {
@@ -520,8 +624,11 @@ where
         // check is two-stage.
         "/install" => match ctx.tls.as_ref() {
             Some(tls) => {
-                let query = crate::install::split_query(full).1;
-                let body = crate::install::page(&tls.install_page(query));
+                // The live token, not merely whatever the request carried.
+                // The handoff crosses an origin boundary, so the URL is the
+                // only thing that can carry it — see `install::app_query`.
+                let query = crate::install::app_query(full, ctx.token().as_str());
+                let body = crate::install::page(&tls.install_page(&query));
                 respond(stream, Status::OK, "text/html; charset=utf-8", body.as_bytes()).await
             }
             None => {
@@ -845,6 +952,28 @@ impl Status {
     pub(crate) const PAYLOAD_TOO_LARGE: Self = Self::new(413, "Payload Too Large");
     pub(crate) const HEADERS_TOO_LARGE: Self = Self::new(431, "Request Header Fields Too Large");
     pub(crate) const INTERNAL_ERROR: Self = Self::new(500, "Internal Server Error");
+}
+
+/// Send the phone on to the app, optionally setting a cookie on the way.
+///
+/// A redirect rather than serving the app here, so **the token leaves the
+/// address bar**. Landing on `/pair/exchange?t=…` and staying there would leave
+/// a password-equivalent string in history, in the share sheet, and in whatever
+/// the user pastes when asking for help — for a credential that has already
+/// been superseded by the cookie.
+async fn redirect_to_app<W>(stream: &mut W, set_cookie: Option<String>) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let extra = set_cookie.unwrap_or_default() + "Location: /\r\n";
+    respond_with_headers(
+        stream,
+        Status::SEE_OTHER,
+        "text/plain; charset=utf-8",
+        &extra,
+        b"paired",
+    )
+    .await
 }
 
 pub(crate) async fn respond<W>(
@@ -1537,6 +1666,14 @@ mod tests {
             allowed_hosts: vec!["192.168.0.9:8787".into()],
             on_token_rotated: None,
             tls: None,
+            // A scratch store: these tests must not be able to pair a device
+            // into a developer's real bridge.
+            devices: Arc::new(crate::devices::DeviceStore::load(
+                std::env::temp_dir().join(format!(
+                    "coyote-bridge-unit-devices-{}.json",
+                    std::process::id()
+                )),
+            )),
         }
     }
 
@@ -1585,11 +1722,11 @@ mod tests {
         let ctx = test_ctx();
         let old = ctx.token();
         let target = format!("/healthz?t={old}");
-        assert!(authorised(&target, None, &ctx));
+        assert!(authorised(&target, None, None, &ctx));
 
         ctx.rotate_token();
         assert!(
-            !authorised(&target, None, &ctx),
+            !authorised(&target, None, None, &ctx),
             "a revoked token must be refused"
         );
     }

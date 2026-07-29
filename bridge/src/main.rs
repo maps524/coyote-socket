@@ -350,6 +350,11 @@ fn main() {
     let token_for_http = token.clone();
     let https_bind = args.bind;
     let https_port = args.https_port;
+    // Beside the CA, so one directory is the whole of what a bridge remembers.
+    let devices = Arc::new(coyote_bridge::devices::DeviceStore::load(
+        coyote_bridge::devices::devices_path(&tls_config_dir),
+    ));
+
     let prepared_tls = prepared.is_some();
     let tls_public = prepared.as_ref().map(|p| Arc::clone(&p.public));
     let tls_start = prepared.map(|p| (p.ca, p.material));
@@ -407,6 +412,7 @@ fn main() {
                     allowed_hosts,
                     on_token_rotated: None,
                     tls: https.is_some().then_some(tls_public).flatten(),
+                    devices,
                 });
 
                 // Both listeners share one routing table and one context. Plain

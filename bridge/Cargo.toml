@@ -38,6 +38,7 @@ mdns-sd = "0.20.3"
 # relied on transitively.
 time = { version = "0.3.54", default-features = false, features = ["std"] }
 x509-parser = "0.18.1"
+ring = "0.17.14"
 
 [dev-dependencies]
 # `test-util` gives the paused clock, so keepalive-cadence tests assert
