@@ -447,7 +447,8 @@ GET /dlna/media/<ref>                               the bytes, range-correct
 | Browsing a real Universal Media Server | **Run by hand.** Root, then a 48-entry `videos` folder, with real `dc:title`, `duration`, `resolution` and `size`. |
 | Range requests against a real UMS | **Run by hand**, and byte-for-byte verified — see below. |
 | Playing and **scrubbing** in a browser | **Run, in Chrome (Blink), against the real UMS.** See below. |
-| Safari, Bluefy, or any phone | **Never tried.** The `<res>` ranking is built on what WebKit is documented to decode, not on what it did decode. |
+| The picker, end to end through the UI | **Run**, at phone width, against the real UMS. See below. |
+| Safari, Bluefy, or any phone | **Never tried.** The `<res>` ranking is built on what WebKit is documented to decode, not on what it did decode — see `browser_playable` in `upnp.rs` for the sources and the one version floor it assumes. |
 | HereSphere, on-device media | Out of scope here, and unobserved as ever. |
 
 Scope that precisely: the transport is exercised, one real media server has been
@@ -512,6 +513,33 @@ which is what a seek looks like from this side:
 [media] GET "brainmelter-Gooner-Odyssey" range=bytes=5799936-
 [media] GET "brainmelter-Gooner-Odyssey" range=bytes=1973354496-
 ```
+
+### The picker, end to end
+
+Not just the proxy: the app's own UI, driven through the DOM at 430x932, against
+the real server. Open the picker, walk into a folder, pick a video, and let the
+app's `<video>` load it.
+
+```text
+picker open on MPVR-UMS
+in MPVR-UMS › videos                      46 items
+  BluebubblesPMV-Riley-Reid-vol-5   0:07:14.600 · 1920x1080 · 561 MB
+  Bouncy Bitches                    0:02:12.285 · 1920x1080 ·  74 MB
+  brainmelter-Gooner-Odyssey        0:33:43.304 · 1920x1080 · 2.0 GB
+picked BluebubblesPMV-Riley-Reid-vol-5 -> /dlna/media/4e402722b8a4e128
+metadata 434.6 s, 1920x1080     scrub bar max 434.6
+played to 1.149, seeked to 347.000, still advancing at 348.957
+frame decoded, non-black
+```
+
+The bridge logged `bytes=0-`, `bytes=3997696-` and `bytes=466583552-` for that
+run — the third being the seek.
+
+Two things worth noting from it. Every one of the 46 items was playable, so the
+`unplayable` and unseekable warnings did not appear and **have never been seen
+rendered** — only unit-tested. And the app reported *"No script matches this
+video's name"*, which is the matching path running against the filename rather
+than the title, as intended.
 
 Reproduce it by serving the page from the bridge and opening it:
 

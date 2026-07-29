@@ -248,10 +248,19 @@ impl Dlna {
     /// Mint a reference for a `<res>` URL, refusing anything off the device's
     /// host. Returns `None` when refused.
     ///
-    /// Public because this is the only way a URL ever becomes reachable through
-    /// `/dlna/media/…`, so anything that wants to make one playable has to come
-    /// through the host check here rather than around it. Browsing is the only
-    /// caller in the bridge; the throughput benchmark is the only other one.
+    /// **Public deliberately, and it should stay the only door.** This is the
+    /// one place a URL becomes reachable through `/dlna/media/…`, and the host
+    /// check below is the boundary that stops a rogue SSDP responder pointing
+    /// the bridge at `127.0.0.1:8787` or the router. Public and singular beats
+    /// private with a second path added later: if you have found your way here
+    /// because the check is in the way of something you want to make playable,
+    /// the right move is to call this and satisfy the check, not to add a
+    /// bypass beside it. A bypass would be invisible to every test that guards
+    /// this one.
+    ///
+    /// Browsing is the only caller in the bridge; the throughput benchmark in
+    /// `tests/dlna_media.rs` is the only other one, and it goes through the
+    /// check like everything else.
     pub async fn mint_media_ref(
         &self,
         device: &Device,

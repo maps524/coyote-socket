@@ -736,8 +736,45 @@ pub struct Chosen {
 
 /// MIME types a WebKit `<video>`/`<audio>` element will decode.
 ///
-/// The phone is iOS, because Web Bluetooth on iOS means Bluefy, which is
-/// WebKit. This list is what WebKit plays, not what Chrome plays.
+/// The phone is iOS, because Web Bluetooth on iOS means Bluefy, which is a
+/// WebKit wrapper and therefore uses the system engine. So this list is what
+/// **WebKit** plays, not what Chrome plays — and the two differ in a direction
+/// that matters, since a container Chrome decodes and WebKit does not gives a
+/// video element that loads and shows nothing on the one device this is for.
+///
+/// # Where this list comes from
+///
+/// **Documentation, not observation.** Nothing here has been played in WebKit;
+/// this is the one load-bearing claim in the module that rests on reading
+/// rather than running, and it is written down so the next person can check it
+/// instead of inheriting it.
+///
+/// - **H.264 and HEVC in MP4 are the reliable pair.** Apple's *Creating Video
+///   for Safari on iPhone* is the long-standing statement of this, and it is
+///   why [`score`] ranks `video/mp4` above everything else that is merely
+///   accepted.
+///   <https://developer.apple.com/library/archive/documentation/AppleApplications/Reference/SafariWebContent/CreatingVideoforSafarioniPhone/CreatingVideoforSafarioniPhone.html>
+/// - **WebM is supported, but recently, and with a caveat.** Safari on macOS
+///   has had WebM with VP8 and VP9 since 14.1; **iOS and iPadOS only gained it
+///   in 17.4** — before that it was VP8 in WebRTC only. So `video/webm` here
+///   assumes a phone on iOS 17.4 or later.
+///   <https://webkit.org/blog/15063/webkit-features-in-safari-17-4/>
+///   The caveat: VP9 is decoded for 4:2:0 and 4:2:2 chroma subsampling only, so
+///   a 4:4:4 file plays in Chromium and Firefox and not here. A DLNA server is
+///   unlikely to be serving 4:4:4 VP9, which is why this is a note rather than
+///   an exclusion.
+/// - **Matroska, AVI and MPEG-2 are excluded**, and they are the common DLNA
+///   offerings that a naive "take the first `<res>`" would pick. Universal
+///   Media Server listed `video/x-matroska` *before* `video/mp4` in the fixture
+///   this module is tested against.
+///
+/// # If this list is wrong
+///
+/// The symptom is a video element that loads and shows nothing, with no error —
+/// the silent failure this module is arranged around. [`Chosen::rejected`]
+/// carries what was passed over and why, so the first question ("what else was
+/// on offer?") is answerable from `/dlna/browse.json` rather than from a packet
+/// capture. Correct the list here; do not special-case at the call site.
 fn browser_playable(mime: &str) -> bool {
     matches!(
         mime.to_ascii_lowercase().as_str(),
