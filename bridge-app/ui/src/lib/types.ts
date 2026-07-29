@@ -165,10 +165,18 @@ export interface ClientView {
   createdMs: number | null
   /**
    * Whether "revoke this device" is coherent here. Only a verified credential
-   * qualifies: revoking a self-reported id closes a socket that reconnects a
-   * second later under any id it likes.
+   * that has not already been revoked: revoking a self-reported id closes a
+   * socket that reconnects a second later under any id it likes.
    */
   revocable: boolean
+  /**
+   * When this device was revoked, if it was, during this run.
+   *
+   * The row outlives its sockets by minutes — exactly the minutes someone
+   * spends checking the revoke worked — so it says what happened rather than
+   * sitting there still tagged "verified".
+   */
+  revokedAtMs: number | null
   connected: boolean
   /** Open sockets. Two tabs on one phone is two sockets, one device. */
   sockets: number

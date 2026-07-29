@@ -143,7 +143,17 @@
             does not, and a panel that rendered them alike would be trusted
             further than it earns.
           -->
-          {#if client.provenance === 'credential'}
+          {#if client.revokedAtMs !== null}
+            <!--
+              Takes precedence over "verified", which is what this row would
+              otherwise still be claiming for a credential that has just been
+              deleted — on the one screen someone consults to check that the
+              revoke worked.
+            -->
+            <span class="tag bad" title="This device's credential was deleted. It cannot reconnect.">
+              revoked
+            </span>
+          {:else if client.provenance === 'credential'}
             <span class="tag ok" title="A per-device credential this bridge verified.">
               verified
             </span>
@@ -171,6 +181,9 @@
             <span>connected {clockTime(client.connectedAtMs)} · {ago(client.connectedAtMs)} ago</span>
           {:else if client.disconnectedAtMs !== null}
             <span>left {ago(client.disconnectedAtMs)} ago</span>
+          {/if}
+          {#if client.revokedAtMs !== null}
+            <span>revoked {ago(client.revokedAtMs)} ago — cannot reconnect</span>
           {/if}
           {#if client.createdMs !== null}
             <span>paired {new Date(client.createdMs).toLocaleDateString()}</span>
@@ -312,6 +325,11 @@
 
   .dot.warn {
     background: var(--warn);
+  }
+
+  .tag.bad {
+    color: var(--bad);
+    border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
   }
 
   .tag.ok {

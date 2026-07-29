@@ -434,12 +434,21 @@ pub struct ClientView {
     pub maybe_same_as: Option<String>,
     /// Whether "revoke this device" is a coherent action on this row.
     ///
-    /// True only for a verified credential: there is something durable to
-    /// delete, and deleting it means the device cannot come back. Revoking a
-    /// self-reported id would close a socket that reconnects a second later
-    /// under any id it likes, which is a button that appears to work and does
-    /// not — the failure mode this whole panel exists to stop shipping.
+    /// True only for a verified credential that has not already been revoked:
+    /// there is something durable to delete, and deleting it means the device
+    /// cannot come back. Revoking a self-reported id would close a socket that
+    /// reconnects a second later under any id it likes, which is a button that
+    /// appears to work and does not — the failure mode this whole panel exists
+    /// to stop shipping.
     pub revocable: bool,
+    /// When this device was revoked, if it was, during this bridge run.
+    ///
+    /// The row outlives the sockets by minutes, and those are exactly the
+    /// minutes in which someone is looking at the panel to check the revoke
+    /// worked. Without this it would still read "verified" — a credential that
+    /// no longer exists, described on the screen that is supposed to confirm
+    /// its removal.
+    pub revoked_at_ms: Option<u64>,
 }
 
 /// Everything the panel and `/healthz` render.
@@ -492,6 +501,10 @@ struct Record {
     label: Option<String>,
     agent: Option<String>,
     created_ms: Option<u64>,
+    /// Set by [`ClientRegistry::revoke`]. Survives the sockets closing, so the
+    /// gone row says what happened to it rather than looking like a device
+    /// that merely wandered off.
+    revoked_at_ms: Option<u64>,
     first_seen_ms: u64,
     connected_at_ms: u64,
     disconnected_at_ms: Option<u64>,
@@ -686,8 +699,8 @@ impl ClientRegistry {
             id: id.to_string(),
         };
         let closed = {
-            let inner = self.inner.lock().expect("client registry lock");
-            match inner.records.get(&key) {
+            let mut inner = self.inner.lock().expect("client registry lock");
+            match inner.records.get_mut(&key) {
                 Some(record) => {
                     for conn in &record.open {
                         // The relay sees this and sends a close frame that says
@@ -696,11 +709,25 @@ impl ClientRegistry {
                         // has spent a day removing.
                         let _ = conn.close.send(true);
                     }
+                    // Mark the row, not just the sockets.
+                    //
+                    // The sockets close within milliseconds and the row then
+                    // lingers as "recently disconnected" for minutes — which is
+                    // the window in which someone is looking at this panel,
+                    // because they just pressed revoke. Left alone it would go
+                    // on wearing its "verified" tag for a credential that no
+                    // longer exists, on the one screen that answers "did that
+                    // work?". Historically accurate and actively misleading is
+                    // the same trade this module refused everywhere else.
+                    record.revoked_at_ms = Some(now_ms());
                     record.open.len()
                 }
                 None => 0,
             }
         };
+        // Bump even when nothing was open: the row's meaning changed, and the
+        // panel is being watched right now.
+        self.bump();
         if closed > 0 {
             crate::log_info!("[clients] revoked device closed {closed} live socket(s)");
         }
@@ -838,6 +865,7 @@ impl Inner {
                         label,
                         agent,
                         created_ms,
+                        revoked_at_ms: None,
                         first_seen_ms: now,
                         connected_at_ms: conn.connected_at_ms,
                         disconnected_at_ms: None,
@@ -969,7 +997,9 @@ impl Record {
                 Key::Anonymous(_) => None,
             },
             created_ms: self.created_ms,
-            revocable: self.key.provenance() == Some(Provenance::Credential),
+            revocable: self.key.provenance() == Some(Provenance::Credential)
+                && self.revoked_at_ms.is_none(),
+            revoked_at_ms: self.revoked_at_ms,
             label: self.label.clone(),
             connected: !self.open.is_empty(),
             sockets: self.open.len(),
@@ -1581,6 +1611,51 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// The panel is what someone looks at immediately after pressing revoke,
+    /// and the row outlives the socket by minutes. It must not go on saying
+    /// "verified" for a credential that has just been deleted.
+    #[test]
+    fn a_revoked_row_says_so_rather_than_staying_verified() {
+        let reg = registry();
+        let handle = reg.connect(
+            addr("192.168.0.31:5000"),
+            Some(PHONE),
+            credential("dev-0001", Some("Sara's phone")),
+        );
+        assert!(reg.view().clients[0].revocable);
+
+        reg.revoke("dev-0001");
+        drop(handle); // the relay notices and the socket closes
+
+        let view = reg.view();
+        assert_eq!(view.connections, 0);
+        let row = &view.clients[0];
+        assert!(row.revoked_at_ms.is_some(), "the row records what happened");
+        assert!(
+            !row.revocable,
+            "there is nothing left to revoke, so the action must not be offered again"
+        );
+        // The provenance stays truthful about what the connection *was* — the
+        // row is annotated, not rewritten.
+        assert_eq!(row.provenance, Some(Provenance::Credential));
+    }
+
+    /// Revoking a device with no live socket still changes what the panel says.
+    /// The user pressed the button; something has to answer.
+    #[test]
+    fn revoking_an_offline_device_still_marks_the_row_and_wakes_the_panel() {
+        let reg = registry();
+        let handle = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-0001", None));
+        drop(handle);
+
+        let mut rx = reg.subscribe();
+        let _ = rx.borrow_and_update();
+
+        assert_eq!(reg.revoke("dev-0001"), 0, "nothing was open");
+        assert!(rx.has_changed().unwrap(), "the row's meaning changed");
+        assert!(reg.view().clients[0].revoked_at_ms.is_some());
     }
 
     /// Revocation is keyed on a verified credential. A self-reported id is not
