@@ -128,7 +128,7 @@ That is what makes it expensive. Reading the code confirms the guard is
 covering the case, a warning covering the condition, an assertion covering the
 regression — and every one of those observations is true and useless.
 
-### The five, and how they were found
+### The first five, and how they were found
 
 The first three were introduced **in the commits fixing §0 instances**, by
 someone who had read this section that morning and was consciously applying it.
@@ -142,6 +142,7 @@ code.
 | A warning that a file was excluded for exceeding the size cap | whenever a file was excluded | whenever the *script listing* changed, so a library whose only file was oversized said nothing |
 | **`ScanState::Failed`** — the whole three-state mechanism from §0 | whenever the library could not be read | whenever the directory's *mtime moved or it would not `stat`*, so a directory that stats fine but refuses `read_dir` never triggered a scan, produced no verdict, and went on reporting `scan: "ok"` with a frozen `checkedAtMs` |
 | A test asserting an oversized file is reported when it is the only entry | on the fix — the log in `poll` | on the precondition — `scan`'s return value, which is unchanged by reverting the fix |
+| The install page's trust check, reported as **"you are all set"** | as evidence about pairing | as evidence about the certificate only — see the sixth, below |
 
 Note how each one *nearly* works, and works in exactly the conditions you would
 test it in. The status test passes for every status that exists today. The
@@ -251,6 +252,66 @@ that has no path to it. **Both are invisible in a diff**, which is why they
 belong together: the diff shows the guard arriving and shows the surrounding
 lines unchanged, and neither fact is the one that matters. Ask both of every
 change that adds a check.
+
+### The sixth, and why running the code would not have caught it
+
+`/install?t=wrongtoken` rendered the complete setup flow, announced **"Trusted —
+you are all set"**, and passed the bad token into the button. A stale QR from an
+earlier run reaches it; so does one mistyped character. Everything afterwards
+failed as "bridge unreachable" — the confusion `/paired` had just been added to
+end, reachable from the *first screen* of the flow.
+
+The guard that was inert: the page's trust check answers *"does this phone trust
+the certificate"*, which can be perfectly true while the token is wrong. Two
+independent facts, one verified, both announced.
+
+**This is the instance that shows the mechanical fix above is not sufficient.**
+Running the code and reverting the fix catch a guard whose *implementation* is
+wrong. This one's implementation was fine — the trust probe worked exactly as
+written. What was wrong was its **scope**: it was asked about the certificate
+and its answer was reported as being about the whole flow. Someone doing both
+mechanical steps, conscientiously, would still not have found it, because both
+steps confirm the guard does what it says and neither asks whether what it says
+is the question that matters.
+
+Two reviews missed it for the same reason: both varied the conditions the page
+was *about* — an unbound listener, a missing certificate — and neither varied
+the token, because the token was not what the page was thought to be about.
+
+> **Reading finds bugs in the thing you are looking at.**
+
+The action that found it is cheap and is not reviewing: **take the input the
+feature is not "about" and make it wrong.** Run it, and read what the page then
+claims.
+
+### The same defect applies to reading code, not only to writing it
+
+The mDNS unit test was reported as a live hazard across two separate reviews,
+and in one propagated further. It was not live: it had carried `#[ignore]` for
+several commits. The claim rested on a grep that matched the call site fifteen
+lines below the attribute that disables it.
+
+> **A grep result is a string match, not a proof of execution.** Attributes,
+> `cfg`, feature gates and early returns all live outside the matched line, and
+> a search pattern can be constructed so that none of them can appear in the
+> output.
+
+That is this section read backwards. The guard was there; what was reported was
+the success path being reached, without checking whether the guard ran — the
+same defect with author and reviewer swapped. The reviewing version is cheaper
+to make and easier to repeat, because a grep that confirms a suspicion feels
+like evidence.
+
+It generalises past grep. A test result is also only evidence of what the test
+actually measured: a `biased` regression test elsewhere in this repo drained an
+opening burst by counting two messages, a third was added, and the test then
+reported one leaked frame per round, thirty times out of thirty — a clean
+systematic offset wearing the clothes of a lost coin toss. Read carelessly it
+said the feature was broken. It was the test that was wrong.
+
+The counter-question matches the one above: not *"does this line exist?"* or
+*"did this test pass?"* but **"what would have to be true for this to run, and
+is that what it measured?"**
 
 ---
 
@@ -558,90 +619,11 @@ trust and nothing else.
   This entry must survive rebases intact. It is the one item where the next
   commit can introduce a hardware-safety failure by doing the obvious thing.
 
----
-
-## 3. The bug family this session kept producing
-
-Five instances across two crates in one evening, and they are the same bug:
-
-| Where | The state that lied |
-|---|---|
-| TLS bind ordering | `ctx.tls` said HTTPS was up before the listener bound |
-| `http_error` | "no error" also meant "not asked yet" |
-| `Urls.tls_ready` | computed from intent, never corrected by the bind |
-| Clients panel | a revoked row kept its **verified** tag for ten minutes |
-| `DeviceStore` write order | memory revoked, disk unchanged — the device returns on restart |
-| Install page token | `?t=wrongtoken` rendered the setup flow and said **you are all set** |
-
-**The diagnosis, which is more useful than the list:** *the safe-looking state
-is almost always the one you get by not writing code.* The new mechanism gets
-written because it is obviously the work — bind the listener, close the socket,
-delete the record. The existing value keeps being whatever it already was, and
-nobody chose it, so nobody checks it.
-
-Both halves of the fix follow from that. It is nearly always **making an
-existing value change**, not adding a mechanism. And the review question that
-finds these is not "what did this change?" but **"what did this leave alone
-that now means something different?"**
-
-### The sixth one was found by probing, and neither review found it by reading
-
-`/install?t=wrongtoken` rendered the complete setup flow, announced **"Trusted —
-you are all set"**, and passed the bad token into the button. A stale QR from an
-earlier run reaches it; so does one mistyped character. Everything afterwards
-then failed as "bridge unreachable" — the confusion `/paired` had just been
-added to end, reachable from the *first screen* of the flow.
-
-It is the same family with a sharper edge: **a check whose success path is
-reached without the check happening.** The trust probe answers "does this phone
-trust the certificate", which can be perfectly true while the token is wrong —
-two independent facts, one of them verified, both of them announced.
-
-Two separate defects wearing one symptom, and both had to be fixed:
-
-1. **The page claimed more than it had established.** Now it says "Certificate
-   trusted" and that tapping the button finishes pairing, because that is what
-   the probe actually shows.
-2. **The page rendered a success path for input it could already reject.**
-   Ungated is not the same as unchecked: the certificate must be fetchable
-   without a credential, but a token the bridge can see is wrong now gets a page
-   that says so and points at a fresh QR.
-
-**Why neither review caught it:** both verified the page against conditions they
-had chosen — an unbound listener, a missing certificate — and neither varied the
-token, because the token was not what the page was thought to be about. Reading
-finds bugs in the thing you are looking at. This was found by diffing the page
-against itself with one input changed.
-
-The generalisable move is cheap: **take the input the page is not "about" and
-make it wrong.**
-
-### The same defect applies to reading code, not only to writing it
-
-The mDNS unit test was reported as a live hazard across two separate reviews,
-and in one propagated further. It was not live: it had carried `#[ignore]` for
-several commits. The claim rested on a grep that matched the call site fifteen
-lines below the attribute that disables it.
-
-> **A grep result is a string match, not a proof of execution.** Attributes,
-> `cfg`, feature gates and early returns all live outside the matched line, and
-> a search pattern can be constructed so that none of them can appear in the
-> output.
-
-That is this same family read backwards. The guard was there; what was reported
-was the success path being reached, without checking whether the guard ran —
-which is exactly what the five bugs above do, with the roles of author and
-reviewer swapped. The reviewing version is cheaper to fix and easier to repeat,
-because a grep that confirms a suspicion feels like evidence.
-
-The counter-question matches the other one: not *"does this line exist?"* but
-**"what would have to be true for this line to run?"**
-
-Related, and worth keeping when the next convenience feature is proposed:
-**any credential a client can re-acquire without a person present is not
-revocable, only rate-limited.** That is why the token was removed from the PWA
-manifest's `start_url`, and it applies unchanged to a "remember this device"
-option or a refresh-token design.
+- **A principle worth keeping when the next convenience feature is proposed:**
+  *any credential a client can re-acquire without a person present is not
+  revocable, only rate-limited.* That is why the token was removed from the PWA
+  manifest's `start_url`, and it applies unchanged to a "remember this device"
+  option or a refresh-token design.
 
 - **Token exposure on the first hop, and what rotation does *not* fix.** The QR
   points at plain HTTP by necessity, so the pairing token is readable by anyone
