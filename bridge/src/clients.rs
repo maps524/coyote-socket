@@ -26,9 +26,18 @@
 //! | `User-Agent` | A device *class* at best. Two identical iPhones are byte-identical here, and it is trivially forged. |
 //! | `Sec-WebSocket-Key` | Random per connection. Actively anti-identity. |
 //!
-//! That list is exhaustive for what the bridge can observe *on its own*, and
-//! none of it identifies anything. Identity has to be something the client
-//! carries, and there are two grades of it — see [`Provenance`]:
+//! That list covers the signals that arrive on any connection and identify
+//! nobody. It is **not** a list of everything the bridge can observe: since
+//! pairing landed it also reads a `Cookie` and verifies it against its own
+//! store, which identifies a browser and involves no client honesty at all.
+//!
+//! (This sentence previously called the table "exhaustive for what the bridge
+//! can observe on its own", which was true before that store existed and is the
+//! subject-narrowing described in `FOLLOW-UPS.md` §0f. It is also the one
+//! instance where the absolutes grep would have passed the file.)
+//!
+//! Identity has to be carried, and there are two grades of it — see
+//! [`Provenance`]:
 //!
 //! - **A verified per-device credential.** Minted by the pairing flow: the
 //!   token on the QR is exchanged once, over the HTTPS origin, for a
