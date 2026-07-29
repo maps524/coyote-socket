@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>proxy probe</title>
+<body>
+<video id="v" playsinline muted preload="metadata"></video>
+<pre id="out">starting</pre>
+<script>
+// Load a proxied DLNA video, play it, seek deep into it, and report what the
+// media stack actually did. Printed into the DOM so `--dump-dom` can read it.
+const log = [];
+const out = document.getElementById('out');
+const v = document.getElementById('v');
+const say = (m) => { log.push(m); out.textContent = log.join('\n'); };
+
+const url = new URLSearchParams(location.search).get('media');
+const seekTo = Number(new URLSearchParams(location.search).get('seek') || '95');
+
+v.addEventListener('error', () => say('ERROR ' + JSON.stringify(v.error && {code: v.error.code, message: v.error.message})));
+v.addEventListener('loadedmetadata', () => {
+  say('METADATA duration=' + v.duration.toFixed(3) + ' size=' + v.videoWidth + 'x' + v.videoHeight);
+  v.play().then(() => say('PLAYING')).catch((e) => say('PLAY-REJECTED ' + e));
+});
+
+let seeked = false;
+v.addEventListener('timeupdate', () => {
+  if (!seeked && v.currentTime > 0.2) {
+    seeked = true;
+    say('ADVANCED to=' + v.currentTime.toFixed(3));
+    say('SEEKING to=' + seekTo);
+    v.currentTime = seekTo;
+  }
+});
+
+v.addEventListener('seeked', () => {
+  say('SEEKED to=' + v.currentTime.toFixed(3) + ' readyState=' + v.readyState);
+  // Prove it is decoding *after* the seek, not just reporting a time.
+  const at = v.currentTime;
+  setTimeout(() => {
+    say('AFTER-SEEK-PLAYBACK from=' + at.toFixed(3) + ' now=' + v.currentTime.toFixed(3) +
+        ' advanced=' + (v.currentTime - at).toFixed(3) + ' readyState=' + v.readyState);
+    try {
+      const c = document.createElement('canvas');
+      c.width = 32; c.height = 18;
+      c.getContext('2d').drawImage(v, 0, 0, 32, 18);
+      const px = c.getContext('2d').getImageData(0, 0, 32, 18).data;
+      let sum = 0;
+      for (let i = 0; i < px.length; i += 4) sum += px[i] + px[i+1] + px[i+2];
+      say('FRAME-DECODED nonblack=' + (sum > 0) + ' luma-sum=' + sum);
+    } catch (e) {
+      say('FRAME-READ-FAILED ' + e);
+    }
+    say('DONE');
+    // Report back through the request path, which the bridge logs in full.
+    // The query string is redacted there, deliberately — it is where the token
+    // lives — so the result has to travel as a path segment.
+    location.replace('/probe-result/' + encodeURIComponent(log.join(' | ')));
+  }, 2500);
+});
+
+say('LOADING ' + url);
+v.src = url;
+</script>
+</body>

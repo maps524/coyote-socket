@@ -446,11 +446,13 @@ GET /dlna/media/<ref>                               the bytes, range-correct
 | SSDP `M-SEARCH` against a real network | **Run, once, by hand.** Found `MPVR-UMS` (UMS 15.7.0, Linux) at `192.168.0.4:5001` in 2.5 s: 3 searches sent from `192.168.0.9`, 3 replies. No test multicasts. |
 | Browsing a real Universal Media Server | **Run by hand.** Root, then a 48-entry `videos` folder, with real `dc:title`, `duration`, `resolution` and `size`. |
 | Range requests against a real UMS | **Run by hand**, and byte-for-byte verified — see below. |
-| Playing in Safari or Bluefy | **Never tried.** No phone has loaded any of this. |
+| Playing and **scrubbing** in a browser | **Run, in Chrome (Blink), against the real UMS.** See below. |
+| Safari, Bluefy, or any phone | **Never tried.** The `<res>` ranking is built on what WebKit is documented to decode, not on what it did decode. |
 | HereSphere, on-device media | Out of scope here, and unobserved as ever. |
 
-Scope that precisely: the transport is exercised and one real media server has
-been browsed and streamed from. Nothing has been played in a browser.
+Scope that precisely: the transport is exercised, one real media server has been
+browsed and streamed from, and one browser engine has played and seeked through
+the proxy. The phone — which is the actual target — remains untried.
 
 ### `<res>` selection is not "take the first one"
 
@@ -482,6 +484,49 @@ bytes=2097125195-2097190730      IDENTICAL   (the final block)
 An open-ended seek 2 GB in answered `206 … Content-Range: bytes
 2000000000-2097190730/2097190731` with **15 ms** to first byte.
 
+### It plays, and it scrubs
+
+The acceptance condition, met by a real browser media stack rather than by
+`curl`. `fixtures/proxy-probe.html` loads a proxied video, plays it, seeks, and
+reports what the `<video>` element actually did — including reading a frame back
+through a canvas, so "seeked" means a decoded picture and not merely a
+`currentTime` that changed.
+
+Chrome (headless, Blink), against the 2,023-second, 2 GB video on the real UMS:
+
+```text
+METADATA duration=2023.304 size=1920x1080
+PLAYING
+ADVANCED to=0.463
+SEEKING to=1900
+SEEKED to=1900.000 readyState=4
+AFTER-SEEK-PLAYBACK from=1900.000 now=1902.460 advanced=2.460 readyState=4
+FRAME-DECODED nonblack=true luma-sum=313046
+```
+
+The bridge's own log for the same run shows the media stack's three requests,
+which is what a seek looks like from this side:
+
+```text
+[media] GET "brainmelter-Gooner-Odyssey" range=bytes=0-
+[media] GET "brainmelter-Gooner-Odyssey" range=bytes=5799936-
+[media] GET "brainmelter-Gooner-Odyssey" range=bytes=1973354496-
+```
+
+Reproduce it by serving the page from the bridge and opening it:
+
+```bash
+cargo run --bin coyote-bridge -- --http-port 8799 --token <hex> --static-dir <dir-containing-proxy-probe.html>
+# then, with a mediaUrl taken from /dlna/browse.json:
+#   http://127.0.0.1:8799/probe.html?t=<hex>&media=<url-encoded mediaUrl>&seek=1900
+```
+
+The page reports its result by navigating to `/probe-result/<encoded>`, because
+the access log redacts query strings — that is where the token lives — and keeps
+paths. Headless Chrome's `--dump-dom` is no use here: `--virtual-time-budget`
+does not advance media loading, so the dump lands before the video has done
+anything.
+
 ### The cost of being in the playback path
 
 **Measured, on the worse of the two deployments.** 200 MB pulled through the
@@ -499,9 +544,32 @@ is not the constraint. On a congested 2.4 GHz network, where both hops share one
 radio, it is the difference between playing and stalling.
 
 **Co-location removes the second hop entirely** — that is the deployment this
-was designed for, and the case where the proxy costs a memcpy through a 64 KiB
-buffer. It has not been measured, because the machine to measure it on is the
-one running UMS.
+was designed for. It cannot be measured against the real server, because the
+machine to measure it on is the one running UMS. What *can* be measured is the
+proxy's own contribution with both hops on loopback, which bounds it:
+`measure_the_loopback_proxy_cost` in `tests/dlna_media.rs`, 512 MB, three
+alternating rounds after a warm-up.
+
+```text
+direct from the origin  :    190 MB/s median   (190, 244, 171)
+through the proxy       :    385 MB/s median   (446, 343, 385)
+```
+
+**Do not read a ratio into that.** The proxy is consistently *faster* than the
+"direct" read, which means the direct figure is not a baseline: reading one
+socket in lockstep with the origin's writes is slower than reading from a proxy
+that has already buffered ahead. The bottleneck is the test's own reader. The
+one claim it supports is the one that matters — a 25 Mb/s VR stream is about
+3 MB/s, and both figures are two orders of magnitude above it, so on loopback
+the proxy is not the constraint.
+
+It is an `#[ignore]`d test rather than an assertion, because a throughput number
+depends on the machine. Run it and read the output rather than trusting this
+paragraph:
+
+```bash
+cargo test --release --test dlna_media -- --ignored --nocapture measure_the_loopback
+```
 
 There is no way to avoid any of this while the page is on HTTPS, which it must
 be for Web Bluetooth.

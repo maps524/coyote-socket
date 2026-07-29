@@ -247,7 +247,18 @@ impl Dlna {
 
     /// Mint a reference for a `<res>` URL, refusing anything off the device's
     /// host. Returns `None` when refused.
-    async fn mint(&self, device: &Device, item_id: &str, title: &str, res_url: &str) -> Option<String> {
+    ///
+    /// Public because this is the only way a URL ever becomes reachable through
+    /// `/dlna/media/…`, so anything that wants to make one playable has to come
+    /// through the host check here rather than around it. Browsing is the only
+    /// caller in the bridge; the throughput benchmark is the only other one.
+    pub async fn mint_media_ref(
+        &self,
+        device: &Device,
+        item_id: &str,
+        title: &str,
+        res_url: &str,
+    ) -> Option<String> {
         let upstream = Url::parse(res_url)?;
         if upstream.host != device.description_url.host {
             log_warn!(
@@ -582,7 +593,7 @@ async fn browse(dlna: &Dlna, params: &HashMap<String, String>) -> Action {
         let (media_url, reason, seekable, unplayable, duration, resolution, size) = match chosen {
             Ok(c) => {
                 let minted = dlna
-                    .mint(&device, &item.id, &item.title, &c.res.url)
+                    .mint_media_ref(&device, &item.id, &item.title, &c.res.url)
                     .await;
                 let unplayable = if minted.is_none() {
                     Some(format!(
@@ -741,7 +752,7 @@ mod tests {
         let dlna = Dlna::new();
         let d = device();
         let id = dlna
-            .mint(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/ums/media/x.mp4")
+            .mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/ums/media/x.mp4")
             .await
             .unwrap();
 
@@ -765,14 +776,14 @@ mod tests {
             "http://trusted@192.168.0.99/x.mp4",
         ] {
             assert!(
-                dlna.mint(&d, "1", "t", hostile).await.is_none(),
+                dlna.mint_media_ref(&d, "1", "t", hostile).await.is_none(),
                 "should refuse {hostile}"
             );
         }
         // The same host on another port is allowed: servers really do split
         // description and media across ports.
         assert!(dlna
-            .mint(&d, "1", "t", "http://192.168.0.4:9001/media/x.mp4")
+            .mint_media_ref(&d, "1", "t", "http://192.168.0.4:9001/media/x.mp4")
             .await
             .is_some());
     }
@@ -783,11 +794,11 @@ mod tests {
     async fn the_same_item_mints_the_same_reference() {
         let dlna = Dlna::new();
         let d = device();
-        let a = dlna.mint(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4").await;
-        let b = dlna.mint(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4").await;
+        let a = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4").await;
+        let b = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4").await;
         assert_eq!(a, b);
 
-        let other = dlna.mint(&d, "1$7$254", "Ep II", "http://192.168.0.4:5001/b.mp4").await;
+        let other = dlna.mint_media_ref(&d, "1$7$254", "Ep II", "http://192.168.0.4:5001/b.mp4").await;
         assert_ne!(a, other);
     }
 
@@ -796,7 +807,7 @@ mod tests {
         let dlna = Dlna::new();
         let d = device();
         for i in 0..(MAX_REFS + 50) {
-            dlna.mint(&d, &format!("id{i}"), "t", &format!("http://192.168.0.4:5001/{i}.mp4"))
+            dlna.mint_media_ref(&d, &format!("id{i}"), "t", &format!("http://192.168.0.4:5001/{i}.mp4"))
                 .await;
         }
         assert!(dlna.state.lock().await.refs.len() <= MAX_REFS);
