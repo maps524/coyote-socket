@@ -513,6 +513,135 @@ async fn the_token_never_appears_in_the_log() {
     );
 }
 
+/// **The keepalive contract, end to end.**
+///
+/// A consumer that stops driving hardware on silence needs silence to mean
+/// exactly one thing. This asserts it against a player that is not merely
+/// paused but entirely absent — the harshest case, since nothing at all is
+/// arriving from the player side to accidentally keep the stream warm.
+///
+/// The dependency this protects is real and downstream: the PWA distinguishes
+/// "player paused" (hold the clock, keep driving output) from "bridge silent"
+/// (stop). Confusing those in the wrong direction means output continues when
+/// nothing is watching.
+#[tokio::test]
+async fn the_relay_keeps_talking_while_the_player_says_nothing() {
+    // No player task at all, and a snapshot nobody ever touches. Pointing the
+    // client at a dead port would not do: its retry loop flips the link
+    // between Connecting and Retrying on a backoff, and those changes would
+    // drive the relay on their own — the test would pass without a keepalive
+    // existing. The guarantee is about a stream with *no* state changes in it.
+    let (snapshot_tx, snapshot_rx) = watch::channel(PlayerSnapshot::new("nobody:23554".into()));
+    let (cmd_tx, _cmd_rx) = mpsc::channel(4);
+    std::mem::forget(snapshot_tx); // keep the channel open, change nothing
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base = format!("http://127.0.0.1:{port}");
+    let token = Token::generate();
+    tokio::spawn(http::run(
+        listener,
+        std::sync::Arc::new(http::Ctx {
+            snapshot_rx,
+            cmd_tx,
+            static_dir: None,
+            pairing_base: base.clone(),
+            token: std::sync::RwLock::new(token.clone()),
+            allowed_hosts: vec![format!("127.0.0.1:{port}")],
+            on_token_rotated: None,
+        }),
+    ));
+
+    let ws_url = format!("{}/ws?t={token}", base.replace("http://", "ws://"));
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    let _hello = next_text(&mut ws).await;
+    let _initial = next_text(&mut ws).await;
+
+    // Three keepalives, each inside a window generous enough to survive a
+    // loaded CI box but far short of any plausible safety deadline.
+    let budget = http::RELAY_KEEPALIVE * 4;
+    for round in 1..=3 {
+        let text = tokio::time::timeout(budget, next_text(&mut ws))
+            .await
+            .unwrap_or_else(|_| {
+                panic!("no keepalive within {budget:?} on round {round} — a consumer would \
+                        have concluded the bridge was dead while it was fine")
+            });
+        let msg: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(msg["type"], "player", "keepalives carry the normal snapshot");
+        // And it says the player is absent, rather than leaving that to be
+        // inferred from silence.
+        assert_ne!(msg["link"], "connected");
+    }
+}
+
+/// A *paused* player still reaches the phone, on its own merits.
+///
+/// Distinct from the keepalive test above, and it passes without the keepalive
+/// existing — deliberately so. A paused DeoVR keeps sending `currentTime`
+/// unchanged at its normal cadence, and this asserts that a snapshot whose
+/// playback fields are identical still gets pushed. If `watch` suppressed a
+/// no-op update, a paused player would fall back on the keepalive and be
+/// indistinguishable from a stopped one at the exact resolution a consumer
+/// cares about.
+///
+/// This is the case the downstream design turns on: "paused" means hold the
+/// clock and keep driving output; "silent" means stop. Confusing them in the
+/// wrong direction means output continues when nothing is watching.
+#[tokio::test]
+async fn a_paused_player_keeps_the_relay_talking() {
+    let (snapshot_tx, snapshot_rx) = watch::channel(PlayerSnapshot::new("paused:23554".into()));
+    let (cmd_tx, _cmd_rx) = mpsc::channel(4);
+
+    // A player that is connected and paused: position never moves.
+    snapshot_tx.send_modify(|s| {
+        s.link = LinkState::Connected;
+        s.epoch = 1;
+        let packet: coyote_bridge::state::PlayerPacket =
+            serde_json::from_str(r#"{"path":"a.mp4","duration":600.0,"currentTime":42.0,"playerState":1}"#)
+                .unwrap();
+        s.apply(&packet, 1_000);
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base = format!("http://127.0.0.1:{port}");
+    let token = Token::generate();
+    tokio::spawn(http::run(
+        listener,
+        std::sync::Arc::new(http::Ctx {
+            snapshot_rx,
+            cmd_tx,
+            static_dir: None,
+            pairing_base: base.clone(),
+            token: std::sync::RwLock::new(token.clone()),
+            allowed_hosts: vec![format!("127.0.0.1:{port}")],
+            on_token_rotated: None,
+        }),
+    ));
+
+    let ws_url = format!("{}/ws?t={token}", base.replace("http://", "ws://"));
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let _hello = next_text(&mut ws).await;
+    let _initial = next_text(&mut ws).await;
+
+    // Repeat the identical packet at the player's real cadence, as a paused
+    // DeoVR does, and require the relay to keep pushing.
+    let packet: coyote_bridge::state::PlayerPacket =
+        serde_json::from_str(r#"{"currentTime":42.0,"playerState":1}"#).unwrap();
+    let budget = http::RELAY_KEEPALIVE * 4;
+    for round in 1..=3u64 {
+        snapshot_tx.send_modify(|s| s.apply(&packet, 1_000 + round * 1_000));
+        let text = tokio::time::timeout(budget, next_text(&mut ws))
+            .await
+            .unwrap_or_else(|_| panic!("paused player produced no message on round {round}"));
+        let msg: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(msg["link"], "connected", "still connected, just paused");
+        assert_eq!(msg["positionS"], 42.0, "position is unchanged, as expected");
+    }
+}
+
 /// Rotation is refused over plaintext. A replacement token delivered in
 /// cleartext hands the eavesdropper the replacement too.
 #[tokio::test]

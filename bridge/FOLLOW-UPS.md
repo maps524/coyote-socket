@@ -52,6 +52,37 @@ have looked defensible right up until it jumped a script back two minutes,
 straight into the unramped-resume behaviour recorded in
 `docs/follow-ups/resume-ramp.md`.
 
+### Partly built: the relay keepalive
+
+The half of this that a downstream consumer could not work around itself has
+landed, because a PWA client was about to depend on something that was not
+true.
+
+Its assumption was that the relay pushes once per player packet, so a paused
+player produces ~1 message/s and silence therefore means the bridge is gone.
+Measured, that assumption splits in two:
+
+- **A paused player does still push.** `send_modify` notifies unconditionally
+  even when the closure changes nothing, so a repeated identical packet reaches
+  the phone. Asserted in `http.rs`'s tests rather than trusted to tokio's
+  documentation, because a safety decision rests on it.
+- **But packet count is not push count, and the gap is unbounded.** State
+  crosses a `watch`, which keeps one slot. A consumer that is not polling —
+  backgrounded tab, congested link, stalled render — collapses any number of
+  updates into a single delivery. Measured: 500 updates, one wake. **There is
+  no deadline that can be sized against that**, so the honest answer was not to
+  tighten one.
+
+So the relay now resends the current snapshot every
+[`RELAY_KEEPALIVE`](src/http.rs) (1 s, matching the player's observed cadence)
+whenever nothing has changed, and the timer resets on every change-driven send.
+That makes "the bridge is alive" independent of "the player produced traffic",
+which is the property a consumer actually needs, and it means silence has
+exactly one cause. The full may/may-not contract is on `ws_relay`.
+
+What remains unbuilt is everything below: the phone's own failure detection,
+the three-state distinction on the client side, and the resume policy.
+
 ### Proposal
 
 - **Publish the port-unreachable probe result.** This is the best signal in the

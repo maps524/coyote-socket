@@ -543,12 +543,64 @@ where
 // WebSocket relay
 // ---------------------------------------------------------------------------
 
+/// How often a snapshot is resent when nothing has changed.
+///
+/// Chosen to match the player's own observed cadence (~1006 ms), so a
+/// connected client receives roughly one message per second whatever the
+/// player is doing — including nothing.
+pub const RELAY_KEEPALIVE: std::time::Duration = std::time::Duration::from_millis(1000);
+
 /// Relay player state to one client, and accept commands back.
 ///
 /// The message format is a stub, but an honest one: it carries exactly the
 /// four things the spike promised — position, playing/paused, duration and
 /// file identity — plus the link state, because "the bridge cannot see the
 /// player" is a thing the phone has to render differently from "paused".
+///
+/// # Contract for consumers
+///
+/// A consumer deciding when to stop driving hardware needs to know exactly
+/// what this stream guarantees. Stated as may / may not, because the
+/// difference has already been load-bearing in one downstream design:
+///
+/// **You may assume:**
+///
+/// - **A snapshot arrives at least every [`RELAY_KEEPALIVE`]** while the
+///   WebSocket is open, regardless of whether the player said anything. That
+///   makes "the bridge is alive" independent of "the player is producing
+///   traffic", which are different facts with different correct responses.
+/// - **The snapshot is always current**, never a replay of an older one.
+/// - **`link` distinguishes the three states** that matter: `connected` (the
+///   bridge can see the player), `retrying`/`connecting` (it cannot), `idle`
+///   (nobody asked it to). A player that has gone away is reported explicitly
+///   rather than implied by silence.
+/// - **`epoch` changes on every reconnect.** Position across a change is
+///   unrelated to position before it.
+/// - **Silence beyond the keepalive means the bridge or the socket is gone.**
+///   Nothing else produces it.
+///
+/// **You may not assume:**
+///
+/// - **That one player packet produces one message.** State crosses a `watch`
+///   channel, which keeps only the latest value. A consumer that is slow —
+///   backgrounded tab, congested link, stalled render — collapses an
+///   *unbounded* number of updates into a single delivery. This is measured,
+///   not theoretical: 500 updates produce exactly one wake for a consumer that
+///   is not polling. **There is no message-count-based deadline that can be
+///   sized against this**, which is why the keepalive is a timer and not a
+///   packet counter.
+/// - **That message rate carries information about the player.** It does not.
+///   Use `link`, `positionS` and `updatedAtMs`.
+/// - **That `packets`, `attempts` or `stateSuspect` are stable API.** They are
+///   diagnostics, and `packets` in particular resets on reconnect for reasons
+///   that have nothing to do with continuity.
+///
+/// The one case that motivated writing this down: a *paused* player still
+/// produces snapshots at the keepalive cadence, so "paused" and "dead" are
+/// distinguishable. That holds because `send_modify` notifies unconditionally
+/// even when the closure changes nothing — asserted in this module's tests
+/// rather than trusted to tokio's documentation, since a safety decision rests
+/// on it.
 pub(crate) async fn ws_relay<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     addr: SocketAddr,
@@ -580,6 +632,13 @@ pub(crate) async fn ws_relay<S>(
         return;
     }
 
+    // Resends the current snapshot when the player has been quiet. Reset on
+    // every change-driven send, so a busy link carries no extra traffic and a
+    // silent one still proves the bridge is alive.
+    let mut keepalive = tokio::time::interval(RELAY_KEEPALIVE);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    keepalive.tick().await; // the immediate first tick
+
     loop {
         tokio::select! {
             changed = snapshots.changed() => {
@@ -587,6 +646,21 @@ pub(crate) async fn ws_relay<S>(
                     break; // bridge shutting down
                 }
                 let snap = snapshots.borrow_and_update().clone();
+                if send_snapshot(&mut tx, &snap).await.is_err() {
+                    break;
+                }
+                keepalive.reset();
+            }
+            _ = keepalive.tick() => {
+                // Nothing changed within the window. Send anyway: the consumer
+                // is entitled to conclude "the bridge is gone" from silence,
+                // so silence must mean only that.
+                //
+                // Deliberately the same message rather than a distinct ping.
+                // A separate type would invite consumers to treat the two
+                // differently, and there is no difference worth acting on —
+                // the snapshot is current either way.
+                let snap = snapshots.borrow().clone();
                 if send_snapshot(&mut tx, &snap).await.is_err() {
                     break;
                 }
@@ -926,6 +1000,90 @@ mod tests {
             out.extend_from_slice(&chunk[..n]);
         }
         assert_eq!(out, b"HEADHEADTAIL");
+    }
+
+    /// **Q1: does a paused player still produce pushes?**
+    ///
+    /// A paused DeoVR keeps sending `currentTime` unchanged at its normal
+    /// cadence, so the snapshot's *playback* fields are identical each time.
+    /// If `watch` suppressed a no-op modify, a paused player would produce
+    /// zero pushes and a consumer's "paused" state would be unreachable —
+    /// it would see silence and stop, on a working setup.
+    ///
+    /// It does not. `send_modify` notifies unconditionally, unlike
+    /// `send_if_modified`. Asserted rather than trusted to the documentation,
+    /// because a downstream safety decision rests on it.
+    #[tokio::test]
+    async fn an_identical_snapshot_still_wakes_the_relay() {
+        let (tx, mut rx) = watch::channel(PlayerSnapshot::new("x".into()));
+        rx.borrow_and_update();
+
+        // A closure that changes precisely nothing.
+        tx.send_modify(|_s| {});
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.changed())
+                .await
+                .is_ok(),
+            "a no-op send_modify must still wake the relay, or a paused player \
+             is indistinguishable from a dead bridge"
+        );
+    }
+
+    /// And the real path: `apply` on a repeated identical packet.
+    ///
+    /// It changes `packets` and `updated_at_ms` even when nothing else moves,
+    /// so the value genuinely differs — but the notification does not depend
+    /// on that, which is the point of the test above.
+    #[tokio::test]
+    async fn a_repeated_packet_from_a_paused_player_still_pushes() {
+        let (tx, mut rx) = watch::channel(PlayerSnapshot::new("x".into()));
+        rx.borrow_and_update();
+
+        let packet: crate::state::PlayerPacket =
+            serde_json::from_str(r#"{"path":"a.mp4","currentTime":42.0,"playerState":1}"#).unwrap();
+
+        for tick in 1..=3u64 {
+            tx.send_modify(|s| s.apply(&packet, 1000 + tick * 1000));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.changed())
+                    .await
+                    .is_ok(),
+                "push {tick} from a paused player was suppressed"
+            );
+            assert_eq!(rx.borrow().position_s, Some(42.0));
+        }
+        assert_eq!(rx.borrow().packets, 3, "every packet must be counted");
+    }
+
+    /// **Q2: how far can pushes collapse when the consumer is slow?**
+    ///
+    /// All the way. `watch` keeps one slot, so a consumer that is not polling
+    /// observes a single `changed()` no matter how many updates landed while
+    /// it was away. There is no bound to quote and no deadline that can be
+    /// sized against it — which is the answer, and the reason the relay sends
+    /// a keepalive on a timer rather than relying on player traffic.
+    #[tokio::test]
+    async fn an_unbounded_number_of_updates_collapse_into_one_wake() {
+        let (tx, mut rx) = watch::channel(PlayerSnapshot::new("x".into()));
+        rx.borrow_and_update();
+
+        let packet: crate::state::PlayerPacket =
+            serde_json::from_str(r#"{"currentTime":1.0}"#).unwrap();
+        for tick in 0..500u64 {
+            tx.send_modify(|s| s.apply(&packet, tick));
+        }
+
+        // One wake, for five hundred updates.
+        assert!(rx.changed().await.is_ok());
+        assert_eq!(rx.borrow_and_update().packets, 500, "state is the latest");
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.changed())
+                .await
+                .is_err(),
+            "there is no second wake — 500 updates produced exactly one"
+        );
     }
 
     fn test_ctx() -> Ctx {
