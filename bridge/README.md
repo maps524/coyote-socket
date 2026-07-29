@@ -144,6 +144,11 @@ empty. `scannedAtMs` / `ageMs` describe the listing, and are `null` before the
 first successful scan; `checkedAtMs` describes the last attempt. When those
 diverge, something is wrong and the gap is how far behind you are.
 
+Readability is checked every ~2 s by opening the directory, not by looking at
+its timestamp — a share that is still there but has stopped answering leaves the
+timestamp alone, and a `scan: "ok"` with a `checkedAtMs` that quietly stopped
+advancing is the one failure this API must not have.
+
 A `library` WebSocket message — `{"type":"library","generation":N,"count":M,
 "scan":S,"scannedAtMs":T}` — means **re-fetch the index**. One is sent on
 connect, whether or not a library is configured, and one each time the contents

@@ -63,10 +63,15 @@
 //!
 //! A poller holds the answer so a request never touches the disk:
 //!
-//! - Every [`DIR_POLL`] it stats the root directory — one syscall — and
-//!   rescans only if the directory's own mtime moved. Creating, deleting or
-//!   renaming a file moves it; that is what "the directory contents changed"
-//!   means.
+//! - Every [`DIR_POLL`] it stats the root directory and opens it for one entry
+//!   ([`probe_listing`]) — both O(1) — and rescans only if the mtime moved, or
+//!   if the directory would not open. Creating, deleting or renaming a file
+//!   moves the mtime; that is what "the directory contents changed" means.
+//!
+//!   The probe is there because the mtime alone is a *proxy*: a directory that
+//!   stats fine but refuses `read_dir` leaves the mtime untouched, and the
+//!   whole [`ScanState`] mechanism below is unreachable if nothing decides to
+//!   scan. See `FOLLOW-UPS.md` §0a — this was found the hard way.
 //! - Every [`FULL_RESCAN`] it rescans regardless, because editing a file *in
 //!   place* changes its size and mtime without touching the directory's. That
 //!   only affects the two advisory fields — the bytes served by
@@ -582,11 +587,38 @@ async fn poll(root: PathBuf, tx: watch::Sender<Arc<Index>>) {
             .filter(|m| m.is_dir())
             .and_then(|m| m.modified().ok());
 
+        // Ask, every tick, the same question the scan depends on: **can this
+        // directory be read?** O(1) — open it and take one entry.
+        //
+        // This gate decides whether the check happens, and it used to be a
+        // stat-level proxy for a read-level failure: `dir_mtime.is_none()`. A
+        // directory whose mtime has not moved and which still stats fine, but
+        // whose `read_dir` is refused, matched no clause. No scan ran, so no
+        // verdict was produced, so `state` stayed `Ok` and `checkedAtMs` froze
+        // for up to FULL_RESCAN. Every bit of the failure machinery below was
+        // unreachable, because reaching it required a scan nobody attempted.
+        //
+        // Note what does *not* fix it: `state != ScanState::Ok`. That retries
+        // once a failure is known and covers `Pending`, but the transition into
+        // failure is exactly when `state` is still `Ok`, so the first refusal is
+        // still missed. Asserted by
+        // `a_directory_that_stats_but_will_not_list_is_reported_as_failed`,
+        // which was written against that version and failed.
+        //
+        // A probe is the honest gate because it is the same operation, not a
+        // proxy for it. It subsumes `is_none()` too: a root that will not stat
+        // will not open either.
+        let probe_root = root.clone();
+        let readable = tokio::task::spawn_blocking(move || probe_listing(&probe_root))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(format!("probe task failed: {e}"))));
+
         let due = last_full.elapsed() >= FULL_RESCAN;
-        // A root that will not stat at all is a failed attempt, not a reason to
-        // skip one. Otherwise a vanished directory looks exactly like a quiet
-        // one and `scan` never reports `failed`.
-        if dir_mtime != last_dir_mtime || due || dir_mtime.is_none() {
+        if readable.is_err()
+            || dir_mtime != last_dir_mtime
+            || due
+            || tx.borrow().state != ScanState::Ok
+        {
             last_dir_mtime = dir_mtime;
             last_full = tokio::time::Instant::now();
 
@@ -802,6 +834,11 @@ fn scan(root: &Path) -> std::io::Result<Scanned> {
     }
 
     out.sort_by(|a, b| a.name.cmp(&b.name));
+    // Sorted for the same reason `scripts` is: `poll` compares this against the
+    // previous scan to decide whether to log, so an unsorted list would make
+    // that comparison order-sensitive and a filesystem returning entries in a
+    // different order would re-log the same file forever.
+    oversize.sort();
     verdict(
         unreadable,
         Scanned {
@@ -809,6 +846,24 @@ fn scan(root: &Path) -> std::io::Result<Scanned> {
             oversize,
         },
     )
+}
+
+/// Can this directory be listed right now? Open it and take one entry.
+///
+/// The cheap half of [`scan`], run every [`DIR_POLL`] so the decision to skip a
+/// full scan rests on the operation that actually fails rather than on a `stat`
+/// standing in for it. Catches both a refused open and an immediate iteration
+/// error; costs one directory handle and one entry regardless of library size,
+/// so it does not disturb the scale story — the full scan still runs only on a
+/// change, on [`FULL_RESCAN`], or on a failure.
+///
+/// What it does **not** catch is an enumeration that fails partway through, at
+/// entry 300 of 900, while the directory's mtime is untouched: that waits for
+/// the next full scan. Narrower than the hole it closes, and stated rather than
+/// discovered.
+fn probe_listing(root: &Path) -> std::io::Result<()> {
+    std::fs::read_dir(root)?.next().transpose()?;
+    Ok(())
 }
 
 /// A partial enumeration is a failed scan, not a short library.
@@ -984,23 +1039,16 @@ mod tests {
         assert!(scanned.oversize[0].0.contains("huge.funscript"));
     }
 
-    /// An oversized file that is the *only* entry must still be reported.
-    ///
-    /// The warning used to be nested inside "the listing changed", and an empty
-    /// listing is not a change from the default empty `Index` — so the one case
-    /// where the user has no other clue was the one case that said nothing.
-    /// With any second normal file present it fired, which is what made it easy
-    /// to miss.
-    #[tokio::test]
-    async fn an_oversized_file_alone_in_the_directory_is_still_reported() {
+    /// `scan` reports an oversized file even when the listing it produces is
+    /// empty. **This is the precondition, not the fix** — see the test below,
+    /// which is the one that would fail if the fix were reverted.
+    #[test]
+    fn a_scan_reports_an_oversized_file_even_with_an_empty_listing() {
         let dir = temp_dir("oversize-only");
         let big = std::fs::File::create(dir.join("huge.funscript")).unwrap();
         big.set_len(MAX_SCRIPT_BYTES + 1).unwrap();
         drop(big);
 
-        // The scan reports it even though the listing it produces is empty —
-        // which is what `poll` needs in order to log on the oversize set's own
-        // transition rather than the listing's.
         let scanned = scan(&dir).unwrap();
         assert!(scanned.scripts.is_empty(), "nothing is servable here");
         assert_eq!(
@@ -1008,6 +1056,59 @@ mod tests {
             1,
             "an empty listing must still carry the reason it is empty"
         );
+    }
+
+    /// **The fix itself: `poll` warns about an oversized file that is the only
+    /// entry in the directory.**
+    ///
+    /// The warning used to be nested inside "the listing changed", and an empty
+    /// listing is not a change from the default empty `Index` — so the one case
+    /// where the user has no other clue was the one case that said nothing.
+    ///
+    /// Asserting on `scan`'s return value alone does not cover this: the
+    /// precondition test above passes with the log statement moved back inside
+    /// `if changed`. The only observable that distinguishes them is the log
+    /// line, so this subscribes to the log tap and waits for it. Same family as
+    /// the status-phrase table — an assertion that looks entirely reasonable
+    /// and verifies the wrong side of the fix.
+    #[tokio::test]
+    async fn poll_warns_when_the_only_file_is_oversized() {
+        let dir = temp_dir("oversize-only-poll");
+        let big = std::fs::File::create(dir.join("huge.funscript")).unwrap();
+        big.set_len(MAX_SCRIPT_BYTES + 1).unwrap();
+        drop(big);
+
+        // Subscribe before spawning, or the first scan's line is missed.
+        let mut logs = crate::logging::subscribe();
+        let library = Library::spawn(dir.clone());
+
+        let found = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match logs.recv().await {
+                    Ok(line) if line.contains("huge.funscript") && line.contains("over the") => {
+                        return line
+                    }
+                    Ok(_) => continue,
+                    Err(_) => panic!("the log tap closed"),
+                }
+            }
+        })
+        .await
+        .expect(
+            "a library whose only file is oversized must say so; \
+             an empty listing with no explanation is the outcome excluding \
+             oversized files was meant to avoid",
+        );
+        assert!(found.contains("[WARN]"), "got: {found}");
+
+        // And the listing really is empty, so the log line is the user's only
+        // signal — which is why it has to fire.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while library.current().state != ScanState::Ok {
+            assert!(tokio::time::Instant::now() < deadline, "no scan landed");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(library.current().scripts.is_empty());
     }
 
     /// **A partial enumeration must not publish as a listing.**
@@ -1291,6 +1392,126 @@ mod tests {
         let m: serde_json::Value = serde_json::from_str(&change_message(&bad)).unwrap();
         assert_eq!(m["scan"], "failed");
         assert_eq!(m["count"], 1);
+    }
+
+    /// Make `read_dir` fail while `stat` keeps working, or return `false`.
+    ///
+    /// Windows: deny the list-directory right (`RD`) to the current user.
+    /// Unix: `0o111` — traversable and stat-able, not listable.
+    #[cfg(any(windows, unix))]
+    fn deny_listing(dir: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            let user = std::env::var("USERNAME").unwrap_or_default();
+            std::process::Command::new("icacls")
+                .arg(dir)
+                .arg("/deny")
+                .arg(format!("{user}:(RD)"))
+                .output()
+                .is_ok()
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o111)).is_ok()
+        }
+    }
+
+    #[cfg(any(windows, unix))]
+    fn restore_listing(dir: &Path) {
+        #[cfg(windows)]
+        {
+            let user = std::env::var("USERNAME").unwrap_or_default();
+            let _ = std::process::Command::new("icacls")
+                .arg(dir)
+                .arg("/remove:d")
+                .arg(&user)
+                .output();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// **A directory that stats but will not list must be reported as failed.**
+    ///
+    /// This is the one the whole `ScanState` machinery was unreachable for. The
+    /// gate deciding *whether to scan* used to be
+    /// `dir_mtime != last || due || dir_mtime.is_none()` — a stat-level proxy
+    /// for a read-level failure. A directory whose mtime has not moved and which
+    /// still stats fine, but whose `read_dir` is refused, matched no clause: no
+    /// scan ran, no verdict was produced, `state` stayed `Ok` and `checkedAtMs`
+    /// froze for up to `FULL_RESCAN`.
+    ///
+    /// **Removing the directory does not test this** — that trips
+    /// `is_none()` and the old gate handles it, so a test built on `remove_dir`
+    /// passes against both implementations. It was written that way first. The
+    /// permission denial is what distinguishes them, and it is the shape a
+    /// partial SMB enumeration takes: the directory is fine, reading it is not.
+    ///
+    /// If the denial does not take effect — running as root, an exotic
+    /// filesystem — this **fails rather than skipping**, because a silent skip
+    /// here leaves the gate unguarded and reports `ok`.
+    #[tokio::test]
+    async fn a_directory_that_stats_but_will_not_list_is_reported_as_failed() {
+        let dir = temp_dir("deny-list");
+        write(&dir, "only.funscript", "{}");
+
+        let library = Library::spawn(dir.clone());
+        let mut rx = library.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+            .await
+            .expect("the first scan should land")
+            .unwrap();
+        assert_eq!(rx.borrow_and_update().state, ScanState::Ok);
+
+        assert!(
+            deny_listing(&dir),
+            "could not deny the list-directory right, so this test cannot \
+             exercise the gate it exists for"
+        );
+
+        // The precondition is the entire point of the test, so it is asserted
+        // rather than assumed: stat must still succeed, and only listing fail.
+        let stats = std::fs::metadata(&dir).is_ok();
+        let lists = std::fs::read_dir(&dir).is_ok();
+        if !stats || lists {
+            restore_listing(&dir);
+            panic!(
+                "needed stat-ok and list-denied; got stat={stats} list_ok={lists}. \
+                 Running as root, or the filesystem ignores the denial."
+            );
+        }
+
+        let result = tokio::time::timeout(DIR_POLL * 4, async {
+            loop {
+                if rx.changed().await.is_err() {
+                    panic!("channel closed");
+                }
+                if rx.borrow_and_update().state == ScanState::Failed {
+                    return;
+                }
+            }
+        })
+        .await;
+
+        let index = library.current();
+        restore_listing(&dir);
+
+        assert!(
+            result.is_ok(),
+            "an unlistable directory went on reporting scan={:?} with checkedAtMs \
+             frozen — the gate skipped the scan, so the verdict that would have \
+             said `failed` was never produced",
+            index.state
+        );
+        assert_eq!(
+            index.scripts.len(),
+            1,
+            "the previous listing is still the honest answer"
+        );
     }
 
     /// "Nothing has been scanned yet" is its own state, not an empty listing.
