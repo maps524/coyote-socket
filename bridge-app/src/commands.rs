@@ -40,6 +40,7 @@ pub struct Status {
     pub endpoint: String,
     pub recents: Vec<String>,
     pub static_dir: Option<String>,
+    pub library_dir: Option<String>,
     pub fake_player: Option<String>,
     pub version: &'static str,
 }
@@ -59,6 +60,7 @@ pub fn bridge_status(state: Shared) -> Status {
         endpoint: settings.endpoint.clone(),
         recents: settings.recents.clone(),
         static_dir: settings.static_dir.clone(),
+        library_dir: settings.library_dir.clone(),
         fake_player: state
             .fake_player
             .lock()
@@ -276,6 +278,31 @@ pub fn set_static_dir(path: Option<String>, state: Shared) -> Result<(), String>
         .lock()
         .map_err(|_| "state lock poisoned")?
         .static_dir = path;
+    state.save_settings();
+    Ok(())
+}
+
+/// Point the bridge at a directory of funscripts. Takes effect on the next
+/// launch, for the same reason as `set_static_dir`: the library's poller is
+/// started when the server starts.
+///
+/// A path that is not a directory is refused here rather than accepted and
+/// silently serving nothing — "no library configured" and "the library path is
+/// wrong" are different problems and a user who typed a path deserves to be
+/// told which one they have.
+#[tauri::command]
+pub fn set_library_dir(path: Option<String>, state: Shared) -> Result<(), String> {
+    let path = path.filter(|p| !p.trim().is_empty());
+    if let Some(p) = &path {
+        if !std::path::Path::new(p).is_dir() {
+            return Err(format!("{p} is not a directory"));
+        }
+    }
+    state
+        .settings
+        .lock()
+        .map_err(|_| "state lock poisoned")?
+        .library_dir = path;
     state.save_settings();
     Ok(())
 }

@@ -117,6 +117,41 @@ a home-screen shortcut keeps working.
 - **The phone.** The WebSocket relay has only ever been driven from a desktop
   browser.
 
+## The funscript library
+
+The bridge runs on the machine where the media lives, already serves the PWA,
+and already knows what the player is playing. So it serves the scripts too:
+
+```
+GET /library/index.json   -> { "scripts": [ { "name", "bytes", "modifiedMs" } ],
+                              "configured", "scannedAtMs", "ageMs", "generation" }
+GET /library/<name>       -> the funscript bytes
+```
+
+Both are token-gated, like `/healthz` and `/ws`. Point the bridge at a folder
+with `--library-dir <path>` (or `libraryDir` in the app's settings file). **No
+library configured is a normal state**, not an error: the index answers 200 with
+an empty list and `configured: false`, so the app can say "you have not pointed
+me at a folder" rather than showing a failure.
+
+A `library` WebSocket message — `{"type":"library","generation":N,"count":M,
+"scannedAtMs":T}` — means **re-fetch the index**. One is sent on connect, and one
+each time the directory's contents change, so a phone already connected picks up
+a new file without a reload. It deliberately carries no listing: contents travel
+over the request/response that stamps its own freshness, not over the relay's
+`watch` channel — which, as `ws_relay`'s contract records, collapses an
+unbounded number of updates into one delivery for a slow consumer.
+
+**The bridge does not match scripts to media.** That lives in the client, in
+`src/lib/script/naming.ts` in `coyote-socket-web` — the MultiFunPlayer suffix
+convention, DLNA URLs, and a documented tie-break, already tested and merged. Two
+implementations of a naming convention diverge, and the divergence shows up as
+"the script I can see will not load". The bridge serves names; the client
+matches them against the `path` it gets in every snapshot.
+
+Details — path handling, the freshness contract, and what a 10,000-file
+directory costs — are in `src/library.rs`'s module documentation.
+
 ## Where the framing came from
 
 Two independent sources, which agree:
@@ -162,7 +197,9 @@ Two binaries.
 cargo run --bin fake-player
 
 # Terminal 2 — the bridge
-cargo run --bin coyote-bridge -- --player 127.0.0.1:23554 --static-dir ../path/to/pwa/dist
+cargo run --bin coyote-bridge -- --player 127.0.0.1:23554 \
+    --static-dir ../path/to/pwa/dist \
+    --library-dir /path/to/funscripts
 ```
 
 Then:
@@ -170,6 +207,7 @@ Then:
 - `http://127.0.0.1:8787/` — the app (or a placeholder if `--static-dir` is unset)
 - `http://127.0.0.1:8787/pair` — the QR the phone should scan
 - `http://127.0.0.1:8787/healthz` — current state as JSON
+- `http://127.0.0.1:8787/library/index.json` — the funscript listing
 - `ws://127.0.0.1:8787/ws` — the state relay
 - Tray icon — left-click opens the pairing page
 

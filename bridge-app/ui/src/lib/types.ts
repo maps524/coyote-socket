@@ -120,6 +120,7 @@ export interface Status {
   endpoint: string
   recents: string[]
   staticDir: string | null
+  libraryDir: string | null
   fakePlayer: string | null
   version: string
 }

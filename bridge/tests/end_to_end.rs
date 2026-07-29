@@ -238,6 +238,7 @@ async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>,
         snapshot_rx,
         cmd_tx: cmd_tx.clone(),
         static_dir: None,
+        library: None,
         pairing_base: base.clone(),
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: vec![format!("127.0.0.1:{port}")],
@@ -388,6 +389,7 @@ async fn traversal_outside_the_static_root_is_refused() {
             snapshot_rx,
             cmd_tx,
             static_dir: Some(dir.clone()),
+            library: None,
             pairing_base: base.clone(),
             token: std::sync::RwLock::new(Token::generate()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
@@ -545,6 +547,7 @@ async fn the_relay_keeps_talking_while_the_player_says_nothing() {
             snapshot_rx,
             cmd_tx,
             static_dir: None,
+            library: None,
             pairing_base: base.clone(),
             token: std::sync::RwLock::new(token.clone()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
@@ -614,6 +617,7 @@ async fn a_paused_player_keeps_the_relay_talking() {
             snapshot_rx,
             cmd_tx,
             static_dir: None,
+            library: None,
             pairing_base: base.clone(),
             token: std::sync::RwLock::new(token.clone()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
@@ -683,4 +687,245 @@ where
             other => panic!("websocket ended unexpectedly: {other:?}"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The funscript library
+// ---------------------------------------------------------------------------
+
+/// A bridge serving a real directory of funscripts on a real socket.
+async fn spawn_library_stack(root: std::path::PathBuf) -> (String, Token) {
+    let (snapshot_rx, cmd_tx) = spawn_bridge_client("127.0.0.1:1".into());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base = format!("http://127.0.0.1:{port}");
+    let token = Token::generate();
+    tokio::spawn(http::run(
+        listener,
+        std::sync::Arc::new(http::Ctx {
+            snapshot_rx,
+            cmd_tx,
+            static_dir: None,
+            library: Some(coyote_bridge::library::Library::spawn(root)),
+            pairing_base: base.clone(),
+            token: std::sync::RwLock::new(token.clone()),
+            allowed_hosts: vec![format!("127.0.0.1:{port}")],
+            on_token_rotated: None,
+        }),
+    ));
+    (base, token)
+}
+
+fn library_root(name: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("coyote-library-e2e-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The whole point of the feature, over the wire: a phone asks what is on the
+/// machine and then asks for one of them, without importing anything by hand.
+#[tokio::test]
+async fn the_library_index_and_a_script_are_served_over_http() {
+    let root = library_root("serve");
+    // A space in the name, because funscript libraries are full of them and a
+    // server that does not percent-decode cannot serve this file at all.
+    std::fs::write(root.join("Scene One.funscript"), r#"{"actions":[]}"#).unwrap();
+    std::fs::write(root.join("Scene One.roll.funscript"), r#"{"actions":[1]}"#).unwrap();
+    std::fs::write(root.join("notes.txt"), "not a script").unwrap();
+
+    let (base, token) = spawn_library_stack(root.clone()).await;
+
+    // The listing is gated, like `/healthz`: it names every file in a
+    // directory the user chose.
+    let (status, _) = get(&format!("{base}/library/index.json")).await;
+    assert_eq!(
+        status, 401,
+        "the listing must not be readable without a token"
+    );
+
+    // The first scan may not have landed on the very first request.
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    let index = loop {
+        assert!(tokio::time::Instant::now() < deadline, "no index arrived");
+        let (status, body) = get(&format!("{base}/library/index.json?t={token}")).await;
+        assert_eq!(status, 200);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if json["scripts"].as_array().unwrap().len() == 2 {
+            break json;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+
+    assert_eq!(index["configured"], true);
+    // Sorted, so the order a client renders does not shuffle between scans.
+    assert_eq!(index["scripts"][0]["name"], "Scene One.funscript");
+    assert_eq!(index["scripts"][1]["name"], "Scene One.roll.funscript");
+    assert_eq!(index["scripts"][0]["bytes"], 14);
+    assert!(index["scripts"][0]["modifiedMs"].as_u64().unwrap() > 0);
+    // The index is a snapshot and says so, rather than letting a consumer
+    // assume it is live.
+    assert!(index["scannedAtMs"].as_u64().unwrap() > 0);
+    assert!(index["ageMs"].is_number());
+    assert!(index["generation"].as_u64().unwrap() >= 1);
+
+    // And the bytes, by the name the index published.
+    let (status, body) = get(&format!("{base}/library/Scene%20One.funscript?t={token}")).await;
+    assert_eq!(status, 200, "a name with a space must be servable");
+    assert_eq!(body, r#"{"actions":[]}"#);
+
+    let (status, _) = get(&format!("{base}/library/Scene%20One.funscript")).await;
+    assert_eq!(status, 401, "the bytes are gated too");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// What a hostile `name` can reach: nothing.
+///
+/// The encoded forms matter most. Decoding happens before validation, so `..`
+/// is visible to the path check rather than hidden behind `%2e%2e` — the
+/// opposite order is the classic way a decoder reintroduces traversal into a
+/// server that had already rejected it.
+#[tokio::test]
+async fn a_hostile_library_name_reaches_nothing() {
+    let root = library_root("hostile");
+    std::fs::write(root.join("ok.funscript"), "{}").unwrap();
+    std::fs::write(root.join("notes.txt"), "not a script").unwrap();
+    // A file the request must not be able to reach: a sibling of the library
+    // root, with an extension that would otherwise pass the type gate.
+    let secret = root
+        .parent()
+        .unwrap()
+        .join("coyote-library-secret.funscript");
+    std::fs::write(&secret, "SECRET").unwrap();
+
+    let (base, token) = spawn_library_stack(root.clone()).await;
+
+    for (name, expected) in [
+        // Encoded traversal, both separators and both cases.
+        ("%2e%2e%2fcoyote-library-secret.funscript", 403),
+        ("%2E%2E%5Ccoyote-library-secret.funscript", 403),
+        ("..%2fcoyote-library-secret.funscript", 403),
+        ("..%5Ccoyote-library-secret.funscript", 403),
+        // Unencoded, for completeness — the request line carries them fine.
+        ("../coyote-library-secret.funscript", 403),
+        // Absolute and drive-qualified.
+        ("%2fetc%2fpasswd", 403),
+        ("C%3A%5CWindows%5Cwin.ini", 403),
+        // A malformed escape is a rejection, not a literal percent.
+        ("ok%2.funscript", 403),
+        // A decoded NUL, which truncates a path in the C APIs under `std`.
+        ("ok%00.funscript", 403),
+        // Right directory, wrong type: only funscripts are reachable.
+        ("notes.txt", 403),
+        // Well-formed and inside the root, but not something the scan listed.
+        ("never-existed.funscript", 404),
+    ] {
+        let (status, body) = get(&format!("{base}/library/{name}?t={token}")).await;
+        assert_eq!(status, expected, "{name} returned {status}: {body:.60}");
+        assert!(!body.contains("SECRET"), "{name} reached the secret file");
+    }
+
+    // And the legitimate name still works, so the gates are not simply
+    // refusing everything.
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "ok.funscript never became servable"
+        );
+        let (status, body) = get(&format!("{base}/library/ok.funscript?t={token}")).await;
+        if status == 200 {
+            assert_eq!(body, "{}");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let _ = std::fs::remove_file(&secret);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A phone that is already connected picks up a new file without a reload.
+///
+/// The message carries no contents by design — only "ask again" — so this
+/// asserts the wake and the generation, not a listing.
+#[tokio::test]
+async fn a_new_file_reaches_an_already_connected_client() {
+    let root = library_root("push");
+    std::fs::write(root.join("first.funscript"), "{}").unwrap();
+
+    let (base, token) = spawn_library_stack(root.clone()).await;
+    let ws_url = format!("{}/ws?t={token}", base.replace("http://", "ws://"));
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    let hello: serde_json::Value = serde_json::from_str(&next_text(&mut ws).await).unwrap();
+    assert_eq!(hello["type"], "hello");
+
+    // One `library` message up front, so "fetch on every library message" is
+    // the client's only rule. It may arrive before the first scan has landed —
+    // the socket does not wait on the disk — so settle on the one that has seen
+    // the file that was there when the test started.
+    let first = wait_for_library(&mut ws, |m| m["count"] == 1).await;
+    let first_gen = first["generation"].as_u64().unwrap();
+    assert!(
+        first.get("scripts").is_none(),
+        "the message must not carry the listing"
+    );
+
+    std::fs::write(root.join("second.funscript"), "{}").unwrap();
+
+    let next = wait_for_library(&mut ws, |m| m["count"] == 2).await;
+    assert_eq!(
+        next["generation"].as_u64().unwrap(),
+        first_gen + 1,
+        "a new file must bump the generation exactly once"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Read messages until a matching `library` one arrives, skipping the player
+/// snapshots that keep flowing alongside it.
+async fn wait_for_library<S>(
+    ws: &mut S,
+    matches: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value
+where
+    S: StreamExt<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no library message arrived"
+        );
+        let msg: serde_json::Value = serde_json::from_str(&next_text(ws).await).unwrap();
+        if msg["type"] == "library" && matches(&msg) {
+            return msg;
+        }
+    }
+}
+
+/// No library configured is a normal state: an empty listing and a flag that
+/// lets the UI say "you have not pointed me at a folder" rather than showing a
+/// failure.
+#[tokio::test]
+async fn no_library_configured_is_not_an_error() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+
+    let (status, body) = get(&format!("{base}/library/index.json?t={token}")).await;
+    assert_eq!(status, 200, "an unconfigured library is not a 404");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["configured"], false);
+    assert_eq!(json["scripts"].as_array().unwrap().len(), 0);
+
+    let (status, _) = get(&format!("{base}/library/anything.funscript?t={token}")).await;
+    assert_eq!(status, 404);
 }

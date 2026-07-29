@@ -23,6 +23,9 @@ struct Args {
     bind: IpAddr,
     http_port: u16,
     static_dir: Option<PathBuf>,
+    /// Directory of funscripts to serve at `/library`. `None` means no
+    /// library, which is a normal state rather than an error.
+    library_dir: Option<PathBuf>,
     log_dir: Option<PathBuf>,
     tray: bool,
     /// Pin the pairing token instead of minting a fresh one each start. For a
@@ -44,6 +47,7 @@ impl Default for Args {
             bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             http_port: DEFAULT_HTTP_PORT,
             static_dir: None,
+            library_dir: None,
             log_dir: None,
             tray: true,
             token: None,
@@ -63,6 +67,9 @@ OPTIONS:
   --bind <ip>             Address to serve on. [default: 0.0.0.0]
   --http-port <port>      Port to serve on. [default: 8787]
   --static-dir <path>     Directory to serve - the PWA's `dist`.
+  --library-dir <path>    Directory of .funscript files to serve at /library.
+                          Default: none, which is a normal state - the phone
+                          simply sees an empty library.
   --log-dir <path>        Where to write coyote-bridge.log. [default: cwd]
   --no-tray               Do not create a tray icon (headless servers).
   --token <hex>           Pairing token. Default: a fresh one each start, which
@@ -106,6 +113,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--http-port is not a port: {e}"))?
             }
             "--static-dir" => args.static_dir = Some(PathBuf::from(value()?)),
+            "--library-dir" => args.library_dir = Some(PathBuf::from(value()?)),
             "--log-dir" => args.log_dir = Some(PathBuf::from(value()?)),
             "--no-tray" => args.tray = false,
             "--token" => args.token = Some(coyote_bridge::auth::Token::from_string(value()?)),
@@ -162,6 +170,7 @@ fn main() {
     let bind_addr = SocketAddr::new(args.bind, args.http_port);
     let player_endpoint = args.player.clone();
     let static_dir = args.static_dir.clone();
+    let library_dir = args.library_dir.clone();
     let base_for_http = base_url.clone();
     let token_for_http = token.clone();
 
@@ -172,6 +181,12 @@ fn main() {
         // simply left unused.
         let bridge = supervisor::spawn(Some(player_endpoint), Tap::disabled());
 
+        // Spawned inside the runtime, because the poller is a tokio task. A
+        // directory that does not exist yet is not refused here: the poller
+        // picks it up when it appears, which is what a network share that
+        // mounts after login needs.
+        let library = library_dir.map(coyote_bridge::library::Library::spawn);
+
         match TcpListener::bind(bind_addr).await {
             Ok(listener) => {
                 log_info!("[main] serving on http://{bind_addr}");
@@ -181,6 +196,7 @@ fn main() {
                         snapshot_rx: bridge.snapshot_rx.clone(),
                         cmd_tx: bridge.cmd_tx.clone(),
                         static_dir,
+                        library,
                         pairing_base: base_for_http,
                         token: std::sync::RwLock::new(token_for_http),
                         allowed_hosts,

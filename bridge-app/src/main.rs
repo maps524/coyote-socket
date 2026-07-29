@@ -165,6 +165,7 @@ fn main() {
             let mut settings = Settings::load(&settings_path);
             let http_port = settings.http_port;
             let static_dir = settings.static_dir.clone().map(PathBuf::from);
+            let library_dir = settings.library_dir.clone().map(PathBuf::from);
             // Mints on first run; persisted, so the phone's saved URL survives
             // a restart. See `settings::Settings::token`.
             let token = settings.token();
@@ -222,6 +223,7 @@ fn main() {
                 app.handle().clone(),
                 Arc::clone(&state),
                 static_dir,
+                library_dir,
                 http_port,
                 token,
                 allowed_hosts,
@@ -250,6 +252,7 @@ fn main() {
             commands::stop_fake_player,
             commands::open_external,
             commands::set_static_dir,
+            commands::set_library_dir,
         ])
         .on_window_event(|window, event| {
             // Close hides rather than exits: the tray is the app's resting
@@ -320,6 +323,7 @@ fn serve_http(
     _app: tauri::AppHandle,
     state: Arc<AppState>,
     static_dir: Option<PathBuf>,
+    library_dir: Option<PathBuf>,
     port: u16,
     token: auth::Token,
     allowed_hosts: Vec<String>,
@@ -344,6 +348,8 @@ fn serve_http(
         });
 
     tauri::async_runtime::spawn(async move {
+        // Inside the runtime: the library's poller is a tokio task.
+        let library = library_dir.map(coyote_bridge::library::Library::spawn);
         match TcpListener::bind(bind).await {
             Ok(listener) => {
                 log_info!("[app] serving the phone app on http://{bind}");
@@ -351,6 +357,7 @@ fn serve_http(
                     snapshot_rx,
                     cmd_tx,
                     static_dir,
+                    library,
                     pairing_base,
                     token: std::sync::RwLock::new(token),
                     allowed_hosts,

@@ -26,6 +26,12 @@ pub struct Settings {
     pub http_port: u16,
     /// Directory of static files to serve, when the PWA has been built.
     pub static_dir: Option<String>,
+    /// Directory of `.funscript` files to serve at `/library`.
+    ///
+    /// `None` by default and `None` is a normal state: a bridge with no library
+    /// configured serves an empty index rather than an error, and the phone
+    /// falls back to whatever it has imported itself.
+    pub library_dir: Option<String>,
 
     /// The pairing token, persisted so the phone's home-screen shortcut keeps
     /// working across restarts.
@@ -58,6 +64,7 @@ impl Default for Settings {
             recents: Vec::new(),
             http_port: 8787,
             static_dir: None,
+            library_dir: None,
             token: None,
             token_is_ours: false,
         }
@@ -201,6 +208,7 @@ impl Settings {
             recents: self.recents.clone(),
             http_port: self.http_port,
             static_dir: self.static_dir.clone(),
+            library_dir: self.library_dir.clone(),
             token: self.token.clone(),
             token_is_ours: false,
         };

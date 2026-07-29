@@ -382,3 +382,34 @@ Worth knowing about for anyone already running it; not worth building instead.
 **Cloudflare quick tunnels are the wrong default.** The hostname churns every
 restart, which is a new origin every launch, which makes the PWA amnesiac —
 that is the difference between an app and a demo, not a polish issue.
+
+---
+
+## 3. The funscript library: what was deliberately left out
+
+`src/library.rs` serves `/library/index.json` and `/library/<name>`. Three
+things it does not do, each a decision rather than an omission, with the number
+that would force it.
+
+- **No subdirectories.** The scan is flat. Recursion is where symlink loops,
+  unbounded depth and a name that is no longer a single path segment all arrive
+  together, and the client matches on a bare filename anyway. Revisit with a
+  depth cap and a visited-inode set — not by removing the `components().count()
+  == 1` check, which is one of the four gates on the fetch path.
+- **No pagination, and the number is 673 KB.** That is a measured 10,000-entry
+  index, sent whole on every fetch. The scan itself is 14 ms and is not the
+  problem. `generation` is already the etag-shaped field to hang a conditional
+  fetch on when someone's library gets there.
+- **No `canonicalize`.** Inherited from `serve_static`'s known gap, and shared
+  with it deliberately so there is one implementation to fix. A symlink named
+  `*.funscript` inside the library root, pointing outside it, is listed and
+  served. Placing one requires write access to a directory the user chose — at
+  which point the attacker can put the file there instead — and symlinked
+  collections are how media libraries are actually assembled. If this is ever
+  closed, close it in `http::safe_relative_path` so both callers get it.
+
+The one thing that would be a defect rather than a limit: **`serve_static` still
+does not percent-decode**, so the PWA cannot have an asset with a space in its
+name. `library::percent_decode` is the decoder to reuse; the reason it was not
+wired in here is that doing so means auditing every static path at the same
+time, which is a different change.

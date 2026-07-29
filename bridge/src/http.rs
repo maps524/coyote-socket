@@ -52,6 +52,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
 
 use crate::auth::{self, Token};
+use crate::library::{self, Library};
 use crate::state::{PlayerCommand, PlayerSnapshot};
 use crate::{log_debug, log_info, log_warn, qr};
 
@@ -60,6 +61,13 @@ pub struct Ctx {
     pub cmd_tx: mpsc::Sender<PlayerCommand>,
     /// Where the PWA's `dist` lives. `None` serves a placeholder at `/`.
     pub static_dir: Option<PathBuf>,
+    /// The funscript library, if one is configured.
+    ///
+    /// `None` is a normal state, not an error: `/library/index.json` answers
+    /// 200 with an empty list and `configured: false`, so the app can say "you
+    /// have not pointed me at a folder" rather than showing a failure. See
+    /// [`crate::library`].
+    pub library: Option<Arc<Library>>,
     /// The URL to show on the pairing page — the LAN one, not `localhost` —
     /// **without** the token.
     ///
@@ -409,6 +417,16 @@ where
                 .await
             }
         }
+        // Gated, on the same reasoning as `/healthz`: the listing names every
+        // file in a directory the user chose, which is as personal as the media
+        // URL that endpoint already protects.
+        p if p.starts_with("/library/") => {
+            if !authorised(full, origin, ctx) {
+                respond(stream, 401, "text/plain; charset=utf-8", b"unauthorized").await
+            } else {
+                serve_library(stream, p, ctx).await
+            }
+        }
         "/qr.svg" => match qr::to_svg(&ctx.pairing_url()) {
             Ok(svg) => respond(stream, 200, "image/svg+xml; charset=utf-8", svg.as_bytes()).await,
             Err(e) => {
@@ -458,9 +476,70 @@ where
     }
 }
 
+/// The funscript library: an index, and the bytes.
+///
+/// All of the logic is in [`crate::library`] — this is the transport. Kept
+/// small deliberately so the library feature is one arm in [`route`] and one
+/// branch in [`ws_relay`], and does not compete for space in a file that TLS
+/// work is also editing.
+async fn serve_library<W>(stream: &mut W, path: &str, ctx: &Ctx) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let lib = ctx.library.as_deref();
+    let Some(rest) = path.strip_prefix("/library/") else {
+        return respond(stream, 404, "text/plain; charset=utf-8", b"not found").await;
+    };
+
+    if rest == "index.json" {
+        let body = library::index_json(lib);
+        return respond(stream, 200, "application/json; charset=utf-8", &body).await;
+    }
+
+    // No SPA fallback here. A missing script must read as a missing script;
+    // serving `index.html` for it would hand the app an HTML document where it
+    // expected a funscript, and the parse failure would name the wrong problem.
+    match library::fetch(lib, rest).await {
+        library::Fetched::Ok(bytes) => {
+            respond(stream, 200, "application/json; charset=utf-8", &bytes).await
+        }
+        library::Fetched::Rejected => {
+            // Logged, because a rejection here is a traversal attempt or a
+            // client encoding names wrongly, and both are worth seeing. The
+            // name is escaped into the log via `{:?}` so a control character
+            // cannot forge a log line.
+            log_warn!("[library] refused a name: {rest:?}");
+            respond(stream, 403, "text/plain; charset=utf-8", b"forbidden").await
+        }
+        library::Fetched::NotFound => {
+            respond(stream, 404, "text/plain; charset=utf-8", b"not found").await
+        }
+        library::Fetched::TooLarge(size) => {
+            log_warn!("[library] {rest:?} is {size} bytes; refusing to buffer it");
+            respond(
+                stream,
+                413,
+                "text/plain; charset=utf-8",
+                b"script too large",
+            )
+            .await
+        }
+    }
+}
+
 /// Reject anything that could escape the static root: absolute paths, `..`,
 /// Windows drive prefixes, UNC roots.
-fn safe_relative_path(url_path: &str) -> Option<PathBuf> {
+///
+/// Shared with [`crate::library`] rather than reimplemented there, so the known
+/// gap — it does not `canonicalize`, so a symlink inside the root escapes — has
+/// one place to be fixed rather than two places to be fixed inconsistently.
+/// `library::fetch` documents why that gap is acceptable for a directory the
+/// user deliberately points at.
+///
+/// Note that this does **not** percent-decode, so `serve_static` cannot serve a
+/// file whose name contains a space. `library::fetch` decodes first and then
+/// calls this, which is the only safe order.
+pub(crate) fn safe_relative_path(url_path: &str) -> Option<PathBuf> {
     let trimmed = url_path.trim_start_matches('/');
     if trimmed.is_empty() {
         return Some(PathBuf::from("index.html"));
@@ -641,6 +720,24 @@ pub(crate) async fn ws_relay<S>(
         return;
     }
 
+    // Wakes when the library directory's contents change. `None` when no
+    // library is configured, which is a normal state — see [`crate::library`].
+    let mut library_rx = ctx.library.as_ref().map(|l| l.subscribe());
+    if let Some(rx) = library_rx.as_mut() {
+        // One `library` message up front, so "fetch the index whenever a
+        // `library` message arrives" is the client's only rule. Without it the
+        // client needs a second rule for startup, and two rules that must agree
+        // is how a phone ends up with a listing it never refreshes.
+        let index = rx.borrow_and_update().clone();
+        if tx
+            .send(Message::Text(library::change_message(&index)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+
     // Send current state immediately; a reconnecting phone must not wait for
     // the next change to learn where playback is.
     let initial = snapshots.borrow_and_update().clone();
@@ -678,6 +775,30 @@ pub(crate) async fn ws_relay<S>(
                 // the snapshot is current either way.
                 let snap = snapshots.borrow().clone();
                 if send_snapshot(&mut tx, &snap).await.is_err() {
+                    break;
+                }
+            }
+            // A file appeared, vanished or was renamed in the library
+            // directory. The message says only "ask again" — contents travel
+            // over `/library/index.json`, which is a request/response with its
+            // own freshness stamp, rather than over a `watch` this doc comment
+            // has already established can collapse unboundedly.
+            changed = async {
+                match library_rx.as_mut() {
+                    Some(rx) => rx.changed().await.is_ok(),
+                    // No library configured: this branch must never be ready,
+                    // or the select would spin.
+                    None => std::future::pending().await,
+                }
+            } => {
+                if !changed {
+                    break; // bridge shutting down
+                }
+                let index = library_rx
+                    .as_mut()
+                    .map(|rx| rx.borrow_and_update().clone())
+                    .unwrap_or_default();
+                if tx.send(Message::Text(library::change_message(&index))).await.is_err() {
                     break;
                 }
             }
@@ -1110,6 +1231,7 @@ mod tests {
             snapshot_rx,
             cmd_tx,
             static_dir: None,
+            library: None,
             pairing_base: "http://192.168.0.9:8787".into(),
             token: std::sync::RwLock::new(Token::generate()),
             allowed_hosts: vec!["192.168.0.9:8787".into()],
