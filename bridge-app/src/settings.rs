@@ -210,6 +210,7 @@ impl Settings {
             endpoint: self.endpoint.clone(),
             recents: self.recents.clone(),
             http_port: self.http_port,
+            https_port: self.https_port,
             static_dir: self.static_dir.clone(),
             library_dir: self.library_dir.clone(),
             token: self.token.clone(),
