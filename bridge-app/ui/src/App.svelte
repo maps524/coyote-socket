@@ -29,9 +29,14 @@
 <main>
   <header>
     <h1>CoyoteSocket Bridge</h1>
+    <!--
+      Kept deliberately precise. "Confirmed against a real DeoVR" without the
+      qualifier would read as "this protocol is done", and it is not: one
+      player, one version, one platform, and HereSphere entirely unobserved.
+    -->
     <span class="small muted">
-      spike {bridge.status?.version ?? ''} — the protocol client has never
-      spoken to a real DeoVR or HereSphere
+      spike {bridge.status?.version ?? ''} — confirmed against DeoVR on a Quest,
+      once. HereSphere unobserved.
     </span>
   </header>
 
