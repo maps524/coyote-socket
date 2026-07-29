@@ -181,9 +181,23 @@ impl DeviceStore {
 
     /// Exchange a valid pairing token for a new device credential.
     ///
-    /// Returns the cookie value — `<id>.<secret>` — which is the only moment
-    /// the secret exists outside the phone. It is not stored, not logged and
-    /// not recoverable; a device that loses it pairs again.
+    /// Returns the cookie value — `<id>.<secret>`. The secret is **never
+    /// stored**: only its SHA-256 hash is written to disk, it is never logged,
+    /// and it cannot be recovered from the credential file. A device that loses
+    /// it pairs again.
+    ///
+    /// **That is a claim about the stored form, not about the secret's
+    /// lifetime, and the distinction matters.** This doc previously said
+    /// returning it was "the only moment the secret exists outside the phone",
+    /// which is false in the direction that misleads: the secret is created
+    /// here, travels to the phone once in `Set-Cookie`, and then comes back
+    /// **on every single request** in the `Cookie` header. It is in flight
+    /// constantly and in this process's memory on every `verify`.
+    ///
+    /// Anyone reasoning about exposure from the old sentence would conclude the
+    /// secret crosses the wire once. It crosses continuously — which is exactly
+    /// why `Secure`, `HttpOnly` and the `Origin` requirement on the cookie path
+    /// are load-bearing rather than belt-and-braces.
     pub fn mint(&self) -> Result<(String, VerifiedDevice), String> {
         let id = random_hex(ID_BYTES)?;
         let secret = random_hex(SECRET_BYTES)?;

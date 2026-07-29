@@ -41,8 +41,14 @@
 //!    did not resolve — multicast blocked, wrong network — and no amount of
 //!    certificate fiddling will help.
 //! 2. Reach it over HTTPS. Failure only at this stage means the name is fine
-//!    and the certificate is not trusted yet, which almost always means step 2
-//!    of the install was missed.
+//!    and the certificate is not trusted yet, which almost always means **step
+//!    3** of the install — Certificate Trust Settings — was missed.
+//!
+//! (Step 3, not step 2. The install list grew from two steps to three when
+//! "Profile Downloaded → Install" was separated from enabling full trust, and
+//! this sentence kept the old number while the page it describes moved on. It
+//! pointed a reader at "you installed the profile wrong" when the actual
+//! failure is the trust toggle — the single most-missed action in the flow.)
 //!
 //! A verification step that distinguishes those two is worth more than any
 //! quantity of instructions, because it converts a silent failure into a
@@ -322,13 +328,23 @@ pub fn split_query(path: &str) -> (&str, &str) {
     }
 }
 
-/// The body served over TLS to prove the certificate is trusted.
+/// The prefix of the body served over TLS to prove the certificate is trusted.
 ///
-/// Deliberately tiny and free of anything worth reading: reaching it at all is
-/// the entire signal. It carries its own permissive CORS header because the
-/// page asking the question is on a different origin (plain HTTP, different
-/// port) by necessity — that is what makes it a *cross-origin* check, and a
-/// check that could only be run from the same origin would answer nothing.
+/// **The response is `trusted <nonce>` and the caller reads both halves.**
+/// Reaching this endpoint proves the client validated our certificate; the
+/// nonce proves it reached *this* bridge and not another instance answering the
+/// same mDNS name. See [`TlsPublicInfo::instance_nonce`].
+///
+/// This doc previously said the body was "free of anything worth reading" and
+/// that "reaching it at all is the entire signal". That was true when it was
+/// written and stopped being true when the nonce was added — the comment was a
+/// scripted edit away from a `const` whose meaning had changed, and nothing
+/// type-checks a sentence. Reaching it is now necessary and not sufficient.
+///
+/// It carries its own permissive CORS header because the page asking the
+/// question is on a different origin (plain HTTP, different port) by necessity —
+/// that is what makes it a *cross-origin* check, and a check that could only be
+/// run from the same origin would answer nothing.
 pub const TRUSTCHECK_BODY: &str = "trusted";
 
 /// A random per-process value for [`TlsPublicInfo::instance_nonce`].
