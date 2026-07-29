@@ -162,6 +162,7 @@ pub async fn proxy<W>(
     range: Option<&str>,
     if_range: Option<&str>,
     advertised_size: Option<u64>,
+    served_as: &str,
 ) -> Outcome
 where
     W: AsyncWrite + Unpin,
@@ -271,7 +272,7 @@ where
                             "[media] {} ignored Range; skipping {start} bytes to synthesise a 206",
                             upstream.authority()
                         );
-                        relay_skipped(out, method, &head, &mut body, start, total).await
+                        relay_skipped(out, method, &head, &mut body, start, total, served_as).await
                     }
                     _ => {
                         log_warn!(
@@ -280,7 +281,7 @@ where
                             upstream.authority(),
                             if total.is_some() { "too large to skip" } else { "unknowable" }
                         );
-                        relay(out, method, &head, framing, &mut body, 200).await
+                        relay(out, method, &head, framing, &mut body, 200, served_as).await
                     }
                 };
             }
@@ -314,7 +315,7 @@ where
         }
     }
 
-    relay(out, method, &head, framing, &mut body, head.status).await
+    relay(out, method, &head, framing, &mut body, head.status, served_as).await
 }
 
 /// Forward the upstream response as-is.
@@ -325,18 +326,48 @@ async fn relay<W, R>(
     framing: Framing,
     body: &mut R,
     status: u16,
+    served_as: &str,
 ) -> Outcome
 where
     W: AsyncWrite + Unpin,
     R: AsyncRead + Unpin,
 {
     let mut headers: Vec<(String, String)> = Vec::new();
+
+    // **The type is ours, not the upstream's.**
+    //
+    // `served_as` is the `<res>` MIME, which [`crate::upnp::choose_res`] has
+    // already checked against a fixed list of media types. The upstream's own
+    // `Content-Type` is a string from a server we do not control, relayed on
+    // *our* origin — and `/dlna/media/<ref>` is a URL a browser can be pointed
+    // at directly, not only from a `<video>` element. A media server that
+    // answered `text/html` there would have been serving HTML on the bridge's
+    // origin, alongside the pairing token. `nosniff` does not help: it stops a
+    // browser guessing a *different* type, not honouring a declared one.
+    //
+    // This module is about moving bytes, so the thing it was never "about" is
+    // what those bytes claim to be. Pinning it to a value that has already been
+    // validated removes the question rather than answering it.
+    if let Some(upstream_type) = head.get("content-type") {
+        let same = upstream_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case(served_as);
+        if !same {
+            log_warn!(
+                "[media] {} served {upstream_type:?} where its own listing said {served_as:?};                  serving it as {served_as:?}",
+                upstream_type
+            );
+        }
+    }
+    headers.push(("Content-Type".into(), served_as.to_string()));
     // Everything a media element needs, and nothing else. An allowlist rather
     // than a denylist: an upstream `Set-Cookie`, `Access-Control-Allow-Origin`
     // or `Content-Encoding` reaching the phone would be someone else's header
     // arriving with this origin's authority.
     for name in [
-        "content-type",
         "content-length",
         "content-range",
         "accept-ranges",
@@ -396,6 +427,7 @@ async fn relay_skipped<W, R>(
     body: &mut R,
     start: u64,
     total: u64,
+    served_as: &str,
 ) -> Outcome
 where
     W: AsyncWrite + Unpin,
@@ -404,7 +436,8 @@ where
     let remaining = total - start;
     let content_range = format!("bytes {start}-{}/{total}", total - 1);
     let length = remaining.to_string();
-    let ctype = head.get("content-type").unwrap_or("application/octet-stream");
+    // The validated `<res>` type, never the upstream's. See `relay`.
+    let ctype = served_as;
 
     let mut headers: Vec<(&str, &str)> = vec![
         ("Content-Type", ctype),
@@ -642,7 +675,7 @@ mod tests {
         let mut body = std::io::Cursor::new(upstream_body.to_vec());
         let mut out = Vec::new();
         let status = status_override.unwrap_or(h.status);
-        relay(&mut out, method, &h, framing, &mut body, status).await;
+        relay(&mut out, method, &h, framing, &mut body, status, "video/mp4").await;
         let split = out
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
@@ -766,10 +799,12 @@ mod tests {
     /// The synthesised 206, for a server that ignored the `Range` it was sent.
     #[tokio::test]
     async fn a_range_ignoring_upstream_still_produces_a_correct_206() {
-        let h = head("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 10");
+        let h = head("HTTP/1.1 200 OK
+Content-Type: video/mp4
+Content-Length: 10");
         let mut body = std::io::Cursor::new(b"0123456789".to_vec());
         let mut out = Vec::new();
-        let outcome = relay_skipped(&mut out, "GET", &h, &mut body, 4, 10).await;
+        let outcome = relay_skipped(&mut out, "GET", &h, &mut body, 4, 10, "video/mp4").await;
 
         let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
         let head_text = String::from_utf8_lossy(&out[..split]).into_owned();
@@ -787,13 +822,42 @@ mod tests {
         let h = head("HTTP/1.1 200 OK\r\nContent-Length: 100");
         let mut body = std::io::Cursor::new(b"short".to_vec());
         let mut out = Vec::new();
-        let outcome = relay_skipped(&mut out, "GET", &h, &mut body, 50, 100).await;
+        let outcome = relay_skipped(&mut out, "GET", &h, &mut body, 50, 100, "video/mp4").await;
 
         let text = String::from_utf8_lossy(&out);
         assert!(text.starts_with("HTTP/1.1 502"), "{text}");
         assert!(matches!(outcome, Outcome::Upstream(_)));
         // §0b: the message names the media server, not this bridge.
         assert!(text.contains("media server"), "{text}");
+    }
+
+    /// **The upstream does not get to choose the type served on our origin.**
+    ///
+    /// `/dlna/media/<ref>` is a URL a browser can be pointed at directly, not
+    /// only from a `<video>` element. A media server answering `text/html`
+    /// there would have been serving HTML on the bridge's origin, alongside the
+    /// pairing token. `nosniff` is no help: it stops a browser guessing a type,
+    /// not honouring a declared one.
+    ///
+    /// The `<res>` MIME has already been checked against a fixed list, so it is
+    /// the one used. Wrong-scope, not wrong-implementation: this module is
+    /// about moving bytes, so what the bytes *claim to be* was never in frame.
+    #[tokio::test]
+    async fn the_served_type_is_the_validated_one_not_the_upstreams() {
+        let h = head(
+            "HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Content-Length: 5",
+        );
+        let mut body = std::io::Cursor::new(b"<h1>x".to_vec());
+        let mut out = Vec::new();
+        relay(&mut out, "GET", &h, Framing::Length(5), &mut body, 200, "video/mp4").await;
+
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("Content-Type: video/mp4"), "{text}");
+        assert!(!text.to_ascii_lowercase().contains("text/html"), "{text}");
+        // Exactly one, so nothing downstream has to decide between two.
+        assert_eq!(text.matches("Content-Type:").count(), 1, "{text}");
     }
 
     #[test]

@@ -980,7 +980,7 @@ async fn bridge_for_proxy(
 ) -> (SocketAddr, String) {
     let device = dlna.add_server(device_url.clone()).await.unwrap();
     let reference = dlna
-        .mint_media_ref(&device, "bulk", "bulk", &format!("http://{origin}/bulk"), None)
+        .mint_media_ref(&device, "bulk", "bulk", &format!("http://{origin}/bulk"), None, "video/mp4")
         .await
         .expect("the bulk URL is on the device's own host");
 

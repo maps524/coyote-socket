@@ -103,6 +103,10 @@ struct MediaRef {
     upstream: Url,
     /// For the log line when it is played.
     title: String,
+    /// The `<res>` MIME, already checked against a fixed list by
+    /// [`crate::upnp::choose_res`]. Served downstream in place of whatever the
+    /// upstream claims — see [`crate::mediaproxy`].
+    mime: String,
     /// `size` from the `<res>` that produced this reference, when the server
     /// gave one.
     ///
@@ -203,7 +207,37 @@ impl Dlna {
         for found in &discovery.servers {
             match upnp::describe(&found.location).await {
                 Ok(device) => {
-                    if devices.contains_key(&device.udn) {
+                    // **A second device claiming a UDN does not get it.**
+                    //
+                    // The UDN is the handle the client browses by, and this map
+                    // is what resolves it. Anything on the network can answer
+                    // an `M-SEARCH` and put any `<UDN>` in its own description,
+                    // so overwriting on a repeat would let a rogue responder
+                    // take over the identity of the real media server and
+                    // receive every subsequent `Browse` — the pinned entries
+                    // are described first precisely so they cannot be
+                    // displaced, and that ordering only helps if a later
+                    // insert loses.
+                    //
+                    // Wrong-scope rather than wrong-implementation: this loop
+                    // was about *describing* devices, so nothing in it was
+                    // about two of them claiming to be the same one.
+                    if let Some(existing) = devices.get(&device.udn) {
+                        if is_udn_collision(existing, &device) {
+                            log_warn!(
+                                "[dlna] {} claims UDN {}, which {} already holds; ignoring the                                  newcomer",
+                                device.description_url,
+                                device.udn,
+                                existing.description_url
+                            );
+                            undescribable.push((
+                                device.description_url.to_string(),
+                                format!(
+                                    "claims the same UDN ({}) as {}, which was found first;                                      ignored",
+                                    device.udn, existing.description_url
+                                ),
+                            ));
+                        }
                         continue;
                     }
                     log_info!(
@@ -318,6 +352,7 @@ impl Dlna {
         title: &str,
         res_url: &str,
         advertised_size: Option<u64>,
+        mime: &str,
     ) -> Option<String> {
         let upstream = Url::parse(res_url)?;
         if upstream.host != device.description_url.host {
@@ -366,7 +401,11 @@ impl Dlna {
             id.clone(),
             MediaRef {
                 upstream,
-                title: title.to_string(),
+                // Capped. A title is server-supplied and this map holds up to
+                // `MAX_REFS` of them; unbounded, a server could make the bridge
+                // hold megabytes per entry. It is only used for a log line.
+                title: title.chars().take(200).collect(),
+                mime: mime.to_string(),
                 advertised_size,
                 seq,
             },
@@ -377,6 +416,21 @@ impl Dlna {
     async fn resolve(&self, id: &str) -> Option<MediaRef> {
         self.state.lock().await.refs.get(id).cloned()
     }
+}
+
+/// Whether a newly described device is a *different* device claiming a UDN that
+/// is already held.
+///
+/// Extracted so the decision is testable without two responders on a network:
+/// the loop that calls it only runs after a real `M-SEARCH`, which is exactly
+/// the sort of code that ends up asserted by nobody.
+///
+/// A repeat of the same device — one description URL answering twice, or a
+/// pinned entry also being discovered — is not a collision and is silently
+/// ignored. Two different URLs claiming one UDN is, and the first described
+/// keeps it.
+fn is_udn_collision(existing: &Device, candidate: &Device) -> bool {
+    existing.description_url != candidate.description_url
 }
 
 /// FNV-1a over several byte strings, hex-rendered. Not a security primitive —
@@ -525,6 +579,9 @@ pub enum Action {
         /// What the `<res>` said the file is, if anything. Corroboration for
         /// the origin's own `Content-Length`.
         advertised_size: Option<u64>,
+        /// The validated `<res>` MIME, served downstream in place of the
+        /// upstream's own claim.
+        mime: String,
     },
 }
 
@@ -543,6 +600,7 @@ pub async fn handle(dlna: &Dlna, rest: &str, query: &str) -> Action {
                     upstream: m.upstream,
                     title: m.title,
                     advertised_size: m.advertised_size,
+                    mime: m.mime,
                 },
                 // §0b: say what is actually missing. A stale reference after a
                 // restart is the common case and "not found" alone sends people
@@ -661,7 +719,14 @@ async fn browse(dlna: &Dlna, params: &HashMap<String, String>) -> Action {
         let (media_url, reason, seekable, unplayable, duration, resolution, size) = match chosen {
             Ok(c) => {
                 let minted = dlna
-                    .mint_media_ref(&device, &item.id, &item.title, &c.res.url, c.res.size)
+                    .mint_media_ref(
+                        &device,
+                        &item.id,
+                        &item.title,
+                        &c.res.url,
+                        c.res.size,
+                        c.res.mime(),
+                    )
 .await;
                 let unplayable = if minted.is_none() {
                     Some(format!(
@@ -820,7 +885,7 @@ mod tests {
         let dlna = Dlna::new();
         let d = device();
         let id = dlna
-            .mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/ums/media/x.mp4", None)
+            .mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/ums/media/x.mp4", None, "video/mp4")
 .await
             .unwrap();
 
@@ -844,7 +909,7 @@ mod tests {
             "http://trusted@192.168.0.99/x.mp4",
         ] {
             assert!(
-                dlna.mint_media_ref(&d, "1", "t", hostile, None)
+                dlna.mint_media_ref(&d, "1", "t", hostile, None, "video/mp4")
 .await.is_none(),
                 "should refuse {hostile}"
             );
@@ -852,7 +917,7 @@ mod tests {
         // The same host on another port is allowed: servers really do split
         // description and media across ports.
         assert!(dlna
-            .mint_media_ref(&d, "1", "t", "http://192.168.0.4:9001/media/x.mp4", None)
+            .mint_media_ref(&d, "1", "t", "http://192.168.0.4:9001/media/x.mp4", None, "video/mp4")
 .await
             .is_some());
     }
@@ -863,15 +928,30 @@ mod tests {
     async fn the_same_item_mints_the_same_reference() {
         let dlna = Dlna::new();
         let d = device();
-        let a = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4", None)
+        let a = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4", None, "video/mp4")
 .await;
-        let b = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4", None)
+        let b = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4", None, "video/mp4")
 .await;
         assert_eq!(a, b);
 
-        let other = dlna.mint_media_ref(&d, "1$7$254", "Ep II", "http://192.168.0.4:5001/b.mp4", None)
+        let other = dlna.mint_media_ref(&d, "1$7$254", "Ep II", "http://192.168.0.4:5001/b.mp4", None, "video/mp4")
 .await;
         assert_ne!(a, other);
+    }
+
+    /// A title is server-supplied and the reference table holds up to
+    /// `MAX_REFS` of them. It is only ever used for a log line, so it is capped
+    /// rather than trusted.
+    #[tokio::test]
+    async fn a_stored_title_is_capped() {
+        let dlna = Dlna::new();
+        let d = device();
+        let huge = "A".repeat(100_000);
+        let id = dlna
+            .mint_media_ref(&d, "1", &huge, "http://192.168.0.4:5001/x.mp4", None, "video/mp4")
+            .await
+            .unwrap();
+        assert!(dlna.resolve(&id).await.unwrap().title.chars().count() <= 200);
     }
 
     #[tokio::test]
@@ -879,7 +959,7 @@ mod tests {
         let dlna = Dlna::new();
         let d = device();
         for i in 0..(MAX_REFS + 50) {
-            dlna.mint_media_ref(&d, &format!("id{i}"), "t", &format!("http://192.168.0.4:5001/{i}.mp4"), None)
+            dlna.mint_media_ref(&d, &format!("id{i}"), "t", &format!("http://192.168.0.4:5001/{i}.mp4"), None, "video/mp4")
                 .await;
         }
         assert!(dlna.state.lock().await.refs.len() <= MAX_REFS);
@@ -928,6 +1008,34 @@ mod tests {
         };
         assert_eq!(status, 404);
         assert!(msg.contains("bridge restart") || msg.contains("restart"), "{msg}");
+    }
+
+    /// **A second device does not get to take the first one's UDN.**
+    ///
+    /// The UDN is the handle a client browses by, and the device map resolves
+    /// it. Anything on the network can answer an `M-SEARCH` and put any `<UDN>`
+    /// in its own description, so overwriting on a repeat would let a rogue
+    /// responder inherit the real media server's identity and receive every
+    /// subsequent `Browse`.
+    ///
+    /// Wrong-scope rather than wrong-implementation: the loop was about
+    /// *describing* devices, so nothing in it was about two of them claiming to
+    /// be the same one.
+    #[test]
+    fn a_second_device_claiming_a_held_udn_is_a_collision() {
+        let real = device();
+        let mut impostor = device();
+        impostor.description_url =
+            Url::parse("http://192.168.0.99:5001/description/fetch").unwrap();
+        impostor.control_url = Url::parse("http://192.168.0.99:5001/ctrl").unwrap();
+        impostor.friendly_name = "Also Universal Media Server".into();
+
+        assert!(is_udn_collision(&real, &impostor));
+        assert!(is_udn_collision(&impostor, &real));
+
+        // The same device answering twice is not a collision — a pinned entry
+        // is also discovered, and that must stay silent.
+        assert!(!is_udn_collision(&real, &device()));
     }
 
     #[test]

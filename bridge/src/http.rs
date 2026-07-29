@@ -985,6 +985,7 @@ where
             upstream,
             title,
             advertised_size,
+            mime,
         } => {
             let range = header_value(request_head, "range");
             let if_range = header_value(request_head, "if-range");
@@ -1000,6 +1001,7 @@ where
                     range,
                     if_range,
                     advertised_size,
+                    &mime,
                 )
                 .await;
             log_debug!("[media] {title:?} finished: {outcome:?}");
