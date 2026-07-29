@@ -239,6 +239,7 @@ async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>,
         cmd_tx: cmd_tx.clone(),
         static_dir: None,
         library: None,
+        dlna: None,
         pairing_base: base.clone(),
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: vec![format!("127.0.0.1:{port}")],
@@ -416,6 +417,7 @@ async fn traversal_outside_the_static_root_is_refused() {
         std::sync::Arc::new(http::Ctx {
             snapshot_rx,
             cmd_tx,
+            dlna: None,
             static_dir: Some(dir.clone()),
             library: None,
             pairing_base: base.clone(),
@@ -586,6 +588,7 @@ async fn the_relay_keeps_talking_while_the_player_says_nothing() {
         std::sync::Arc::new(http::Ctx {
             snapshot_rx,
             cmd_tx,
+            dlna: None,
             static_dir: None,
             library: None,
             pairing_base: base.clone(),
@@ -661,6 +664,7 @@ async fn a_paused_player_keeps_the_relay_talking() {
         std::sync::Arc::new(http::Ctx {
             snapshot_rx,
             cmd_tx,
+            dlna: None,
             static_dir: None,
             library: None,
             pairing_base: base.clone(),

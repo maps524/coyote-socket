@@ -30,6 +30,21 @@ struct Args {
     /// library, which is a normal state rather than an error.
     library_dir: Option<PathBuf>,
     log_dir: Option<PathBuf>,
+    /// Whether `/dlna/…` is mounted at all.
+    ///
+    /// On by default because it costs nothing idle — discovery is demand-driven
+    /// (see [`coyote_bridge::dlna`]), so no multicast leaves the machine until
+    /// a client asks for the index. `--no-dlna` unmounts it, which answers 404
+    /// rather than an empty listing: "switched off" and "found nothing" are
+    /// different answers and only one of them is about the network.
+    dlna: bool,
+    /// Media servers pinned by description URL, bypassing discovery.
+    ///
+    /// The escape hatch for the networks where `M-SEARCH` cannot work: a UMS
+    /// IP allowlist that does not include this host, a VLAN or mesh router that
+    /// does not forward multicast, or a Windows box that sends the search out
+    /// of a WSL adapter. Repeatable.
+    dlna_servers: Vec<String>,
     tray: bool,
     /// Pin the pairing token instead of minting a fresh one each start. For a
     /// service under a supervisor, where a URL that changes on every restart is
@@ -67,6 +82,8 @@ impl Default for Args {
             static_dir: None,
             library_dir: None,
             log_dir: None,
+            dlna: true,
+            dlna_servers: Vec::new(),
             tray: true,
             token: None,
             https_port: DEFAULT_HTTPS_PORT,
@@ -96,6 +113,10 @@ OPTIONS:
                           Default: none, which is a normal state - the phone
                           simply sees an empty library.
   --log-dir <path>        Where to write coyote-bridge.log. [default: cwd]
+  --no-dlna               Do not mount /dlna (DLNA browsing and media proxy).
+  --dlna-server <url>     Pin a media server by its description URL, e.g.
+                          http://192.168.0.4:5001/description/fetch. Skips SSDP
+                          discovery for that server. Repeatable.
   --no-tray               Do not create a tray icon (headless servers).
   --token <hex>           Pairing token. Default: a fresh one each start, which
                           means the phone URL changes on every restart.
@@ -156,6 +177,8 @@ fn parse_args() -> Result<Args, String> {
             "--static-dir" => args.static_dir = Some(PathBuf::from(value()?)),
             "--library-dir" => args.library_dir = Some(PathBuf::from(value()?)),
             "--log-dir" => args.log_dir = Some(PathBuf::from(value()?)),
+            "--no-dlna" => args.dlna = false,
+            "--dlna-server" => args.dlna_servers.push(value()?),
             "--no-tray" => args.tray = false,
             "--token" => args.token = Some(coyote_bridge::auth::Token::from_string(value()?)),
             "--https-port" => {
@@ -342,6 +365,8 @@ fn main() {
     let player_endpoint = args.player.clone();
     let static_dir = args.static_dir.clone();
     let library_dir = args.library_dir.clone();
+    let dlna_enabled = args.dlna;
+    let dlna_servers = args.dlna_servers.clone();
     // `pairing_base`, not `base_url`: it carries the `/install` path when TLS is
     // up, and this is what `/pair` renders into the QR. Using the bare base here
     // is the bug where the log described the intended flow and the QR silently
@@ -374,6 +399,26 @@ fn main() {
         // picks it up when it appears, which is what a network share that
         // mounts after login needs.
         let library = library_dir.map(coyote_bridge::library::Library::spawn);
+
+        // Built before the listener binds, so a mistyped `--dlna-server` is
+        // reported at startup rather than as an empty library later.
+        let dlna = if dlna_enabled {
+            let d = std::sync::Arc::new(coyote_bridge::dlna::Dlna::new());
+            for raw in &dlna_servers {
+                match coyote_bridge::httpc::Url::parse(raw) {
+                    Some(url) => match d.add_server(url).await {
+                        Ok(device) => {
+                            log_info!("[main] pinned media server: {}", device.friendly_name)
+                        }
+                        Err(e) => log_warn!("[main] --dlna-server {raw}: {e}"),
+                    },
+                    None => log_warn!("[main] --dlna-server {raw} is not an absolute http:// URL"),
+                }
+            }
+            Some(d)
+        } else {
+            None
+        };
 
         match TcpListener::bind(bind_addr).await {
             Ok(listener) => {
@@ -425,6 +470,7 @@ fn main() {
                     cmd_tx: bridge.cmd_tx.clone(),
                     static_dir,
                     library,
+                    dlna,
                     pairing_base: base_for_http,
                     token: std::sync::RwLock::new(token_for_http),
                     allowed_hosts,
