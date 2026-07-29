@@ -1,11 +1,30 @@
 # Bridge follow-ups
 
-Sections **0**, **0a**, **0b** and **0c** are not tasks. They are defect
-signatures this work produced repeatedly, written as recognition rules because
-each has already caught its next instance. Read them before adding a field that
-records whether something worked, a check that guards one, an error message
-about a component you do not own, or a report that a change was verified against
-real hardware.
+Sections **0** through **0e** are not tasks. They are defect signatures this
+work produced repeatedly, written as recognition rules because each has already
+caught its next instance.
+
+**They are siblings, not a sequence.** The table is an index, not an order, and
+none of the questions substitutes for another — a green answer to one says
+nothing about the rest.
+
+| | The shape | The question to ask |
+|---|---|---|
+| **0** | A field promising a capability nobody confirmed | What does this mean when nobody set it? |
+| **0a** | A check whose success path is reached without the check happening | What would have to be true for this to run, and is that what it measured? |
+| **0b** | A diagnostic naming the wrong subsystem | Could the component printing this have caused it? |
+| **0c** | Verification concentrating where the system succeeds | Which paths did success prevent me from exercising? |
+| **0d** | A defence that admits whatever does not resemble its threat | What did I name the threat as? |
+| **0e** | A correct behaviour at a frequency nobody decided | This is correct once — what is it a thousand times a second? |
+
+The wording in each row is the section's own. A summary that paraphrases the
+thing it summarises is §0d in miniature: the table exists so people do not read
+the sections, so a row that drifts is a defence with the wrong threat named.
+
+Read them before adding a field that records whether something worked, a check
+that guards one, or an error message about a component you do not own; before
+reporting that a change was verified against real hardware; and before writing
+an allowlist or a retry.
 
 Sections **1** onward are work identified and deliberately not done.
 
@@ -465,6 +484,161 @@ Not "test more" — that is advice, not a rule. Three concrete things:
   by anyone.
 - **The `--dlna-server` failure path.** The success path is exercised by every
   integration test; a mistyped address has only been reasoned about.
+
+---
+
+## 0d. A defence admits whatever does not look like its threat
+
+Sections 0, 0a and 0c are about code nobody examined closely enough. This one is
+about code that was examined, defended, tested, and reasoned about in a comment
+— and where the reasoning is what kept the hole in.
+
+> **A defence written against a named threat will admit anything that does not
+> look like that threat, and the more carefully the threat was named the more
+> confidently it will admit it.**
+
+### The instance
+
+`mediaproxy::relay` forwards a fixed allowlist of upstream headers. The
+allowlist exists for a stated reason, written in the code: an upstream
+`Set-Cookie` or `Access-Control-Allow-Origin` reaching the phone would be
+someone else's header arriving with this origin's authority. There is a test,
+`upstream_headers_are_allowlisted`, asserting exactly that. It passes. It has
+always passed.
+
+`Content-Type` was on the allowlist, because a media proxy forwards the content
+type. That is not an oversight; it is the obvious, correct-looking answer, and
+it is what any reviewer would expect to see.
+
+But `/dlna/media/<ref>` is a URL a browser can be **navigated to**, not only
+fetched by a `<video>` element. So a media server answering `text/html` there
+was serving HTML on the bridge's own origin — the origin holding the pairing
+token, the WebSocket and the app. `X-Content-Type-Options: nosniff` did not
+help and was never going to: it stops a browser *guessing* a type, not
+honouring a declared one.
+
+**The defence and the hole were the same line.** The allowlist worked perfectly
+at the thing it was pointed at.
+
+### Why this is not section 0 or 0c
+
+- **§0** is a value that lies about state. Here nothing lies: the header is
+  faithfully what the upstream said.
+- **§0c** is a path nothing exercised. Here the path was exercised, by a test
+  written for it, which passed for the right reason.
+- The difference is **scope of the threat model, not coverage of the code.** The
+  question asked was "which headers carry someone else's authority?" and the
+  answer was correct. The question never asked was "what does this response
+  become if a person navigates to it?"
+
+A green test on a well-argued defence is the most comfortable place in a
+codebase, and that is the point of writing this down.
+
+### The same fingerprint, one layer up
+
+`dlna`'s device map has it too, and it is worse there because the mitigation was
+*documented*. Pinned entries are described before discovered ones **precisely so
+they cannot be displaced** — that ordering was deliberate and carries a comment
+saying why. It did nothing, because a later insert overwrote the earlier one
+regardless of order. An absent guard is a gap; a documented inert guard is a gap
+that answers "is this handled?" with **yes**.
+
+That half is §0a — a guard whose success path is reached without the guard
+running. What §0d adds is why nobody looked: the comment had already settled the
+question.
+
+### The recognition question
+
+Not "is this defended?" and not "is this tested?" — both were yes.
+
+> **What did I name the threat as, and what is admitted by not resembling it?**
+
+And the companion, for anything that reasons in a comment:
+
+> **If this comment is right, what does it stop the next reader from checking?**
+
+### Where to look first
+
+Anywhere a decision is expressed as *what to exclude*. An allowlist encodes its
+threat model in what it omits, so every entry is a claim that the entry is
+harmless, and those claims are invisible — nobody reviews a list for the things
+that are on it. The stronger form, where it is available, is to stop forwarding
+the value and **supply it yourself from something already validated**, which is
+what the fix here does: the `Content-Type` served is now the `<res>` MIME
+`choose_res` already checked against a fixed list, and the upstream's version is
+logged rather than honoured. That removes the question instead of answering it.
+
+---
+
+## 0e. A correct behaviour, at a rate nobody chose
+
+The compounding family, in its cheapest form: two independently correct
+decisions, neither of them a defect, and an emergent one where they meet.
+
+> **A behaviour that is right once can be a defect at a frequency nobody
+> decided. The frequency is rarely written down, because it is not a decision —
+> it falls out of something else.**
+
+### The instance
+
+`DlnaPicker` clears its error banner at the top of each attempt to load the
+index. That is not merely acceptable, it is the right thing to write: a stale
+error left on screen during a retry is worse than no error, and clearing it is
+what any reviewer would ask for if it were missing.
+
+Separately, the effect that triggers the load read `index` and `busy`. A failed
+load leaves `index` null and returns `busy` to false, so the effect re-triggered
+itself. Nobody chose a retry rate; there was no ceiling to choose one with.
+
+Measured against a bridge refusing the token: **1,294 requests in six seconds**,
+climbing linearly — and `bannerShown: false` throughout. Every attempt erased
+the banner before the next attempt set it, so the message
+*"The bridge refused this page. Re-open it from the pairing link or QR code."*
+was never once visible. The user gets a blank sheet; the bridge gets 215
+requests a second.
+
+The banner logic is correct. The effect's dependencies are a bug. **The
+invisibility is neither of them** — it is the correct behaviour running at a
+frequency that was never a decision.
+
+### Why the rate is the part that hides
+
+Both halves review well in isolation, which is how this survives. "Clear the
+error before retrying" is obviously right. "Re-run when the inputs change" is
+obviously right. Neither review asks *how often*, because frequency is not
+visible in either diff — it emerges from the pair.
+
+And the symptom points away from both. What a user reports is "the picker shows
+nothing", which reads as a rendering problem or an empty library. The 401 that
+caused it was correctly detected, correctly turned into a message, and correctly
+placed on screen — 215 times a second.
+
+### The recognition question
+
+> **This is correct once. What is it at a thousand times a second, and who
+> decided that number?**
+
+If the answer to the second half is "nothing decided it, it fell out of a loop",
+that is the finding, whether or not you can name the symptom yet.
+
+### Where to look first
+
+- **Anything that clears, resets or overwrites state that a human is meant to
+  read.** Erasure is the behaviour that turns rate into invisibility.
+- **Any loop whose ceiling is a side effect rather than a constant.** A retry
+  bounded by "the condition stopped being true" has no rate; it has whatever
+  rate the machine can produce.
+- **Reactive effects whose dependencies include the thing they set.** The
+  failure path is where this bites, because the success path breaks the cycle by
+  assigning the value the effect reads — which is also why it is invisible in a
+  green run. See §0c.
+
+### Related, on the clients branch
+
+Retention as an eraser: a bounded gone-row list whose ids are attacker-chosen,
+so evidence of a real disconnect can be evicted by churn. Same shape — a
+correct bound and a correct record, and an emergent defect at a rate the
+attacker picks rather than the author.
 
 ---
 
