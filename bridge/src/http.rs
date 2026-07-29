@@ -561,6 +561,14 @@ where
         // The cross-origin header is required rather than lax: the page asking
         // is on the HTTP origin and the answer is on the HTTPS one, so the
         // check is cross-origin by construction. Nothing is disclosed by it.
+        // The acceptance instrument. Meaningful only over TLS — asked over
+        // plain HTTP it always answers "not secure", which is true and useless.
+        // Ungated for the same reason as `/install`: it is a diagnostic a user
+        // needs precisely when nothing else is working.
+        "/secure-check" => {
+            let body = crate::install::secure_check_page();
+            respond(stream, 200, "text/html; charset=utf-8", body.as_bytes()).await
+        }
         "/trustcheck" => {
             respond_with_headers(
                 stream,

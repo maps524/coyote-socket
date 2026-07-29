@@ -176,6 +176,10 @@ pub const TRUSTCHECK_BODY: &str = "trusted";
 
 pub fn page(cfg: &InstallPage<'_>) -> String {
     let https_url = html_escape(&cfg.https_url());
+    let secure_check_url = html_escape(&format!(
+        "https://{}:{}/secure-check",
+        cfg.hostname, cfg.https_port
+    ));
     let http_probe = html_escape(&cfg.http_probe_url());
     let https_probe = html_escape(&cfg.https_probe_url());
     let ca_name = html_escape(cfg.ca_display_name);
@@ -254,6 +258,7 @@ That is why the button below exists.</p>
 <div id="result" role="status" aria-live="polite"></div>
 <div id="next" class="row">
   <a class="btn primary" id="go" href="{https_url}">Open the app</a>
+  <a class="btn" href="{secure_check_url}">Test Bluetooth</a>
 </div>
 {fallback}
 
@@ -333,6 +338,95 @@ authority from the computer as well.</p>
 </script>
 </body></html>"#
     )
+}
+
+/// The page that answers the actual acceptance question.
+///
+/// Everything else here establishes that the certificate is well-formed and
+/// trusted. That is necessary and it is not the point. The point is whether the
+/// **browser** will hand this origin a Bluetooth device, and only the browser
+/// can answer that.
+///
+/// Served on the TLS listener, because that is the origin under test — asking
+/// this question over plain HTTP would always answer "no" and prove nothing.
+/// It reports three things separately, because they fail for different reasons:
+///
+/// 1. `isSecureContext` — whether the browser considers this origin secure at
+///    all. False here means the certificate is not trusted, whatever the page
+///    looks like.
+/// 2. `navigator.bluetooth` — whether the browser implements Web Bluetooth.
+///    On iOS, Safari does **not**; only Bluefy and a few other WebKit-shell
+///    browsers do. A user who has done everything right and is in Safari will
+///    fail here, and that is worth saying plainly rather than letting them
+///    re-check a certificate that was never the problem.
+/// 3. An actual `requestDevice` call, which is the only thing that proves the
+///    chooser opens.
+pub fn secure_check_page() -> String {
+    r#"<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Can this page use Bluetooth?</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 16px/1.6 system-ui, sans-serif; margin: 0 auto; max-width: 32rem; padding: 1.5rem; }
+h1 { font-size: 1.3rem; }
+.row { display: flex; gap: .6rem; align-items: baseline; margin: .5rem 0; }
+.k { font-weight: 600; min-width: 11rem; }
+.btn { font: inherit; font-weight: 600; padding: .8rem 1.2rem; border-radius: .6rem;
+  border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; margin: 1rem 0; }
+#out { padding: .9rem 1rem; border-radius: .6rem; display: none;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }
+#out.show { display: block; }
+.hint { opacity: .75; font-size: .92rem; }
+code { background: color-mix(in srgb, currentColor 12%, transparent); padding: .1rem .35rem; border-radius: .25rem; }
+</style></head><body>
+<h1>Can this page use Bluetooth?</h1>
+<p class="hint">This is the question the certificate exists to make answerable.
+Everything else only sets it up.</p>
+
+<div class="row"><span class="k">Origin</span><code id="origin"></code></div>
+<div class="row"><span class="k">Secure context</span><span id="secure"></span></div>
+<div class="row"><span class="k">Web Bluetooth API</span><span id="api"></span></div>
+
+<button class="btn" id="go">Ask for a Bluetooth device</button>
+<div id="out" role="status" aria-live="polite"></div>
+
+<p class="hint" id="safari" style="display:none">
+<strong>You are probably in Safari.</strong> Safari on iOS does not implement Web
+Bluetooth at all — no certificate fixes that. Try <strong>Bluefy</strong> or another
+WebKit browser that adds it, and open this same URL there.</p>
+
+<script>
+(function () {
+  var secure = window.isSecureContext;
+  var api = typeof navigator.bluetooth !== 'undefined';
+  document.getElementById('origin').textContent = location.origin;
+  document.getElementById('secure').textContent = secure ? 'yes' : 'NO — the certificate is not trusted here';
+  document.getElementById('api').textContent = api ? 'available' : 'MISSING in this browser';
+  if (secure && !api) { document.getElementById('safari').style.display = 'block'; }
+
+  var out = document.getElementById('out');
+  function say(t) { out.textContent = t; out.className = 'show'; }
+
+  document.getElementById('go').addEventListener('click', function () {
+    if (!secure) { say('Not a secure context, so the browser will not offer Bluetooth. Go back and finish installing the certificate.'); return; }
+    if (!api) { say('This browser does not implement Web Bluetooth. See the note below.'); return; }
+    // acceptAllDevices, because this is a capability probe rather than a real
+    // connection — filtering to the Coyote would fail for a user who simply
+    // does not have one switched on, which is a different answer.
+    navigator.bluetooth.requestDevice({ acceptAllDevices: true })
+      .then(function (d) { say('Bluetooth works. Picked: ' + (d.name || '(unnamed device)')); })
+      .catch(function (e) {
+        if (e && e.name === 'NotFoundError') {
+          say('The chooser opened and you dismissed it (or nothing was nearby). That still proves Bluetooth works from this origin.');
+        } else {
+          say('Failed: ' + (e && e.name ? e.name : '') + ' ' + (e && e.message ? e.message : e));
+        }
+      });
+  });
+})();
+</script>
+</body></html>"#
+        .to_string()
 }
 
 /// Escape for HTML text and double-quoted attributes.
@@ -450,6 +544,29 @@ mod tests {
         let page = page(&ctx(""));
         assert!(page.contains("any</em> website"));
         assert!(page.contains("never leaves that"));
+    }
+
+    #[test]
+    fn the_bluetooth_check_reports_the_three_things_that_fail_separately() {
+        let page = secure_check_page();
+        // Secure context: false here means the certificate is not trusted,
+        // whatever else the page says.
+        assert!(page.contains("isSecureContext"));
+        // API presence: Safari on iOS does not implement Web Bluetooth at all,
+        // and a user who has done everything right will otherwise blame the
+        // certificate for a browser limitation.
+        assert!(page.contains("navigator.bluetooth"));
+        assert!(page.contains("Bluefy"));
+        // And the only thing that actually proves it: the chooser opening.
+        assert!(page.contains("requestDevice"));
+    }
+
+    #[test]
+    fn the_install_page_links_to_the_bluetooth_check_over_https() {
+        // Over plain HTTP the check would always answer "not secure" — true,
+        // and useless. It has to be reached on the origin under test.
+        let page = page(&ctx(""));
+        assert!(page.contains("https://coyote.local:8443/secure-check"));
     }
 
     #[test]
