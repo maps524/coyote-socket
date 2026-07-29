@@ -236,12 +236,69 @@ Then:
 
 - `http://127.0.0.1:8787/` — the app (or a placeholder if `--static-dir` is unset)
 - `http://127.0.0.1:8787/pair` — the QR the phone should scan
+- `http://127.0.0.1:8787/install` — how the phone gets a secure context
 - `http://127.0.0.1:8787/healthz` — current state as JSON
 - `http://127.0.0.1:8787/library/index.json` — the funscript listing
-- `ws://127.0.0.1:8787/ws` — the state relay
+- `wss://coyote.local:8443/ws` — the state relay (a page served over HTTPS
+  cannot open a `ws://` socket, so this is the address the app actually uses)
 - Tray icon — left-click opens the pairing page
 
 `--help` on either binary lists the rest.
+
+## The phone needs HTTPS, and the bridge issues its own certificate
+
+**Web Bluetooth requires a secure context.** `localhost` is exempt, which is
+exactly what hides this during desktop testing — the phone is not localhost.
+Over plain HTTP the phone cannot reach the Coyote at all, and over a tunnel it
+cannot open a socket back to a LAN service. Neither arrangement completes the
+chain, so the bridge runs its own certificate authority.
+
+On first run it generates a CA, keeps the private key in `<config>/tls/`, and
+serves the public certificate from `/install`. The phone installs it once.
+
+- **The address is `coyote.local`**, answered by an mDNS responder inside the
+  bridge. It has to be the bridge's own: Windows' built-in responder was
+  measured advertising a virtual adapter (`172.21.160.1`, WSL's switch) rather
+  than the LAN address, which a phone cannot reach. The current IP is in the
+  certificate too, as a fallback for networks that block multicast.
+- **A stable name is the point.** The origin is what OPFS, the PWA install and
+  the Web Bluetooth device grant are keyed on. A tunnel that mints a new
+  hostname every restart resets all three — that is the difference between an
+  app and a demo.
+- **The QR points at plain HTTP**, deliberately. A phone that has not yet
+  trusted the CA meets a full-page certificate interstitial on HTTPS with no
+  route back to the instructions.
+- **Both listeners stay up.** Everything except Web Bluetooth works over plain
+  HTTP and it is far easier to debug.
+
+### On iOS there are two steps, and the second is the one that gets missed
+
+Installing the profile does **not** trust it. The certificate is inert until
+Settings → General → About → **Certificate Trust Settings** → switch on the
+root. Skipping it fails indistinguishably from a broken certificate.
+
+The install page carries the numbered path and a **"check my trust" button**
+that probes plain HTTP first and TLS second, so "your network is blocking mDNS"
+and "you missed the trust step" — the same symptom otherwise — read differently.
+
+### What this does not give you
+
+**TLS provides confidentiality and a secure context. It provides no
+authorization.** Once the CA is installed, every device on the LAN handshakes
+exactly as successfully as the phone. Authorization is the pairing token, which
+is a different mechanism answering a different attacker — and the token travels
+in cleartext on the first hop, so neither half makes the other redundant.
+Neither, alone or together, makes "the bridge is secure" a true sentence.
+
+### The CA is yours and it stays on your machine
+
+No CA key is shipped in any binary. One is generated per install, on the user's
+own machine, and the private key is never sent anywhere — not in the QR, not
+over the network, not into a log. Installing a root does let it vouch for any
+domain, so the install page says so rather than burying it, names the
+certificate so it can be found months later, and documents removal.
+
+Deleting `<config>/tls/` means every phone has to install a new certificate.
 
 ### Against a real Quest
 
@@ -272,10 +329,6 @@ Out of scope for the spike, and where each would attach:
   Buttplug / Lovense on one port; that is a separate listener and a separate
   job. `http.rs` copies `net.rs`'s peek-then-route pattern, so adding a third
   branch is the natural extension.
-- **TLS.** Everything is plaintext HTTP. **This matters:** Web Bluetooth needs
-  a secure context, so the phone will need `https://` before this is usable for
-  real. `localhost` is exempt, which is why a desktop browser works today and a
-  phone will not. A certificate or a tunnel is required, and neither is here.
 - **Auth.** Anything on the LAN can connect and drive the player.
 - **Discovery.** The endpoint is typed in, as MFP does.
 

@@ -243,6 +243,10 @@ async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>,
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: vec![format!("127.0.0.1:{port}")],
         on_token_rotated: None,
+        // Plain HTTP only: these tests are about routing and authorization,
+        // not the secure context. `/install` correctly reports that there is
+        // nothing to install.
+        tls: None,
     });
     tokio::spawn(http::run(listener, ctx));
 
@@ -403,6 +407,7 @@ async fn traversal_outside_the_static_root_is_refused() {
             token: std::sync::RwLock::new(Token::generate()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
+            tls: None,
         }),
     ));
 

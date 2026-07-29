@@ -11,12 +11,15 @@ use std::sync::Arc;
 
 use coyote_bridge::auth;
 use coyote_bridge::wire::Tap;
-use coyote_bridge::{http, logging, supervisor};
+use coyote_bridge::{http, logging, mdns, supervisor, tls};
 use coyote_bridge::{log_info, log_warn};
 use tokio::net::TcpListener;
 
 const DEFAULT_PLAYER_PORT: u16 = 23554;
 const DEFAULT_HTTP_PORT: u16 = 8787;
+/// The conventional "alternate HTTPS" port. Above 1024, so no privileges are
+/// needed to bind it on any platform.
+const DEFAULT_HTTPS_PORT: u16 = 8443;
 
 struct Args {
     player: String,
@@ -32,6 +35,14 @@ struct Args {
     /// service under a supervisor, where a URL that changes on every restart is
     /// worse than a secret in a unit file.
     token: Option<auth::Token>,
+    /// Port for the TLS listener — the one Web Bluetooth needs.
+    https_port: u16,
+    /// Where the local CA is kept between runs. Losing it costs every phone a
+    /// reinstall, so for a service it should point somewhere durable rather
+    /// than at a working directory.
+    tls_dir: Option<PathBuf>,
+    /// Serve plain HTTP only. The phone will not be able to reach the Coyote.
+    tls: bool,
 }
 
 impl Default for Args {
@@ -51,6 +62,12 @@ impl Default for Args {
             log_dir: None,
             tray: true,
             token: None,
+            https_port: DEFAULT_HTTPS_PORT,
+            tls_dir: None,
+            // On by default. A bridge without a secure context cannot do the
+            // one thing the phone is there for, so opting out has to be the
+            // deliberate choice rather than the accidental one.
+            tls: true,
         }
     }
 }
@@ -74,11 +91,22 @@ OPTIONS:
   --no-tray               Do not create a tray icon (headless servers).
   --token <hex>           Pairing token. Default: a fresh one each start, which
                           means the phone URL changes on every restart.
+  --https-port <port>     Port for the TLS listener. [default: 8443]
+  --tls-dir <path>        Where to keep the local CA between runs.
+                          [default: --log-dir, else cwd]
+  --no-tls                Serve plain HTTP only. The phone will NOT be able to
+                          use Bluetooth: browsers require a secure context.
   -h, --help              Show this.
 
 NOTE: DeoVR and HereSphere do not listen on 23554 until remote control is
       enabled in the player's own settings. If the bridge reports the player
       unreachable, check that first.
+
+NOTE: On first run the bridge generates a certificate authority and keeps its
+      private key in --tls-dir. The key never leaves this machine. Open the
+      pairing URL on the phone and follow the instructions to install the
+      public certificate; without it the phone cannot use Bluetooth.
+      Deleting --tls-dir means every phone has to install a new one.
 ";
 
 fn parse_args() -> Result<Args, String> {
@@ -117,6 +145,13 @@ fn parse_args() -> Result<Args, String> {
             "--log-dir" => args.log_dir = Some(PathBuf::from(value()?)),
             "--no-tray" => args.tray = false,
             "--token" => args.token = Some(coyote_bridge::auth::Token::from_string(value()?)),
+            "--https-port" => {
+                args.https_port = value()?
+                    .parse()
+                    .map_err(|e| format!("--https-port is not a port: {e}"))?
+            }
+            "--tls-dir" => args.tls_dir = Some(PathBuf::from(value()?)),
+            "--no-tls" => args.tls = false,
             other => return Err(format!("unknown argument: {other}\n\n{USAGE}")),
         }
     }
@@ -155,12 +190,57 @@ fn main() {
     // (see `bridge-app/src/settings.rs`); a long-lived deployment should
     // eventually do the same.
     let token = args.token.clone().unwrap_or_else(auth::Token::generate);
-    let pairing_url = auth::with_token(&base_url, &token);
-    let allowed_hosts = vec![
-        format!("{advertised_ip}:{}", args.http_port),
-        format!("127.0.0.1:{}", args.http_port),
-        format!("localhost:{}", args.http_port),
-    ];
+
+    // Set up the certificate before anything binds, because the answer changes
+    // what the QR should say. Failure is not fatal: plain HTTP still serves the
+    // app, and losing the secure context should cost Web Bluetooth and nothing
+    // else.
+    let tls_config_dir = args
+        .tls_dir
+        .clone()
+        .or_else(|| args.log_dir.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let prepared = if args.tls {
+        match tls::prepare(&tls_config_dir, args.http_port, args.https_port) {
+            Ok(prepared) => Some(prepared),
+            Err(e) => {
+                log_warn!(
+                    "[main] could not set up TLS ({e}); serving plain HTTP only. \
+                     The phone will not be able to use Bluetooth until this is fixed."
+                );
+                None
+            }
+        }
+    } else {
+        log_warn!(
+            "[main] --no-tls: serving plain HTTP only. Browsers require a secure context \
+             for Bluetooth, so the phone will not be able to reach the Coyote."
+        );
+        None
+    };
+
+    // The QR points at the **install page on plain HTTP**, not at HTTPS.
+    // A phone that has not yet trusted the CA meets a full-page certificate
+    // interstitial with no route back to the instructions, so sending it
+    // straight to HTTPS strands it exactly when it needs help most. The install
+    // page hands it on to HTTPS once the trust check passes.
+    let pairing_url = match &prepared {
+        Some(_) => auth::with_token(&format!("{base_url}/install"), &token),
+        None => auth::with_token(&base_url, &token),
+    };
+
+    // mDNS gives the phone an address that survives DHCP. Windows' own
+    // responder cannot be used for this — measured, it answers with a virtual
+    // adapter's address — so the bridge runs its own. See `mdns`.
+    let _mdns = if prepared.is_some() {
+        mdns::start(advertised_ip, args.https_port)
+    } else {
+        None
+    };
+
+    // Origins the phone can legitimately present once TLS is in play. Omitting
+    // the HTTPS ones means the app loads and is then refused its own WebSocket.
+    let allowed_hosts = tls::browser_origins(Some(advertised_ip), args.http_port, args.https_port);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -173,6 +253,11 @@ fn main() {
     let library_dir = args.library_dir.clone();
     let base_for_http = base_url.clone();
     let token_for_http = token.clone();
+    let https_bind = args.bind;
+    let https_port = args.https_port;
+    let prepared_tls = prepared.is_some();
+    let tls_public = prepared.as_ref().map(|p| Arc::clone(&p.public));
+    let tls_start = prepared.map(|p| (p.ca, p.material));
 
     runtime.spawn(async move {
         // The headless binary connects on start and never stops trying: it is
@@ -190,6 +275,7 @@ fn main() {
         match TcpListener::bind(bind_addr).await {
             Ok(listener) => {
                 log_info!("[main] serving on http://{bind_addr}");
+<<<<<<< HEAD
                 http::run(
                     listener,
                     Arc::new(http::Ctx {
@@ -204,6 +290,38 @@ fn main() {
                     }),
                 )
                 .await;
+=======
+                let ctx = Arc::new(http::Ctx {
+                    snapshot_rx: bridge.snapshot_rx.clone(),
+                    cmd_tx: bridge.cmd_tx.clone(),
+                    static_dir,
+                    pairing_url: pairing_for_http,
+                    token: std::sync::RwLock::new(token_for_http),
+                    allowed_hosts,
+                    on_token_rotated: None,
+                    tls: tls_public,
+                });
+
+                // Both listeners, sharing one routing table and one context.
+                // Plain HTTP stays up deliberately: it carries the install page,
+                // which is the only thing a phone can reach before it trusts
+                // anything, and it is far easier to debug.
+                if let Some((ca, material)) = tls_start {
+                    match tls::bind(https_bind, https_port).await {
+                        Ok(https) => {
+                            log_info!("[main] serving TLS on https://{https_bind}:{https_port}");
+                            let (certs_tx, certs_rx) = tokio::sync::watch::channel(material);
+                            tokio::spawn(tls::keep_current(ca, certs_tx));
+                            tokio::spawn(tls::run(https, Arc::clone(&ctx), certs_rx));
+                        }
+                        Err(e) => log_warn!(
+                            "[main] {e}; serving plain HTTP only, so the phone cannot use Bluetooth"
+                        ),
+                    }
+                }
+
+                http::run(listener, ctx).await;
+>>>>>>> 59a00a2 (feat(bridge): a local CA, so the phone gets a secure context)
             }
             Err(e) => {
                 log_warn!("[main] could not bind {bind_addr}: {e}");
@@ -217,9 +335,18 @@ fn main() {
     // routinely pasted into bug reports.
     log_info!("[main] phone should open: {}", auth::redact_url(&pairing_url));
     log_info!(
-        "[main] that URL carries a pairing token, withheld here because this log          gets shared. Open {local_url}/pair to see the full URL and its QR."
+        "[main] that URL carries a pairing token, withheld here because this log \
+         gets shared. Open {local_url}/pair to see the full URL and its QR."
     );
     log_info!("[main] pairing QR: {local_url}/pair");
+    if prepared_tls {
+        log_info!(
+            "[main] TLS is on: the phone installs a certificate from the install page, \
+             then reaches the app at https://{}:{}",
+            coyote_bridge::certs::BRIDGE_HOSTNAME,
+            args.https_port
+        );
+    }
     logging::flush_now();
 
     #[cfg(feature = "tray")]

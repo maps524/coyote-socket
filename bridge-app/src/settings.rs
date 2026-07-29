@@ -24,6 +24,8 @@ pub struct Settings {
     pub recents: Vec<String>,
     /// Port the bridge serves the phone app and the QR on.
     pub http_port: u16,
+    /// Port the bridge serves TLS on — the one Web Bluetooth requires.
+    pub https_port: u16,
     /// Directory of static files to serve, when the PWA has been built.
     pub static_dir: Option<String>,
     /// Directory of `.funscript` files to serve at `/library`.
@@ -63,6 +65,7 @@ impl Default for Settings {
             endpoint: String::new(),
             recents: Vec::new(),
             http_port: 8787,
+            https_port: 8443,
             static_dir: None,
             library_dir: None,
             token: None,

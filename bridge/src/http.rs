@@ -24,20 +24,30 @@
 //!
 //! ## Seams deliberately left open
 //!
-//! - **TLS.** Everything here is plaintext HTTP. Web Bluetooth requires a
-//!   secure context, so the phone will need `https://` — via a certificate or
-//!   a tunnel — before this is usable for real. `localhost` is exempt, which
-//!   is why the desktop-browser path works today and the phone path does not.
 //! - **Auth.** `/healthz` and `/ws` require a bearer token carried on the
-//!   pairing URL; `/pair`, `/qr.svg` and the static app do not, because they
-//!   are how a phone *obtains* the token. Read [`crate::auth`] for what that
-//!   does and does not cover — in particular it is not confidentiality, since
-//!   the token travels in a URL in cleartext, and it is not a substitute for
-//!   TLS. It stops a page you visited from opening a WebSocket and driving
-//!   your player, which is a real attack that no CORS setting prevents.
+//!   pairing URL; `/pair`, `/qr.svg`, `/install`, `/ca.crt` and the static app
+//!   do not, because they are how a phone *obtains* the token or the means to
+//!   connect at all. Read [`crate::auth`] for what that does and does not
+//!   cover — in particular it is not confidentiality, since the token travels
+//!   in a URL in cleartext, and it is not a substitute for TLS. It stops a page
+//!   you visited from opening a WebSocket and driving your player, which is a
+//!   real attack that no CORS setting prevents.
 //! - **T-Code ingest.** `net.rs`'s protocol auto-detection is not carried over
 //!   here; the LAN T-Code listener the desktop app provides is a separate
 //!   port and a separate job.
+//!
+//! ## TLS is no longer one of them
+//!
+//! This module is transport-agnostic. The same routing table serves the plain
+//! listener and the TLS one ([`crate::tls`]), which is what makes `wss://`
+//! possible — and `wss://` is not optional, because a page served over HTTPS
+//! is forbidden from opening a `ws://` socket. A secure origin that could not
+//! open its own relay would load the app and then be unable to talk to it.
+//!
+//! TLS and the token are two halves answering different attackers, and neither
+//! covers the other's gap: TLS gives confidentiality and no authorization, the
+//! token gives authorization and no confidentiality. Nothing here should be
+//! read as "the bridge is secure".
 
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
@@ -91,6 +101,15 @@ pub struct Ctx {
     /// rebuild any URL that carries it.
     #[allow(clippy::type_complexity)]
     pub on_token_rotated: Option<Box<dyn Fn(&Token) + Send + Sync>>,
+    /// Public TLS material, when a certificate has been issued.
+    ///
+    /// `None` when the bridge is serving plain HTTP only, in which case
+    /// `/install` says there is nothing to install rather than 404ing — a
+    /// disabled feature and a missing page are different answers to give
+    /// someone who is trying to work out why their phone will not connect.
+    ///
+    /// Holds no key material of any kind; see [`crate::install::TlsPublicInfo`].
+    pub tls: Option<Arc<crate::install::TlsPublicInfo>>,
 }
 
 impl Ctx {
@@ -487,6 +506,71 @@ where
                 .await
             }
         },
+        // --- Getting the local CA onto the phone. ---
+        //
+        // Ungated, and for a stronger reason than "the certificate is public".
+        // It is that **gating it is a deadlock**: the phone cannot present a
+        // credential it has not been given, and this page is part of how it
+        // becomes able to hold one at all. That the CA certificate is also not
+        // a secret is a secondary comfort, not the reason — stating it the
+        // other way round invites someone to gate this later once they think
+        // of something secret to put here.
+        //
+        // See `crate::install` for what the page has to say and why the trust
+        // check is two-stage.
+        "/install" => match ctx.tls.as_ref() {
+            Some(tls) => {
+                let query = crate::install::split_query(full).1;
+                let body = crate::install::page(&tls.install_page(query));
+                respond(stream, Status::OK, "text/html; charset=utf-8", body.as_bytes()).await
+            }
+            None => {
+                respond(
+                    stream,
+                    Status::NOT_FOUND,
+                    "text/plain; charset=utf-8",
+                    b"this bridge is not serving HTTPS, so there is no certificate to install",
+                )
+                .await
+            }
+        },
+        // The CA's public certificate. The content type is what makes iOS
+        // offer to install it rather than render it as text.
+        "/ca.crt" => match ctx.tls.as_ref() {
+            Some(tls) => {
+                respond(
+                    stream,
+                    Status::OK,
+                    crate::install::CA_CONTENT_TYPE,
+                    tls.ca_cert_pem.as_bytes(),
+                )
+                .await
+            }
+            None => respond(stream, Status::NOT_FOUND, "text/plain; charset=utf-8", b"no certificate").await,
+        },
+        // Served on both listeners, ungated, and deliberately boring.
+        //
+        // Over TLS, *reaching this at all* proves the client validated our
+        // certificate — which is only possible if the root is both installed
+        // and trusted. That is the entire signal; the body is irrelevant.
+        // Over plain HTTP it answers a different question, asked first: can the
+        // phone reach this machine by name at all? Separating those two is what
+        // lets the install page tell "your network is blocking mDNS" apart from
+        // "you missed the trust step", which are the same symptom otherwise.
+        //
+        // The cross-origin header is required rather than lax: the page asking
+        // is on the HTTP origin and the answer is on the HTTPS one, so the
+        // check is cross-origin by construction. Nothing is disclosed by it.
+        "/trustcheck" => {
+            respond_with_headers(
+                stream,
+                Status::OK,
+                "text/plain; charset=utf-8",
+                "Access-Control-Allow-Origin: *\r\n",
+                crate::install::TRUSTCHECK_BODY.as_bytes(),
+            )
+            .await
+        }
         // Ungated: static assets are the app itself, which has to load before
         // it can present anything. It reads the token from its own URL and
         // uses it for `/ws`, which is where the capability actually is.
@@ -718,11 +802,18 @@ impl Status {
     }
 
     pub(crate) const OK: Self = Self::new(200, "OK");
+    /// The exchange is a side effect reached by GET, and 303 says plainly
+    /// "go and GET this other thing instead".
+    pub(crate) const SEE_OTHER: Self = Self::new(303, "See Other");
     pub(crate) const BAD_REQUEST: Self = Self::new(400, "Bad Request");
     pub(crate) const UNAUTHORIZED: Self = Self::new(401, "Unauthorized");
     pub(crate) const FORBIDDEN: Self = Self::new(403, "Forbidden");
     pub(crate) const NOT_FOUND: Self = Self::new(404, "Not Found");
     pub(crate) const METHOD_NOT_ALLOWED: Self = Self::new(405, "Method Not Allowed");
+    /// A pairing link this bridge does not recognise — usually a QR left over
+    /// from an earlier run. 410 rather than 404 says the page is fine and
+    /// *this link* is finished, which is what a stale QR actually is.
+    pub(crate) const GONE: Self = Self::new(410, "Gone");
     pub(crate) const PAYLOAD_TOO_LARGE: Self = Self::new(413, "Payload Too Large");
     pub(crate) const HEADERS_TOO_LARGE: Self = Self::new(431, "Request Header Fields Too Large");
     pub(crate) const INTERNAL_ERROR: Self = Self::new(500, "Internal Server Error");
@@ -737,21 +828,50 @@ pub(crate) async fn respond<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    respond_with_headers(stream, status, content_type, "", body).await
+}
+
+/// As [`respond`], plus `extra` header lines (each `\r\n`-terminated).
+///
+/// One route needs a header the others must not have. Keeping it a per-route
+/// opt-in is the point: the blanket version of this was the bug.
+pub(crate) async fn respond_with_headers<W>(
+    stream: &mut W,
+    status: Status,
+    content_type: &str,
+    extra: &str,
+    body: &[u8],
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let Status {
         code: status,
         reason,
     } = status;
-    // No `Access-Control-Allow-Origin: *`. It was there to make a browser on
-    // another origin able to read these responses, which is precisely the
-    // thing that should not happen: it let any page in any tab read `/healthz`
-    // and learn the media URL and LAN address. Same-origin requests do not
-    // need the header, and nothing legitimate here is cross-origin.
+    // No blanket `Access-Control-Allow-Origin: *`. It was there to make a
+    // browser on another origin able to read these responses, which is
+    // precisely the thing that should not happen: it let any page in any tab
+    // read `/healthz` and learn the media URL and LAN address.
+    //
+    // Exactly one route is legitimately cross-origin — `/trustcheck`, which is
+    // *asked* from the plain-HTTP install page about the HTTPS listener, and so
+    // is cross-origin by construction. It passes the header through `extra`
+    // rather than reinstating it for everything.
+    //
+    // `Referrer-Policy` is explicit rather than left to the browser default.
+    // The pairing URL carries the token in its query string, and a default of
+    // `strict-origin-when-cross-origin` still sends the full URL on
+    // *same-origin* requests — so every asset the install page loads would
+    // carry the token in a `Referer`.
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Cache-Control: no-store\r\n\
          X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         {extra}\
          Connection: close\r\n\r\n",
         body.len()
     );

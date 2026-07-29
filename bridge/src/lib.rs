@@ -55,17 +55,21 @@
 
 pub mod auth;
 pub mod capture;
+pub mod certs;
 pub mod codec;
 pub mod fake_player;
 pub mod http;
 pub mod icon;
+pub mod install;
 pub mod library;
 pub mod logging;
+pub mod mdns;
 pub mod player;
 pub mod probe;
 pub mod qr;
 pub mod state;
 pub mod supervisor;
+pub mod tls;
 pub mod wire;
 
 #[cfg(feature = "tray")]

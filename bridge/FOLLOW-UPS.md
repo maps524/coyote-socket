@@ -449,77 +449,56 @@ a plausible thing to be doing.
 
 ---
 
-## 2. TLS, so the phone can use Web Bluetooth
+## 2. TLS — built. What is left is verification, not design
 
-### Why
+The local CA this section used to propose was implemented: `certs.rs`,
+`tls.rs`, `install.rs` and `mdns.rs`, with the install page on the plain-HTTP
+listener. See the README section "The phone needs HTTPS".
 
-Web Bluetooth requires a secure context. `localhost` is exempt, which is
-precisely what hides this during desktop testing — the phone is not localhost.
-Everything else in the app works fine over plain HTTP, so **HTTPS is required
-for the Coyote connection specifically, not for the app in general**, and the
-plain-HTTP path should stay because it is the easiest thing to debug.
+What was **measured**, rather than assumed:
 
-A design decision already settled says the bridge serves the PWA itself — no
-version skew, users can modify their own instance, no central dependency. The
-bridge owning TLS is the coherent consequence of that, not an add-on.
+| Claim | How it was checked |
+|---|---|
+| `coyote.local` resolves to the LAN address | Live responder; `ping coyote.local` → `192.168.0.9`, the Ethernet address rather than the WSL adapter |
+| Windows' own responder is not usable for this | `ping JUSTIN-G.local` → `172.21.160.1`, a virtual switch a phone cannot reach |
+| The certificate satisfies Apple's rules | `openssl` against the running listener: SAN present, `id-kp-serverAuth`, 365-day validity, ECDSA P-256 |
+| A strict client accepts it | `curl --cacert` and a rustls client both complete the handshake; both are refused without the CA |
+| `wss://` works on the TLS listener | Integration test. A secure page cannot open `ws://`, so this is the acceptance path, not a nicety |
+| The CA survives a restart | Second run logs "using the existing local CA"; the PEM is byte-identical |
 
-### Chosen approach: a local CA, delivered through the existing QR flow
+### The one thing not verified
 
-Bridge generates a CA on first run, keeps the private key local, and serves the
-install page over plain HTTP. QR → install page → one tap → thereafter
-`https://<stable-name>:8443` with a valid certificate, permanently. `rcgen`
-does the certificate work in about thirty lines; the crypto is not the hard
-part.
+**No iPhone has been through this flow.** Everything above was established with
+rustls, curl and OpenSSL. They enforce the same certificate rules, but they are
+not Apple's trust store and they do not have Apple's profile-install UI.
+Specifically unverified:
 
-The hard parts, each of which needs handling explicitly:
+- whether iOS resolves `coyote.local` **on this network** — Windows mDNS
+  responders coexist unevenly, and consumer access points sometimes suppress
+  multicast entirely;
+- whether the two-step install (profile, then Certificate Trust Settings) reads
+  clearly enough to be followed without someone standing over it;
+- **whether Web Bluetooth actually functions from the resulting origin.** That
+  is the acceptance condition, and nothing short of the phone answers it.
 
-1. **iOS needs two steps in two places, and everyone misses the second.**
-   Installing the profile is Settings → Profile Downloaded → Install. The cert
-   is **not trusted** until Settings → General → About → **Certificate Trust
-   Settings** → enable full trust for the root. Skipping it fails
-   indistinguishably from a broken certificate. This cannot be automated, so
-   the install page must carry numbered steps with the exact path — and a
-   **"check my trust" button** that attempts an HTTPS fetch and reports yes or
-   no. A verification step that gives a clear answer is worth more than any
-   amount of instruction prose.
-2. **The address must be stable.** An IP SAN works until DHCP moves them, and a
-   changed address is a changed origin — the exact churn that rules out quick
-   tunnels, because it wipes OPFS, kills the PWA install and resets the
-   Bluetooth device grant. Prefer **mDNS `coyote.local`**, which iOS resolves
-   natively; put a DNS SAN in the leaf and the current IP as an additional SAN
-   for fallback, but put the hostname on the QR.
-3. **Apple rejects naive self-signed certs** (iOS 13+): SAN required and CN
-   ignored, `id-kp-serverAuth` in EKU, validity **≤398 days**, RSA ≥2048 or ECC
-   P-256/384. Each failure is silent about its cause. Verify against a real
-   iPhone before claiming it works.
-4. **Persist the CA.** A regenerated CA means a reinstall every launch. Store it
-   with the existing config and treat loss as a user-visible event rather than
-   silently minting a new one.
-5. **Renew ahead of expiry.** Re-issue the leaf from the stored CA on startup
-   when it is near expiry; the phone never reinstalls.
+Treat the certificate machinery as proven and the iOS flow as a hypothesis.
 
-### Security — not negotiable, and this is going open source
+### Still open
 
-Installing a root CA lets that CA sign a certificate for **any** domain.
-Whoever holds the key can impersonate anything to that phone.
-
-- **Generate the CA per-install, on the user's own machine.** Never ship a CA
-  key in the binary. A shipped key would let anyone who downloaded the release
-  MITM every user who ever installed it — catastrophic and unfixable after the
-  fact.
-- **The private key never leaves the machine.** Not in the QR, not over the
-  network, not in logs. The install page serves the **public** certificate only.
-- Name the certificate so it is identifiable in a Settings list months later,
-  and document removal.
-- State the trade on the install page rather than burying it. People should
-  know what they are granting.
+- **Token exposure on the first hop.** The QR must point at plain HTTP, so the
+  pairing token is readable by anyone on the LAN at that moment. `/pair/rotate`
+  narrows the window to "until the phone finishes pairing"; it does not close
+  it, because a sniffer acting inside that window can rotate the token itself.
+- **Renewal has never been observed.** The re-issue path is exercised by unit
+  tests against synthetic timestamps, not by a bridge that has actually run for
+  a year or had its DHCP lease move underneath it.
 
 ### The documented alternative
 
 **Tailscale** gives a real certificate on a stable `*.ts.net` hostname via
-`tailscale cert` / Serve — no domain to buy, no cert to install on the phone,
-and it works off-LAN. It costs a dependency and an account on both machines.
-Worth knowing about for anyone already running it; not worth building instead.
+`tailscale cert` / Serve — no certificate to install on the phone, and it works
+off-LAN. It costs a dependency and an account on both machines. Worth knowing
+about for anyone already running it; not worth building instead.
 
 **Cloudflare quick tunnels are the wrong default.** The hostname churns every
 restart, which is a new origin every launch, which makes the PWA amnesiac —
