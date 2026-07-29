@@ -448,6 +448,7 @@ GET /dlna/media/<ref>                               the bytes, range-correct
 | Range requests against a real UMS | **Run by hand**, and byte-for-byte verified — see below. |
 | Playing and **scrubbing** in a browser | **Run, in Chrome (Blink), against the real UMS.** See below. |
 | The picker, end to end through the UI | **Run**, at phone width, against the real UMS. See below. |
+| The whole surface over **TLS** | **Run**, against the merged TLS listener and the real UMS. See below. |
 | Safari, Bluefy, or any phone | **Never tried.** The `<res>` ranking is built on what WebKit is documented to decode, not on what it did decode — see `browser_playable` in `upnp.rs` for the sources and the one version floor it assumes. |
 | HereSphere, on-device media | Out of scope here, and unobserved as ever. |
 
@@ -592,6 +593,51 @@ the access log redacts query strings — that is where the token lives — and k
 paths. Headless Chrome's `--dump-dom` is no use here: `--virtual-time-budget`
 does not advance media loading, so the dump lands before the video has done
 anything.
+
+### Over TLS, which is how the phone will actually reach it
+
+Until the TLS branch merged, "`serve_conn` is generic over the transport, so
+these routes are served over TLS unchanged" was **a reading of the code** — a
+claim of capability nobody had exercised, which is the shape §0 is about, and
+being in prose rather than in a type does not make it less of one. The merge
+made it testable, so it was tested.
+
+The media proxy is the one route that matters here: it writes its own response
+head and never goes through `respond`, so it is the only route that never saw
+whatever TLS changed there. No conflict would have fired and every test would
+still have passed.
+
+Against `https://127.0.0.1:8453` and the real UMS:
+
+```text
+HEAD                       200, Content-Length 2097190731, Accept-Ranges: bytes
+bytes=2000000000-          206, Content-Range: bytes 2000000000-2097190730/2097190731
+                           42 ms to first byte, 97,190,731 bytes
+bytes=99999999999-         416
+```
+
+64 KiB through the TLS proxy against the same range straight from UMS, at three
+offsets including the final block: **byte-identical every time.** So a
+multi-gigabyte body through a TLS writer — different backpressure, partial
+writes and record boundaries from the small buffered path — moves the same
+bytes.
+
+And a real browser over `https://`, seeking 1,900 seconds into the 2 GB file:
+
+```text
+METADATA duration=2023.304 size=1920x1080
+PLAYING -> SEEKING to=1900 -> SEEKED to=1900.000 readyState=4
+AFTER-SEEK-PLAYBACK advanced=2.472
+FRAME-DECODED nonblack=true
+```
+
+**What this does not show.** Chrome was run with `--ignore-certificate-errors`,
+because trusting a local CA into the machine's store to run a test is a change
+that outlives the test. So this verifies the **transport** path — a range
+request survives a TLS writer — and says nothing about whether a phone trusts
+the certificate. That is a separate fact with a separate source: Justin
+installed the CA on his iPhone and Bluefy honoured it. Two facts, two sources;
+neither stands in for the other.
 
 ### The cost of being in the playback path
 
