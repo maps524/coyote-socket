@@ -286,7 +286,11 @@ async fn websocket_client_receives_a_hello_then_player_state() {
     // The handshake must be explicit about what it carries, so a client author
     // does not have to guess from an empty first snapshot.
     let carries = hello["carries"].as_array().unwrap();
-    for field in ["position", "playing", "duration", "media"] {
+    // `library` is advertised whether or not one is configured, so a client can
+    // tell a bridge that has the endpoints from one too old to have them —
+    // which it otherwise cannot, because an old bridge answers
+    // `/library/index.json` with the SPA fallback's `index.html` and a 200.
+    for field in ["position", "playing", "duration", "media", "library"] {
         assert!(carries.iter().any(|v| v == field), "hello omits {field}");
     }
 
@@ -298,6 +302,11 @@ async fn websocket_client_receives_a_hello_then_player_state() {
             "no populated snapshot arrived"
         );
         let msg: serde_json::Value = serde_json::from_str(&next_text(&mut ws).await).unwrap();
+        // The stream carries two types now. A consumer must dispatch on `type`
+        // rather than assuming everything after the hello is a snapshot.
+        if msg["type"] == "library" {
+            continue;
+        }
         assert_eq!(msg["type"], "player");
         if msg["link"] == "connected" && !msg["positionS"].is_null() {
             assert_eq!(msg["media"], "C:\\VR\\fake-clip.mp4");
@@ -925,7 +934,109 @@ async fn no_library_configured_is_not_an_error() {
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["configured"], false);
     assert_eq!(json["scripts"].as_array().unwrap().len(), 0);
+    // Not "taken in 1970". A snapshot that was never taken has no age.
+    assert!(json["ageMs"].is_null());
+    assert!(json["scannedAtMs"].is_null());
 
     let (status, _) = get(&format!("{base}/library/anything.funscript?t={token}")).await;
     assert_eq!(status, 404);
+}
+
+/// A share that drops must not publish "your library is empty" to every phone.
+///
+/// The end-to-end half of `library::tests`' unit coverage: what the *response*
+/// says after the root vanishes, since that is what a client actually reads.
+#[tokio::test]
+async fn a_vanished_library_root_does_not_report_an_empty_library() {
+    let root = library_root("vanish");
+    std::fs::write(root.join("only.funscript"), "{}").unwrap();
+
+    let (base, token) = spawn_library_stack(root.clone()).await;
+
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    loop {
+        assert!(tokio::time::Instant::now() < deadline, "no scan landed");
+        let (_, body) = get(&format!("{base}/library/index.json?t={token}")).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if json["scan"] == "ok" {
+            assert_eq!(json["scripts"].as_array().unwrap().len(), 1);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the failure was never reported"
+        );
+        let (status, body) = get(&format!("{base}/library/index.json?t={token}")).await;
+        assert_eq!(status, 200);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if json["scan"] == "failed" {
+            assert_eq!(
+                json["scripts"].as_array().unwrap().len(),
+                1,
+                "a failed scan established nothing and must not empty the listing"
+            );
+            assert_eq!(json["configured"], true);
+            // The listing's age keeps describing the listing, and `checkedAtMs`
+            // is the field that moves — so a client can see how far behind it
+            // has fallen.
+            assert!(json["ageMs"].as_u64().unwrap() > 0);
+            assert!(json["checkedAtMs"].as_u64().unwrap() > json["scannedAtMs"].as_u64().unwrap());
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// A file over the cap is left out of the listing, so a client never renders a
+/// script it could only ever fail to load.
+///
+/// It is therefore unreachable as a 404 rather than a 413 — the 413 survives
+/// only for a file that grows *after* it was indexed, and its reason phrase is
+/// asserted in `http`'s own tests.
+#[tokio::test]
+async fn an_oversized_script_is_not_advertised() {
+    let root = library_root("oversize");
+    std::fs::write(root.join("fine.funscript"), "{}").unwrap();
+    // `set_len` on a fresh file is instant — no 64 MB is written.
+    let big = std::fs::File::create(root.join("huge.funscript")).unwrap();
+    big.set_len(coyote_bridge::library::MAX_SCRIPT_BYTES + 1)
+        .unwrap();
+    drop(big);
+
+    let (base, token) = spawn_library_stack(root.clone()).await;
+
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    loop {
+        assert!(tokio::time::Instant::now() < deadline, "no scan landed");
+        let (_, body) = get(&format!("{base}/library/index.json?t={token}")).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if json["scan"] == "ok" {
+            let names: Vec<_> = json["scripts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["name"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(
+                names,
+                ["fine.funscript"],
+                "an oversized file must not be advertised as playable"
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Unlisted means unfetchable, by the index-membership check.
+    let (status, _) = get(&format!("{base}/library/huge.funscript?t={token}")).await;
+    assert_eq!(status, 404);
+
+    let _ = std::fs::remove_dir_all(&root);
 }

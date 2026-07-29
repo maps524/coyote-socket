@@ -124,7 +124,8 @@ and already knows what the player is playing. So it serves the scripts too:
 
 ```
 GET /library/index.json   -> { "scripts": [ { "name", "bytes", "modifiedMs" } ],
-                              "configured", "scannedAtMs", "ageMs", "generation" }
+                              "configured", "scan", "scannedAtMs", "ageMs",
+                              "checkedAtMs", "generation" }
 GET /library/<name>       -> the funscript bytes
 ```
 
@@ -134,13 +135,37 @@ library configured is a normal state**, not an error: the index answers 200 with
 an empty list and `configured: false`, so the app can say "you have not pointed
 me at a folder" rather than showing a failure.
 
+`configured` and `scan` answer different questions and a UI needs both.
+`configured` is whether a path is set; `scan` is `"pending"`, `"ok"` or
+`"failed"` for whether the last attempt to read it worked. **A failed scan keeps
+the previous listing** rather than replacing it with an empty one — otherwise a
+network share dropping for a single poll tick tells every phone the library is
+empty. `scannedAtMs` / `ageMs` describe the listing, and are `null` before the
+first successful scan; `checkedAtMs` describes the last attempt. When those
+diverge, something is wrong and the gap is how far behind you are.
+
 A `library` WebSocket message — `{"type":"library","generation":N,"count":M,
-"scannedAtMs":T}` — means **re-fetch the index**. One is sent on connect, and one
-each time the directory's contents change, so a phone already connected picks up
-a new file without a reload. It deliberately carries no listing: contents travel
-over the request/response that stamps its own freshness, not over the relay's
-`watch` channel — which, as `ws_relay`'s contract records, collapses an
-unbounded number of updates into one delivery for a slow consumer.
+"scan":S,"scannedAtMs":T}` — means **re-fetch the index**. One is sent on
+connect, whether or not a library is configured, and one each time the contents
+or the scan state change, so a phone already connected picks up a new file
+without a reload. It deliberately carries no listing: contents travel over the
+request/response that stamps its own freshness, not over the relay's `watch`
+channel — which, as `ws_relay`'s contract records, collapses an unbounded number
+of updates into one delivery for a slow consumer.
+
+Two contracts worth knowing before writing a client:
+
+- **Names round-trip exactly** — no case folding, no Unicode normalisation. Ask
+  for the name the index gave you. (`naming.ts` case-folds when matching a
+  script to media, which is right there; the folded name is not the fetch key.)
+- **Symlinks and junctions inside the folder are followed**, so a library
+  assembled out of links into several drives works.
+
+A new file appears within ~2 s, not 60: dropping one moves the directory's
+mtime. The 60 s full rescan only bounds how stale `bytes` and `modifiedMs` can
+get for a file edited in place — except on an SMB share, where cached directory
+metadata can delay the mtime change and 60 s becomes the worst case for noticing
+a new file at all.
 
 **The bridge does not match scripts to media.** That lives in the client, in
 `src/lib/script/naming.ts` in `coyote-socket-web` — the MultiFunPlayer suffix

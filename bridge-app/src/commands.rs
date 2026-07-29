@@ -282,20 +282,28 @@ pub fn set_static_dir(path: Option<String>, state: Shared) -> Result<(), String>
     Ok(())
 }
 
-/// Point the bridge at a directory of funscripts. Takes effect on the next
-/// launch, for the same reason as `set_static_dir`: the library's poller is
-/// started when the server starts.
+/// Point the bridge at a directory of funscripts.
 ///
-/// A path that is not a directory is refused here rather than accepted and
-/// silently serving nothing — "no library configured" and "the library path is
-/// wrong" are different problems and a user who typed a path deserves to be
-/// told which one they have.
+/// **Takes effect on the next launch**, for the same reason as
+/// `set_static_dir`: the library's poller is started when the server starts.
+/// Callers must say so, because until then `bridge_status` reports the new path
+/// while `/library/index.json` still answers for the old one — two sources of
+/// truth for the same question, which is exactly the shape `FOLLOW-UPS.md` §0
+/// is about. There is no UI for this yet, which is what keeps it harmless;
+/// whoever builds one has to either restart the poller here or label the field.
+///
+/// A path that does not exist yet is **accepted**, deliberately. `--library-dir`
+/// accepts one and `Library::spawn` tolerates one so a network share can mount
+/// after login, and a command that refused what the CLI allows would be a
+/// second, stricter answer to the same question. A wrong path is no longer
+/// silent either way: the index reports `scan: "failed"` rather than an empty
+/// listing.
 #[tauri::command]
 pub fn set_library_dir(path: Option<String>, state: Shared) -> Result<(), String> {
     let path = path.filter(|p| !p.trim().is_empty());
     if let Some(p) = &path {
         if !std::path::Path::new(p).is_dir() {
-            return Err(format!("{p} is not a directory"));
+            log_warn!("[app] library directory {p} does not exist yet; it will be polled for");
         }
     }
     state

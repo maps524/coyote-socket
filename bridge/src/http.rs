@@ -512,6 +512,13 @@ where
             respond(stream, 403, "text/plain; charset=utf-8", b"forbidden").await
         }
         library::Fetched::NotFound => {
+            // Logged as well as refused. A double-encoded traversal
+            // (`%252e%252e%252f…`) decodes once to a literal `%2e%2e%2f…`,
+            // which carries no separator and no `..` component — so it clears
+            // the syntactic checks and dies at the index-membership one, as a
+            // NotFound. Logging only rejections meant the most obvious probe to
+            // try *after* `%2e%2e%2f` failed was the one that left no trace.
+            log_debug!("[library] no such script: {rest:?}");
             respond(stream, 404, "text/plain; charset=utf-8", b"not found").await
         }
         library::Fetched::TooLarge(size) => {
@@ -596,6 +603,12 @@ where
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        // Without this arm a 413 went out as `HTTP/1.1 413 Internal Server
+        // Error`, because the fallback is what an unlisted status gets. The
+        // user then reports a bridge crash for what is a file over the size
+        // limit, and the one line of the response that was supposed to explain
+        // it says the opposite.
+        413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",
         _ => "Internal Server Error",
     };
@@ -708,11 +721,18 @@ pub(crate) async fn ws_relay<S>(
     let mut snapshots = ctx.snapshot_rx.clone();
 
     // Tell the client what it is talking to before any state arrives.
+    //
+    // `library` is advertised whenever this build has the endpoints, configured
+    // or not. Without it, a bridge too old to have a library and one that has
+    // the feature but no folder set are indistinguishable — and probing to find
+    // out is worse than asking, because on an old bridge `/library/index.json`
+    // falls through to the SPA handler and returns **200 with `index.html`**.
+    // The client then gets a JSON parse error, which names the wrong problem.
     let hello = serde_json::json!({
         "type": "hello",
         "bridge": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
-        "carries": ["position", "playing", "duration", "media"],
+        "carries": ["position", "playing", "duration", "media", "library"],
         "accepts": ["seek", "play", "pause"],
         "note": "spike build — message shape is not stable",
     });
@@ -723,19 +743,23 @@ pub(crate) async fn ws_relay<S>(
     // Wakes when the library directory's contents change. `None` when no
     // library is configured, which is a normal state — see [`crate::library`].
     let mut library_rx = ctx.library.as_ref().map(|l| l.subscribe());
-    if let Some(rx) = library_rx.as_mut() {
-        // One `library` message up front, so "fetch the index whenever a
-        // `library` message arrives" is the client's only rule. Without it the
-        // client needs a second rule for startup, and two rules that must agree
-        // is how a phone ends up with a listing it never refreshes.
-        let index = rx.borrow_and_update().clone();
-        if tx
-            .send(Message::Text(library::change_message(&index)))
-            .await
-            .is_err()
-        {
-            return;
-        }
+
+    // One `library` message up front, **whether or not a library is
+    // configured**, so "fetch the index whenever a `library` message arrives"
+    // is the client's only rule. Without it the client needs a second rule for
+    // startup, and two rules that must agree is how a phone ends up with a
+    // listing it never refreshes. The unconfigured case costs one fetch that
+    // comes back `configured: false`.
+    let initial = library_rx
+        .as_mut()
+        .map(|rx| rx.borrow_and_update().clone())
+        .unwrap_or_default();
+    if tx
+        .send(Message::Text(library::change_message(&initial)))
+        .await
+        .is_err()
+    {
+        return;
     }
 
     // Send current state immediately; a reconnecting phone must not wait for
@@ -1352,6 +1376,37 @@ mod tests {
             safe_relative_path("/assets/app-1a2b.js"),
             Some(PathBuf::from("assets").join("app-1a2b.js"))
         );
+    }
+
+    /// Every status this server emits must carry its own reason phrase.
+    ///
+    /// 413 did not: it fell through to the catch-all and went out as
+    /// `HTTP/1.1 413 Internal Server Error`, so a size limit working exactly as
+    /// designed announced itself as a server fault. The one line of the
+    /// response whose job is to explain the status said the opposite of it.
+    #[tokio::test]
+    async fn every_status_carries_its_own_reason_phrase() {
+        for (status, reason) in [
+            (200, "OK"),
+            (400, "Bad Request"),
+            (401, "Unauthorized"),
+            (403, "Forbidden"),
+            (404, "Not Found"),
+            (405, "Method Not Allowed"),
+            (413, "Payload Too Large"),
+            (431, "Request Header Fields Too Large"),
+        ] {
+            let mut sink = Vec::new();
+            respond(&mut sink, status, "text/plain", b"x")
+                .await
+                .unwrap();
+            let head = String::from_utf8_lossy(&sink);
+            assert!(
+                head.starts_with(&format!("HTTP/1.1 {status} {reason}\r\n")),
+                "{status} went out as: {}",
+                head.lines().next().unwrap_or_default()
+            );
+        }
     }
 
     #[test]

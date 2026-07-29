@@ -397,9 +397,18 @@ that would force it.
   depth cap and a visited-inode set — not by removing the `components().count()
   == 1` check, which is one of the four gates on the fetch path.
 - **No pagination, and the number is 673 KB.** That is a measured 10,000-entry
-  index, sent whole on every fetch. The scan itself is 14 ms and is not the
+  index, sent whole on every fetch. The scan itself is 18-21 ms and is not the
   problem. `generation` is already the etag-shaped field to hang a conditional
   fetch on when someone's library gets there.
+
+- **`set_library_dir` does not restart the poller.** It writes the setting and
+  takes effect next launch, exactly like `set_static_dir` — so between the call
+  and a restart, `bridge_status` reports the new path while
+  `/library/index.json` still answers for the old one. Two sources of truth for
+  one question, which is §0 again. Harmless only because **no UI calls it yet**;
+  whoever builds one must either restart the poller or label the field as
+  pending. It is currently dead code kept deliberately, so the window has
+  something to call when it grows a folder picker.
 - **No `canonicalize`.** Inherited from `serve_static`'s known gap, and shared
   with it deliberately so there is one implementation to fix. A symlink named
   `*.funscript` inside the library root, pointing outside it, is listed and
@@ -407,6 +416,19 @@ that would force it.
   which point the attacker can put the file there instead — and symlinked
   collections are how media libraries are actually assembled. If this is ever
   closed, close it in `http::safe_relative_path` so both callers get it.
+
+  Worth knowing how this paragraph nearly shipped as fiction. The first version
+  of `scan` used `DirEntry::metadata`, which is `lstat` on every platform, so
+  symlinks were silently *excluded* — while this file asked a reviewer to accept
+  a risk that did not exist, and the code broke the exact layout the prose
+  called legitimate, with no log line. Two wrong statements pointing in opposite
+  directions, neither visible from the other. A test now asserts the behaviour
+  rather than the comment claiming it.
+
+  One residue, deliberately open: an indexed regular file replaced by a symlink
+  before it is fetched is followed, because `File::open` follows and the index
+  is up to `DIR_POLL` old. Same write-access bound, so the disposition is the
+  same.
 
 The one thing that would be a defect rather than a limit: **`serve_static` still
 does not percent-decode**, so the PWA cannot have an asset with a space in its
