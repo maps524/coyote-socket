@@ -828,9 +828,10 @@ async fn head_on_a_respond_route_wrongly_carries_a_body() {
 /// **This is the deployment that matters** — "the bridge lives on the nook
 /// where the UMS is operating" — and it is the one that could not be measured
 /// against the real server, because the machine to measure it on is the one
-/// running UMS. Measured over the network it gave 55 MB/s against 107 MB/s
-/// direct, which is the *pessimistic* half: those bytes cross the network
-/// twice.
+/// running UMS. An over-the-network figure that used to be quoted here has been
+/// withdrawn — see `README.md` — because its "direct" baseline had the same
+/// flaw this test documents below, and because nothing in the tree reproduces
+/// it.
 ///
 /// Here both hops are loopback, so what is left is the proxy itself: a read, a
 /// 64 KiB memcpy and a write, against the same read and write without the

@@ -16,11 +16,16 @@
 //!   the network once, from the bridge to the phone. The extra work is a memcpy
 //!   through a 64 KiB buffer and TLS encryption that the phone required anyway.
 //! - **Separate machines.** The bytes cross the network **twice** — server to
-//!   bridge, bridge to phone — and if both hops share one Wi-Fi radio, the
-//!   available throughput for the stream is roughly halved. For a 25 Mb/s VR
+//!   bridge, bridge to phone — so if both hops share one Wi-Fi radio the
+//!   throughput available to the stream is roughly halved. For a 25 Mb/s VR
 //!   file on a link that can do 100 Mb/s this is invisible; on a congested
 //!   2.4 GHz network it is the difference between playing and stalling. There
 //!   is no way to avoid it that keeps the page on HTTPS.
+//!
+//!   That is the mechanism, and it is certain. A measured ratio that used to
+//!   appear here has been withdrawn — see `README.md`, which explains why a
+//!   figure agreeing with the arithmetic was the one that most needed
+//!   checking.
 //!
 //! ## The failure mode this module exists to avoid
 //!

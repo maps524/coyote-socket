@@ -595,19 +595,37 @@ anything.
 
 ### The cost of being in the playback path
 
-**Measured, on the worse of the two deployments.** 200 MB pulled through the
-proxy from a media server on another machine, debug build:
+**The mechanism is certain; the arithmetic below it was not, and has been
+withdrawn.**
 
-| | Throughput | Time |
-|---|---|---|
-| Straight from UMS | 107 MB/s | 1.96 s |
-| Through the bridge | 55 MB/s | 3.82 s |
+When the bridge and the media server are on different machines the bytes cross
+the network twice — server to bridge, bridge to phone. That is structural, and
+if both hops share one Wi-Fi radio the throughput available to the stream is
+roughly halved. On a wired or decent wireless link this is not the constraint;
+on a congested 2.4 GHz network it is the difference between playing and
+stalling.
 
-**Almost exactly half**, which is the arithmetic of the bytes crossing the
-network twice rather than any cost in the proxy itself. It is also still about
-eighteen times a 25 Mb/s VR stream, so on a wired or decent wireless link this
-is not the constraint. On a congested 2.4 GHz network, where both hops share one
-radio, it is the difference between playing and stalling.
+An earlier version of this section published **107 MB/s direct against 55 MB/s
+proxied** and called it "almost exactly half". That figure is retracted, for two
+reasons:
+
+- **It cannot be re-run.** It was an ad-hoc `curl` measurement against the
+  user's own server. There is no harness in this tree that reproduces it, so it
+  is a number nobody can check — which is the thing `measure_the_loopback_proxy_cost`
+  exists to avoid.
+- **Its baseline has the same flaw the loopback measurement documents.** The
+  "direct" side was a single-socket read in lockstep with the origin's writes,
+  which the loopback figures show is *slower* than reading from a proxy that has
+  buffered ahead. So 107 MB/s is a floor on direct throughput, not a measurement
+  of it, and a ratio taken against a floor is not a ratio.
+
+The agreement between "almost exactly half" and the arithmetic was what made it
+convincing, and it is exactly why it should not have been published: a number
+that confirms the expected answer gets less scrutiny, not more.
+
+What survives is the mechanism, and the observation that the proxy moved 200 MB
+across two hops without difficulty. If the real figure matters to someone, the
+honest way to get it is a harness that measures both sides the same way.
 
 **Co-location removes the second hop entirely** — that is the deployment this
 was designed for. It cannot be measured against the real server, because the
