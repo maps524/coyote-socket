@@ -257,7 +257,7 @@ where
             drain_briefly(&mut stream).await;
             let _ = respond(
                 &mut stream,
-                431,
+                Status::HEADERS_TOO_LARGE,
                 "text/plain; charset=utf-8",
                 b"request header fields too large",
             )
@@ -274,12 +274,20 @@ where
         // Origin is in its headers. Both are checked before the handshake
         // completes: a browser that is refused should see a failed connection,
         // not an open socket that goes quiet.
-        let target = parse_request_line(&head).map(|(_, path)| path).unwrap_or("");
+        let target = parse_request_line(&head)
+            .map(|(_, path)| path)
+            .unwrap_or("");
         let origin = header_value(&head, "origin");
         if !authorised(target, origin, &ctx) {
             log_warn!("[ws] {addr} refused: bad or missing token");
             let mut stream = Prefixed::new(head, stream);
-            let _ = respond(&mut stream, 401, "text/plain; charset=utf-8", b"unauthorized").await;
+            let _ = respond(
+                &mut stream,
+                Status::UNAUTHORIZED,
+                "text/plain; charset=utf-8",
+                b"unauthorized",
+            )
+            .await;
             return;
         }
 
@@ -291,10 +299,17 @@ where
         return;
     }
 
-    let Some((method, path)) = parse_request_line(&head).map(|(m, p)| (m.to_string(), p.to_string()))
+    let Some((method, path)) =
+        parse_request_line(&head).map(|(m, p)| (m.to_string(), p.to_string()))
     else {
         let mut stream = Prefixed::new(head, stream);
-        let _ = respond(&mut stream, 400, "text/plain; charset=utf-8", b"bad request").await;
+        let _ = respond(
+            &mut stream,
+            Status::BAD_REQUEST,
+            "text/plain; charset=utf-8",
+            b"bad request",
+        )
+        .await;
         return;
     };
     // Log the path *without* its query string. The query carries the pairing
@@ -311,7 +326,7 @@ where
     if method != "GET" && method != "HEAD" {
         let _ = respond(
             &mut stream,
-            405,
+            Status::METHOD_NOT_ALLOWED,
             "text/plain; charset=utf-8",
             b"method not allowed",
         )
@@ -354,11 +369,17 @@ where
         // Gated: leaks the media URL, the LAN address and the link state.
         "/healthz" => {
             if !authorised(full, origin, ctx) {
-                respond(stream, 401, "text/plain; charset=utf-8", b"unauthorized").await
+                respond(
+                    stream,
+                    Status::UNAUTHORIZED,
+                    "text/plain; charset=utf-8",
+                    b"unauthorized",
+                )
+                .await
             } else {
                 let snap = ctx.snapshot_rx.borrow().clone();
                 let body = serde_json::to_vec_pretty(&snap).unwrap_or_default();
-                respond(stream, 200, "application/json; charset=utf-8", &body).await
+                respond(stream, Status::OK, "application/json; charset=utf-8", &body).await
             }
         }
         // Ungated, deliberately. The pairing page and its QR are how a phone
@@ -368,7 +389,13 @@ where
         // pairing page says so and the tray offers rotation.
         "/pair" => {
             let body = pairing_page(&ctx.pairing_url());
-            respond(stream, 200, "text/html; charset=utf-8", body.as_bytes()).await
+            respond(
+                stream,
+                Status::OK,
+                "text/html; charset=utf-8",
+                body.as_bytes(),
+            )
+            .await
         }
         // Revoke the current token and issue a new one.
         //
@@ -398,19 +425,25 @@ where
             if !secure {
                 respond(
                     stream,
-                    403,
+                    Status::FORBIDDEN,
                     "text/plain; charset=utf-8",
                     b"rotation requires a secure transport",
                 )
                 .await
             } else if !authorised(full, origin, ctx) {
-                respond(stream, 401, "text/plain; charset=utf-8", b"unauthorized").await
+                respond(
+                    stream,
+                    Status::UNAUTHORIZED,
+                    "text/plain; charset=utf-8",
+                    b"unauthorized",
+                )
+                .await
             } else {
                 let fresh = ctx.rotate_token();
                 let body = serde_json::json!({ "token": fresh.as_str() }).to_string();
                 respond(
                     stream,
-                    200,
+                    Status::OK,
                     "application/json; charset=utf-8",
                     body.as_bytes(),
                 )
@@ -422,16 +455,36 @@ where
         // URL that endpoint already protects.
         p if p.starts_with("/library/") => {
             if !authorised(full, origin, ctx) {
-                respond(stream, 401, "text/plain; charset=utf-8", b"unauthorized").await
+                respond(
+                    stream,
+                    Status::UNAUTHORIZED,
+                    "text/plain; charset=utf-8",
+                    b"unauthorized",
+                )
+                .await
             } else {
                 serve_library(stream, p, ctx).await
             }
         }
         "/qr.svg" => match qr::to_svg(&ctx.pairing_url()) {
-            Ok(svg) => respond(stream, 200, "image/svg+xml; charset=utf-8", svg.as_bytes()).await,
+            Ok(svg) => {
+                respond(
+                    stream,
+                    Status::OK,
+                    "image/svg+xml; charset=utf-8",
+                    svg.as_bytes(),
+                )
+                .await
+            }
             Err(e) => {
                 let msg = format!("could not render QR: {e}");
-                respond(stream, 500, "text/plain; charset=utf-8", msg.as_bytes()).await
+                respond(
+                    stream,
+                    Status::INTERNAL_ERROR,
+                    "text/plain; charset=utf-8",
+                    msg.as_bytes(),
+                )
+                .await
             }
         },
         // Ungated: static assets are the app itself, which has to load before
@@ -451,11 +504,23 @@ where
 {
     let Some(root) = ctx.static_dir.as_ref() else {
         let body = placeholder_page(&ctx.pairing_url());
-        return respond(stream, 200, "text/html; charset=utf-8", body.as_bytes()).await;
+        return respond(
+            stream,
+            Status::OK,
+            "text/html; charset=utf-8",
+            body.as_bytes(),
+        )
+        .await;
     };
 
     let Some(rel) = safe_relative_path(path) else {
-        return respond(stream, 403, "text/plain; charset=utf-8", b"forbidden").await;
+        return respond(
+            stream,
+            Status::FORBIDDEN,
+            "text/plain; charset=utf-8",
+            b"forbidden",
+        )
+        .await;
     };
 
     let mut file = root.join(&rel);
@@ -464,13 +529,21 @@ where
     }
 
     match tokio::fs::read(&file).await {
-        Ok(bytes) => respond(stream, 200, mime_for(&file), &bytes).await,
+        Ok(bytes) => respond(stream, Status::OK, mime_for(&file), &bytes).await,
         Err(_) => {
             // SPA fallback: unknown paths get index.html so client-side
             // routing works on a hard refresh.
             match tokio::fs::read(root.join("index.html")).await {
-                Ok(bytes) => respond(stream, 200, "text/html; charset=utf-8", &bytes).await,
-                Err(_) => respond(stream, 404, "text/plain; charset=utf-8", b"not found").await,
+                Ok(bytes) => respond(stream, Status::OK, "text/html; charset=utf-8", &bytes).await,
+                Err(_) => {
+                    respond(
+                        stream,
+                        Status::NOT_FOUND,
+                        "text/plain; charset=utf-8",
+                        b"not found",
+                    )
+                    .await
+                }
             }
         }
     }
@@ -488,12 +561,18 @@ where
 {
     let lib = ctx.library.as_deref();
     let Some(rest) = path.strip_prefix("/library/") else {
-        return respond(stream, 404, "text/plain; charset=utf-8", b"not found").await;
+        return respond(
+            stream,
+            Status::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            b"not found",
+        )
+        .await;
     };
 
     if rest == "index.json" {
         let body = library::index_json(lib);
-        return respond(stream, 200, "application/json; charset=utf-8", &body).await;
+        return respond(stream, Status::OK, "application/json; charset=utf-8", &body).await;
     }
 
     // No SPA fallback here. A missing script must read as a missing script;
@@ -501,7 +580,13 @@ where
     // expected a funscript, and the parse failure would name the wrong problem.
     match library::fetch(lib, rest).await {
         library::Fetched::Ok(bytes) => {
-            respond(stream, 200, "application/json; charset=utf-8", &bytes).await
+            respond(
+                stream,
+                Status::OK,
+                "application/json; charset=utf-8",
+                &bytes,
+            )
+            .await
         }
         library::Fetched::Rejected => {
             // Logged, because a rejection here is a traversal attempt or a
@@ -509,7 +594,13 @@ where
             // name is escaped into the log via `{:?}` so a control character
             // cannot forge a log line.
             log_warn!("[library] refused a name: {rest:?}");
-            respond(stream, 403, "text/plain; charset=utf-8", b"forbidden").await
+            respond(
+                stream,
+                Status::FORBIDDEN,
+                "text/plain; charset=utf-8",
+                b"forbidden",
+            )
+            .await
         }
         library::Fetched::NotFound => {
             // Logged as well as refused. A double-encoded traversal
@@ -519,13 +610,19 @@ where
             // NotFound. Logging only rejections meant the most obvious probe to
             // try *after* `%2e%2e%2f` failed was the one that left no trace.
             log_debug!("[library] no such script: {rest:?}");
-            respond(stream, 404, "text/plain; charset=utf-8", b"not found").await
+            respond(
+                stream,
+                Status::NOT_FOUND,
+                "text/plain; charset=utf-8",
+                b"not found",
+            )
+            .await
         }
         library::Fetched::TooLarge(size) => {
             log_warn!("[library] {rest:?} is {size} bytes; refusing to buffer it");
             respond(
                 stream,
-                413,
+                Status::PAYLOAD_TOO_LARGE,
                 "text/plain; charset=utf-8",
                 b"script too large",
             )
@@ -587,31 +684,63 @@ fn mime_for(path: &Path) -> &'static str {
     }
 }
 
+/// An HTTP status together with the reason phrase that belongs to it.
+///
+/// # Why this is a type and not a `u16`
+///
+/// It was a `u16`, and [`respond`] looked its phrase up in a `match` with a
+/// `_ => "Internal Server Error"` fallback. So a status nobody had added an arm
+/// for went out as `HTTP/1.1 413 Internal Server Error` — a size limit working
+/// exactly as designed, announcing itself as a server fault, with the one line
+/// whose job is to explain the status saying the opposite of it.
+///
+/// The first fix was a test listing every status and its phrase. That test was
+/// **a second hand-typed copy of the match arms, not a derivation from the call
+/// sites**: passing a bare `429` for rate limiting would have gone out as
+/// `429 Internal Server Error` and the test would still have passed, because
+/// 429 was never added to either list. The original defect, reproduced exactly,
+/// under a green suite and a docstring claiming to prevent it.
+///
+/// So the phrase now travels *with* the status and there is no fallback to be
+/// wrong. A status that does not exist here cannot be passed to `respond` at
+/// all — it is a compile error, not a wrong string on the wire. Adding one
+/// means adding a constant, which is the same amount of work as adding a match
+/// arm and cannot be half-done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Status {
+    code: u16,
+    reason: &'static str,
+}
+
+impl Status {
+    const fn new(code: u16, reason: &'static str) -> Self {
+        Self { code, reason }
+    }
+
+    pub(crate) const OK: Self = Self::new(200, "OK");
+    pub(crate) const BAD_REQUEST: Self = Self::new(400, "Bad Request");
+    pub(crate) const UNAUTHORIZED: Self = Self::new(401, "Unauthorized");
+    pub(crate) const FORBIDDEN: Self = Self::new(403, "Forbidden");
+    pub(crate) const NOT_FOUND: Self = Self::new(404, "Not Found");
+    pub(crate) const METHOD_NOT_ALLOWED: Self = Self::new(405, "Method Not Allowed");
+    pub(crate) const PAYLOAD_TOO_LARGE: Self = Self::new(413, "Payload Too Large");
+    pub(crate) const HEADERS_TOO_LARGE: Self = Self::new(431, "Request Header Fields Too Large");
+    pub(crate) const INTERNAL_ERROR: Self = Self::new(500, "Internal Server Error");
+}
+
 pub(crate) async fn respond<W>(
     stream: &mut W,
-    status: u16,
+    status: Status,
     content_type: &str,
     body: &[u8],
 ) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        // Without this arm a 413 went out as `HTTP/1.1 413 Internal Server
-        // Error`, because the fallback is what an unlisted status gets. The
-        // user then reports a bridge crash for what is a file over the size
-        // limit, and the one line of the response that was supposed to explain
-        // it says the opposite.
-        413 => "Payload Too Large",
-        431 => "Request Header Fields Too Large",
-        _ => "Internal Server Error",
-    };
+    let Status {
+        code: status,
+        reason,
+    } = status;
     // No `Access-Control-Allow-Origin: *`. It was there to make a browser on
     // another origin able to read these responses, which is precisely the
     // thing that should not happen: it let any page in any tab read `/healthz`
@@ -1248,8 +1377,7 @@ mod tests {
     }
 
     fn test_ctx() -> Ctx {
-        let (_snap_tx, snapshot_rx) =
-            watch::channel(PlayerSnapshot::new("127.0.0.1:23554".into()));
+        let (_snap_tx, snapshot_rx) = watch::channel(PlayerSnapshot::new("127.0.0.1:23554".into()));
         let (cmd_tx, _cmd_rx) = mpsc::channel(4);
         Ctx {
             snapshot_rx,
@@ -1378,35 +1506,30 @@ mod tests {
         );
     }
 
-    /// Every status this server emits must carry its own reason phrase.
+    /// The status line is assembled from the [`Status`] it was handed.
     ///
-    /// 413 did not: it fell through to the catch-all and went out as
-    /// `HTTP/1.1 413 Internal Server Error`, so a size limit working exactly as
-    /// designed announced itself as a server fault. The one line of the
-    /// response whose job is to explain the status said the opposite of it.
+    /// Deliberately **not** a list of every status and its phrase. That is what
+    /// this test used to be, and it was a second hand-typed copy of the same
+    /// table it was checking — so a status added at a call site but not to
+    /// either list went out as `Internal Server Error` and the test still
+    /// passed. The enumeration problem is now solved by the type: a status that
+    /// is not a `Status` constant cannot reach `respond` at all, and adding one
+    /// carries its phrase with it.
+    ///
+    /// What is left to check is the wire format, which is what this does.
     #[tokio::test]
-    async fn every_status_carries_its_own_reason_phrase() {
-        for (status, reason) in [
-            (200, "OK"),
-            (400, "Bad Request"),
-            (401, "Unauthorized"),
-            (403, "Forbidden"),
-            (404, "Not Found"),
-            (405, "Method Not Allowed"),
-            (413, "Payload Too Large"),
-            (431, "Request Header Fields Too Large"),
-        ] {
-            let mut sink = Vec::new();
-            respond(&mut sink, status, "text/plain", b"x")
-                .await
-                .unwrap();
-            let head = String::from_utf8_lossy(&sink);
-            assert!(
-                head.starts_with(&format!("HTTP/1.1 {status} {reason}\r\n")),
-                "{status} went out as: {}",
-                head.lines().next().unwrap_or_default()
-            );
-        }
+    async fn the_status_line_carries_the_code_and_its_phrase() {
+        let mut sink = Vec::new();
+        respond(&mut sink, Status::PAYLOAD_TOO_LARGE, "text/plain", b"x")
+            .await
+            .unwrap();
+        let head = String::from_utf8_lossy(&sink);
+        assert!(
+            head.starts_with("HTTP/1.1 413 Payload Too Large\r\n"),
+            "got: {}",
+            head.lines().next().unwrap_or_default()
+        );
+        assert!(head.contains("Content-Length: 1\r\n"));
     }
 
     #[test]

@@ -381,11 +381,25 @@ pub enum Fetched {
 ///    component. They die here, because none of them is a name a `read_dir`
 ///    ever produced.
 ///
-/// **So check 4 must never be relaxed.** If a future change wants to serve a
-/// name the scan did not publish — a subdirectory, a case-folded lookup, a
-/// freshly dropped file before the next poll — the syntactic checks above are
-/// *not* sufficient on their own and each of those shapes has to be handled
-/// explicitly first.
+/// **So check 4 must never be relaxed**, and the rule that keeps it intact is
+/// one line rather than a list:
+///
+/// > ***Any lookup that is not byte-exact* relaxes check 4.**
+///
+/// Case folding is one instance of that, not the definition of it, and reading
+/// the guard as "do not case-fold" is how the next hole gets opened by someone
+/// who was being careful. Others, none of which are case folding:
+///
+/// - **Unicode normalisation-insensitive lookup.** NFC vs NFD — the most likely
+///   one to be proposed, the first time a Mac-authored pack lands in a library
+///   served from Windows.
+/// - **Trailing dot or space leniency.** Win32 strips them, so `a.funscript `
+///   and `a.funscript.` open the same file while comparing unequal.
+/// - **Subdirectories**, a **freshly dropped file before the next poll**, or
+///   anything else that serves a name the scan did not publish.
+///
+/// Each of those has to be handled explicitly *before* check 4 is loosened,
+/// because the syntactic checks above stop none of them.
 ///
 /// ## Symlinks: followed, deliberately, on both paths
 ///
@@ -407,10 +421,18 @@ pub enum Fetched {
 /// eyes open. It is bounded to a `*.funscript` in the root, over a token-gated
 /// endpoint, read-only.
 ///
-/// One residue: between the scan listing a regular file and this opening it,
-/// the file can be replaced by a symlink, and the fetch follows it. The window
-/// is at most [`DIR_POLL`] and the bound is unchanged — it still takes write
-/// access to the library directory — so it is recorded rather than closed.
+/// One residue, and a small one now that following is the policy on both
+/// paths: between the scan listing a regular file and this opening it, the file
+/// can be replaced by a symlink. The fetch follows it — but so would the next
+/// scan, and the listing would then say so. **Nothing is reachable through that
+/// window that a rescan would not publish anyway**; what actually goes stale is
+/// the advisory `bytes` and `modifiedMs`, for at most [`DIR_POLL`].
+///
+/// Worth saying precisely rather than dramatically: an earlier draft described
+/// this as the fetch following a link into somewhere it should not go, which
+/// implied a reach the policy already grants openly. That is the same
+/// comment-versus-behaviour drift that produced this module's first blocker,
+/// and it is worth not repeating in the paragraph explaining it.
 pub async fn fetch(library: Option<&Library>, raw_name: &str) -> Fetched {
     let Some(library) = library else {
         return Fetched::NotFound;
@@ -542,6 +564,16 @@ async fn poll(root: PathBuf, tx: watch::Sender<Arc<Index>>) {
     let mut last_dir_mtime: Option<SystemTime> = None;
     let mut last_full = tokio::time::Instant::now() - FULL_RESCAN;
     let mut generation = 0u64;
+    // Tracked separately from the listing, because the two do not change
+    // together. The warning used to sit inside `if changed`, so a library whose
+    // *only* file was an oversized pack produced an empty listing that was not
+    // a change from the default empty `Index` — no listing change, therefore no
+    // warning. The user then sees `scan: "ok"`, zero scripts and nothing in the
+    // log: the "told nothing at all" outcome that excluding oversized files was
+    // meant to avoid, in precisely the case where they have no other clue.
+    // With any second normal file present it fired, which is what made it easy
+    // to miss.
+    let mut last_oversize: Vec<(String, u64)> = Vec::new();
 
     loop {
         let dir_mtime = tokio::fs::metadata(&root)
@@ -582,12 +614,16 @@ async fn poll(root: PathBuf, tx: watch::Sender<Arc<Index>>) {
                             scanned.scripts.len(),
                             root.display()
                         );
+                    }
+                    // On its own transition, not the listing's.
+                    if scanned.oversize != last_oversize {
                         for (path, bytes) in &scanned.oversize {
                             log_warn!(
                                 "[library] {path} is {bytes} bytes, over the {MAX_SCRIPT_BYTES} \
                                  byte limit — left out of the listing rather than served"
                             );
                         }
+                        last_oversize = scanned.oversize.clone();
                     }
                     if previous.state == ScanState::Failed {
                         log_info!("[library] {} is readable again", root.display());
@@ -678,7 +714,25 @@ fn scan(root: &Path) -> std::io::Result<Scanned> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     let mut oversize = Vec::new();
-    for entry in entries.flatten() {
+    // Counted, not `.flatten()`ed away.
+    //
+    // `read_dir` returning `Ok` only says the directory *opened*. Iteration is
+    // where an SMB share actually fails, and that is the likelier of the two:
+    // the handle is fine, 300 of 900 entries come back, and then the link
+    // drops. `.flatten()` discarded those errors, so a truncated listing was
+    // returned as `Ok` — bumping the generation, pushing a `library` message
+    // and stamping a fresh `scannedAtMs` on an answer that was missing two
+    // thirds of the library. Exactly the defect the rest of this module now
+    // prevents, surviving in the one place it did not reach.
+    let mut unreadable = 0usize;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
+        };
         let path = entry.path();
         if !has_funscript_extension(&path) {
             continue;
@@ -746,11 +800,36 @@ fn scan(root: &Path) -> std::io::Result<Scanned> {
                 .unwrap_or(0),
         });
     }
+
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(Scanned {
-        scripts: out,
-        oversize,
-    })
+    verdict(
+        unreadable,
+        Scanned {
+            scripts: out,
+            oversize,
+        },
+    )
+}
+
+/// A partial enumeration is a failed scan, not a short library.
+///
+/// Split out from [`scan`] so the decision is testable. A mid-iteration
+/// `read_dir` failure is an SMB behaviour and cannot be induced on a local
+/// disk, so the loop that counts is exercised only by real directories — but
+/// what to *do* with a non-zero count is the part that was wrong, and that is
+/// checkable here.
+///
+/// Failing is the only honest answer: with entries missing we do not know what
+/// is in the directory, and "fewer scripts than last time" is a claim, not the
+/// absence of one. The caller keeps the previous listing.
+fn verdict(unreadable: usize, scanned: Scanned) -> std::io::Result<Scanned> {
+    if unreadable > 0 {
+        return Err(std::io::Error::other(format!(
+            "{unreadable} of the directory's entries could not be read; \
+             treating the scan as failed rather than publishing a short listing"
+        )));
+    }
+    Ok(scanned)
 }
 
 #[cfg(test)]
@@ -810,18 +889,35 @@ mod tests {
 
     /// Case is folded on the extension, because a `.FunScript` from a Windows
     /// pack is the same file to everyone except a case-sensitive comparison.
-    /// Create a symlink, or return `false` if this machine will not let us.
+    /// Create a symlink, or fail the test saying why.
     ///
-    /// Windows needs Developer Mode or an elevated shell, so the tests that
-    /// depend on this skip rather than fail on a machine that does not.
-    fn try_symlink(target: &Path, link: &Path) -> bool {
+    /// **Deliberately not a skip.** This used to return `false` and let the
+    /// caller `eprintln!` and return, which reports `ok` — so on a Windows CI
+    /// box without Developer Mode the regression test for this PR's headline
+    /// bug passed having asserted nothing, and libtest swallows `eprintln!`
+    /// without `--nocapture`, so the skip was invisible in the log too.
+    ///
+    /// A test that silently verifies nothing is the exact failure this module
+    /// spent a round fixing. Embedding one in the test that guards it would be
+    /// absurd. If this panics, the machine cannot exercise symlink handling and
+    /// that is a fact worth stopping for, not one to paper over: on Windows,
+    /// enable Developer Mode (Settings → System → For developers).
+    fn symlink_or_fail(target: &Path, link: &Path) {
         #[cfg(windows)]
-        {
-            std::os::windows::fs::symlink_file(target, link).is_ok()
-        }
+        let result = std::os::windows::fs::symlink_file(target, link);
         #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(target, link).is_ok()
+        let result = std::os::unix::fs::symlink(target, link);
+
+        if let Err(e) = result {
+            panic!(
+                "could not create a symlink at {}: {e}\n\
+                 This test cannot verify symlink handling on this machine. On \
+                 Windows, enable Developer Mode (Settings > System > For \
+                 developers). Failing rather than skipping, because a skip here \
+                 reports `ok` and would silently stop guarding the bug this \
+                 test exists for.",
+                link.display()
+            )
         }
     }
 
@@ -840,10 +936,7 @@ mod tests {
         std::fs::write(&target, r#"{"actions":[]}"#).unwrap();
 
         let link = dir.join("linked.funscript");
-        if !try_symlink(&target, &link) {
-            eprintln!("skipping: this machine will not create symlinks");
-            return;
-        }
+        symlink_or_fail(&target, &link);
 
         let scripts = scan_ok(&dir);
         assert_eq!(
@@ -864,10 +957,7 @@ mod tests {
     fn a_broken_symlink_is_skipped() {
         let dir = temp_dir("broken-symlink");
         let link = dir.join("dangling.funscript");
-        if !try_symlink(Path::new("C:/nowhere/at/all.funscript"), &link) {
-            eprintln!("skipping: this machine will not create symlinks");
-            return;
-        }
+        symlink_or_fail(Path::new("C:/nowhere/at/all.funscript"), &link);
         assert!(scan_ok(&dir).is_empty());
     }
 
@@ -892,6 +982,73 @@ mod tests {
             "the exclusion must be reportable"
         );
         assert!(scanned.oversize[0].0.contains("huge.funscript"));
+    }
+
+    /// An oversized file that is the *only* entry must still be reported.
+    ///
+    /// The warning used to be nested inside "the listing changed", and an empty
+    /// listing is not a change from the default empty `Index` — so the one case
+    /// where the user has no other clue was the one case that said nothing.
+    /// With any second normal file present it fired, which is what made it easy
+    /// to miss.
+    #[tokio::test]
+    async fn an_oversized_file_alone_in_the_directory_is_still_reported() {
+        let dir = temp_dir("oversize-only");
+        let big = std::fs::File::create(dir.join("huge.funscript")).unwrap();
+        big.set_len(MAX_SCRIPT_BYTES + 1).unwrap();
+        drop(big);
+
+        // The scan reports it even though the listing it produces is empty —
+        // which is what `poll` needs in order to log on the oversize set's own
+        // transition rather than the listing's.
+        let scanned = scan(&dir).unwrap();
+        assert!(scanned.scripts.is_empty(), "nothing is servable here");
+        assert_eq!(
+            scanned.oversize.len(),
+            1,
+            "an empty listing must still carry the reason it is empty"
+        );
+    }
+
+    /// **A partial enumeration must not publish as a listing.**
+    ///
+    /// `read_dir` returning `Ok` says only that the directory opened. Iteration
+    /// is where an SMB share actually drops — handle fine, 300 of 900 entries
+    /// back, then the link goes — and `.flatten()` discarded exactly those
+    /// errors, so a two-thirds-truncated listing went out as `scan: "ok"` with
+    /// a bumped generation and a fresh timestamp.
+    ///
+    /// The counting loop needs a real network failure to exercise. The decision
+    /// it feeds does not, and the decision is what was wrong.
+    #[test]
+    fn a_partial_enumeration_fails_rather_than_publishing_a_short_listing() {
+        let found = Scanned {
+            scripts: vec![ScriptEntry {
+                name: "a.funscript".into(),
+                bytes: 1,
+                modified_ms: 1,
+            }],
+            oversize: Vec::new(),
+        };
+
+        assert!(
+            verdict(0, found).is_ok(),
+            "a clean enumeration is a listing"
+        );
+
+        let partial = Scanned {
+            scripts: vec![ScriptEntry {
+                name: "a.funscript".into(),
+                bytes: 1,
+                modified_ms: 1,
+            }],
+            oversize: Vec::new(),
+        };
+        let err = verdict(3, partial).expect_err("entries went missing; that is not a listing");
+        assert!(
+            err.to_string().contains("could not be read"),
+            "the reason must survive into the log: {err}"
+        );
     }
 
     #[test]
