@@ -332,6 +332,104 @@ said the feature was broken. It was the test that was wrong.
 The counter-question matches the one above: not *"does this line exist?"* or
 *"did this test pass?"* but **"what would have to be true for this to run, and
 is that what it measured?"**
+### The edit that silently did nothing — and the wrong story told about it
+
+A `stale()` doc comment went on describing a write-based liveness check that
+ping/pong had replaced. The *code* was correct and the *body copy* the user
+reads was correct; only the comment was stale, so nothing failed and nothing
+looked wrong.
+
+**The first diagnosis was that a rebase had dropped the hunk**, and it was
+written up here as one — a third merge failure mode, complete with a table. It
+was wrong. `git range-diff` against the pre-rebase range paired all six commits
+and showed no such loss, and the pre-rebase commit itself turned out never to
+have contained the new text at all.
+
+The actual cause: a scripted `str.replace(old, new)` whose `old` did not match.
+Python returns the string unchanged and the script reports success. The edit
+never happened, the commit was made, `svelte-check` passed — because a comment
+is not type-checked — and the adjacent replacement in the same script *did*
+match, so the change looked half-applied rather than absent.
+
+> **A search-and-replace that matches nothing succeeds.** `str.replace`,
+> `sed`, and every editor scripted the same way report no error for a pattern
+> that was never found. A script that makes five replacements and lands four is
+> indistinguishable, from its exit code, from one that lands five.
+
+This is the same defect signature as the rest of section 0a, in the tooling
+rather than in the product: **a success path taken for input the code could
+already tell was wrong.** The fix is the same shape too — make the guard match
+the condition. Assert the match count, or use a tool that fails on a missing
+pattern.
+
+And the misdiagnosis is section 0b: a failure attributed to the component
+nearest the symptom rather than to its cause. It was written into this document,
+in the section warning against exactly that, and stood for one commit.
+
+### Two checks, and what each is actually good for
+
+Both were run on this week's three-branch sequence. Neither result was known
+until someone looked, and "the tests pass" had already been offered for both.
+
+**`git range-diff <old-base>..<old-tip> <new-base>..<new-tip>`** compares a
+rebase against its original. `--no-patch` gives one line per commit — `=`
+unchanged, `!` altered, `<`/`>` on one side only — and the full form shows the
+diff of the diffs, in which a genuinely lost hunk is a `+` line the old commit's
+patch had and the new one does not. It needs both ranges to still be reachable,
+and it pairs *commits*, so it covers rebases and cherry-picks and does nothing
+for a squash or a true merge.
+
+**Grepping the tree for phrases you know you wrote** finds a missing sentence
+whatever caused it to be missing — a lost hunk, a no-op edit, or a change never
+made. It can only find what you remember writing, which makes it strongest just
+after your own work and weakest on someone else's.
+
+The division is sharper than "use both", and it is why the wrong story survived
+as long as it did:
+
+| | Finds | Blind to |
+|---|---|---|
+| Read the diff | wrong resolutions | absences |
+| Grep for remembered phrases | that something is missing | *why* it is missing |
+| `git range-diff` | whether a rebase dropped it | squashes, merges, a discarded pre-rebase ref |
+
+Grep found the symptom here and was read as identifying the cause. It cannot:
+an absent sentence looks identical whether a merge ate it or the edit never
+ran. **Establishing that a merge lost something needs the comparison, not the
+search** — and running it is what turned a plausible story into a false one.
+
+### A fourth mode, which none of the three catches
+
+Attributed to scarlet, who found it by noticing an unfamiliar SHA in an agent's
+final report rather than by any of the checks above.
+
+PR #12 was merged at `9924843`; the agent pushed another commit afterwards.
+**Nothing was lost in a rebase and no resolution was wrong — the commit was
+never in the merge at all.** Every method above misses it, and for a different
+reason each time: `range-diff` pairs commits within two ranges and a squash
+merge produces neither range; grep fails because you do not remember writing
+lines you did not write; and reading the diff shows a correct diff of the wrong
+tip.
+
+> **A merge is a snapshot of a moving branch, and "ready to merge" is a claim
+> about a moment.**
+
+The check is one line, and not running it is how this happened three times:
+**after merging, compare the branch tip against the `headRefOid` you actually
+merged.** If they differ, someone pushed while you were merging.
+
+| | Finds | Blind to |
+|---|---|---|
+| Compare tip to merged `headRefOid` | commits that were never in the merge | anything inside the merge |
+
+### What all four have in common
+
+**The correct action is to go looking for something that is not there.**
+
+Every one of these is invisible to the checks that ask whether what is present
+is right. A clean diff, a green build and a passing suite are all statements
+about the code that arrived; none of them is a statement about the code that
+did not.
 
 ---
 

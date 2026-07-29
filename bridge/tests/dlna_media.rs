@@ -287,6 +287,12 @@ async fn bridge_with(server: SocketAddr) -> (SocketAddr, Token, Arc<Dlna>) {
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: vec![addr.to_string()],
         on_token_rotated: None,
+        // Plain HTTP throughout: these tests cover the DLNA surface, not the
+        // secure context. `tls_end_to_end.rs` owns that.
+        tls: None,
+        library: None,
+        devices: test_device_store(),
+        clients: Default::default(),
     });
     tokio::spawn(async move { http::run(listener, ctx).await });
 
@@ -790,6 +796,12 @@ async fn a_bridge_without_dlna_says_it_is_not_enabled() {
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: vec![addr.to_string()],
         on_token_rotated: None,
+        // Plain HTTP throughout: these tests cover the DLNA surface, not the
+        // secure context. `tls_end_to_end.rs` owns that.
+        tls: None,
+        library: None,
+        devices: test_device_store(),
+        clients: Default::default(),
     });
     tokio::spawn(async move { http::run(listener, ctx).await });
     std::mem::forget(_snap_tx);
@@ -997,6 +1009,12 @@ async fn bridge_for_proxy(
         token: std::sync::RwLock::new(Token::from_string("bench".into())),
         allowed_hosts: vec![addr.to_string()],
         on_token_rotated: None,
+        // Plain HTTP throughout: these tests cover the DLNA surface, not the
+        // secure context. `tls_end_to_end.rs` owns that.
+        tls: None,
+        library: None,
+        devices: test_device_store(),
+        clients: Default::default(),
     });
     tokio::spawn(async move { http::run(listener, ctx).await });
     std::mem::forget(_snap_tx);
@@ -1049,4 +1067,17 @@ async fn count_after_head(sock: &mut TcpStream) -> (String, u64) {
         }
     }
     (head.unwrap_or_default(), body)
+}
+
+/// A scratch credential store, per the idiom in `end_to_end.rs`: these tests
+/// must not be able to pair a device into the real config directory.
+fn test_device_store() -> Arc<coyote_bridge::devices::DeviceStore> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "coyote-bridge-dlna-test-devices-{}-{n}.json",
+        std::process::id()
+    ));
+    Arc::new(coyote_bridge::devices::DeviceStore::load(path))
 }

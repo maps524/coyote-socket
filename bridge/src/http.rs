@@ -947,6 +947,24 @@ async fn route<W>(
 /// whole body from a `&[u8]`, which for a 40 GB video is not a slow response
 /// but a dead process — and it would have passed every test done on a short
 /// clip.
+/// Map [`crate::dlna`]'s numeric status onto this module's table.
+///
+/// `dlna` deals in numbers because it does not import this module's private
+/// `Status`, and the alternative — exporting it — would put a routing type in
+/// a protocol module's signature. The arms are exhaustive over what
+/// `dlna::handle` actually returns; anything unexpected becomes a 500 rather
+/// than a silent 200, because an unmapped status is our bug and should read as
+/// one.
+fn dlna_status(code: u16) -> Status {
+    match code {
+        400 => Status::BAD_REQUEST,
+        401 => Status::UNAUTHORIZED,
+        404 => Status::NOT_FOUND,
+        502 => Status::BAD_GATEWAY,
+        _ => Status::INTERNAL_ERROR,
+    }
+}
+
 async fn serve_dlna<W>(
     stream: &mut W,
     path: &str,
@@ -963,23 +981,30 @@ where
         // difference between a setting to change and a network to debug.
         return respond(
             stream,
-            404,
+            Status::NOT_FOUND,
             "text/plain; charset=utf-8",
             b"DLNA browsing is not enabled on this bridge",
         )
         .await;
     };
     let Some(rest) = path.strip_prefix("/dlna/") else {
-        return respond(stream, 404, "text/plain; charset=utf-8", b"not found").await;
+        return respond(stream, Status::NOT_FOUND, "text/plain; charset=utf-8", b"not found")
+            .await;
     };
     let query = path_and_query.split_once('?').map(|(_, q)| q).unwrap_or("");
 
     match dlna::handle(dlna, rest, query).await {
         dlna::Action::Json(body) => {
-            respond(stream, 200, "application/json; charset=utf-8", &body).await
+            respond(stream, Status::OK, "application/json; charset=utf-8", &body).await
         }
         dlna::Action::Error(status, message) => {
-            respond(stream, status, "text/plain; charset=utf-8", message.as_bytes()).await
+            respond(
+                stream,
+                dlna_status(status),
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            )
+            .await
         }
         dlna::Action::Stream {
             upstream,
@@ -1245,6 +1270,10 @@ impl Status {
     pub(crate) const PAYLOAD_TOO_LARGE: Self = Self::new(413, "Payload Too Large");
     pub(crate) const HEADERS_TOO_LARGE: Self = Self::new(431, "Request Header Fields Too Large");
     pub(crate) const INTERNAL_ERROR: Self = Self::new(500, "Internal Server Error");
+    /// The upstream failed, not us. Distinct from 500 deliberately: the DLNA
+    /// media server is a component this bridge does not own, and answering 500
+    /// would put the blame on the one part of the path that worked.
+    pub(crate) const BAD_GATEWAY: Self = Self::new(502, "Bad Gateway");
 }
 
 /// Send the phone on to the app, optionally setting a cookie on the way.
@@ -2080,14 +2109,28 @@ mod tests {
         }));
 
         let mut out = Vec::new();
-        route(&mut out, "/", None, None, false, &ctx).await;
+        route(&mut out, "/", None, None, false, &ctx, "GET", b"GET / HTTP/1.1
+
+").await;
         let response = String::from_utf8_lossy(&out);
         assert!(response.starts_with("HTTP/1.1 303"), "got: {response}");
         assert!(response.contains("Location: /install"));
 
         // Over TLS the root is the app, and must stay so.
         let mut secure_out = Vec::new();
-        route(&mut secure_out, "/", None, None, true, &ctx).await;
+        route(
+            &mut secure_out,
+            "/",
+            None,
+            None,
+            true,
+            &ctx,
+            "GET",
+            b"GET / HTTP/1.1
+
+",
+        )
+        .await;
         let secure = String::from_utf8_lossy(&secure_out);
         assert!(
             !secure.contains("Location: /install"),
