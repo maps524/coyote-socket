@@ -1,10 +1,11 @@
 # Bridge follow-ups
 
-Sections **0**, **0a** and **0b** are not tasks. They are three defect signatures
-this work produced repeatedly, written as recognition rules because each has
-already caught its next instance. Read them before adding a field that records
-whether something worked, a check that guards one, or an error message about a
-component you do not own.
+Sections **0**, **0a**, **0b** and **0c** are not tasks. They are defect
+signatures this work produced repeatedly, written as recognition rules because
+each has already caught its next instance. Read them before adding a field that
+records whether something worked, a check that guards one, an error message
+about a component you do not own, or a report that a change was verified against
+real hardware.
 
 Sections **1** onward are work identified and deliberately not done.
 
@@ -363,6 +364,107 @@ was found by accident.
 For any error message: **could the component printing this have caused it?**
 If not, it is relaying someone else's failure, and the reader will act on where
 it appeared rather than where it came from.
+
+---
+
+## 0c. Success hides the failure paths
+
+A third signature, and the recognition rule is different again. Section 0 is
+about **a field lying about state**. Section 0b is about **the diagnostic
+pointing at the wrong subsystem**. The one on the clients branch is about **a
+check whose success path is reached without the check running**. This one is
+about **where the testing went**, and it is the only one of the four that is
+produced by things going *well*.
+
+> **Verification concentrates where the system succeeds. So the failure paths
+> end up the least-exercised code in a change precisely because everything
+> worked — and they are what a user on a different setup meets first.**
+
+### The instance
+
+The DLNA work was verified against the user's real Universal Media Server. The
+whole journey ran: discovery, browsing, a 48-entry folder, the picker at phone
+width, a video picked, played, seeked 1,900 seconds into a 2 GB file, and a
+decoded non-black frame afterwards. Byte-identical ranges at four offsets.
+Everything worked.
+
+**All 46 items in that folder were playable.** So the two paths that exist
+purely to explain failure —
+
+- `unplayable`, when nothing a browser can decode was offered, and
+- the "the media server does not offer byte ranges, so seeking will not work"
+  notice —
+
+**were never rendered, not once.** They are unit-tested and nothing more, while
+every line around them was exercised against real hardware. The better the
+happy path went, the wider that gap grew.
+
+And it compounds in the worst direction. The happy path is *this* user's server:
+one implementation, one codec profile, one library. Somebody else's is Matroska,
+or a server that declines byte ranges, or a NAS that answers `M-SEARCH` and
+cannot be described. **The first thing they see is the least-tested thing that
+shipped.** The code most likely to be met by a stranger is the code a successful
+run guarantees you did not touch.
+
+### Why it is not a restatement of the other two
+
+Worth separating, because they look adjacent:
+
+- **Section 0** is a value that is wrong — an `Option` where `None` means both
+  "fine" and "not asked yet". The defect is *in the code*, and it is there
+  whether or not anyone runs it.
+- **The guard that never runs** is a branch that is never taken, so a check
+  silently does not happen. The defect is *in the control flow*.
+- **This one is a value you never construct.** The `unplayable` string is
+  correct; `choose_res` returns the right `Err`. Nothing is wrong with the code
+  at all. What is missing is *evidence*, and the missing evidence is invisible
+  because the test output is green.
+
+A `Result` you never construct is a different failure from a guard that never
+runs. The first leaves no trace anywhere; the second at least exists in a
+coverage report.
+
+### The recognition question
+
+Sections 0 and 0b ask what a value means and who could have caused a message.
+This one asks:
+
+> **Which paths did success prevent me from exercising?**
+
+A green run is evidence about the paths it took and **silence about the rest**,
+and the louder the success, the easier that silence is to mistake for coverage.
+"It worked against the real thing" is a strong claim about one configuration and
+no claim at all about the branches that configuration never entered.
+
+### What to do about it
+
+Not "test more" — that is advice, not a rule. Three concrete things:
+
+1. **Enumerate the failure paths a run did not take, by name, in the report.**
+   Not "some edge cases remain": *these two messages have never been rendered*.
+   Naming them is what makes the gap actionable rather than a feeling.
+2. **Make the happy path hostile on purpose.** A fake server that offers only
+   Matroska, or advertises `DLNA.ORG_OP=00`, costs almost nothing next to one
+   that behaves. `tests/dlna_media.rs` has a `RangeSupport::Ignores` variant for
+   exactly this reason, and it is the only thing that exercises the
+   skip-and-synthesise path at all — the real server honours ranges, so nothing
+   about that code would have been run without a fixture built to misbehave.
+3. **Treat "everything passed" as a prompt, not a conclusion.** The moment a
+   run is fully green against real hardware is the moment to ask which arms it
+   proved nothing about.
+
+### Still open, in this crate
+
+- `unplayable` and the unseekable notice, above.
+- **All three empty-discovery explanations.** `ssdp` distinguishes "nothing
+  answered at all", "things answered but none was a MediaServer" and "a server
+  answered but could not be described" — and the search succeeded first time on
+  a real network, so **none of the three has ever been produced by one.** They
+  exist only as unit tests. The one that names UMS's IP allowlist is the message
+  most likely to matter to somebody else and the least likely to have been seen
+  by anyone.
+- **The `--dlna-server` failure path.** The success path is exercised by every
+  integration test; a mistyped address has only been reasoned about.
 
 ---
 
