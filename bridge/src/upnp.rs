@@ -32,21 +32,53 @@
 //! play, the answer to "what else was on offer" is one field away instead of a
 //! packet capture away.
 //!
-//! The ranking, in order:
+//! **Two stages, and it is worth keeping them straight.** Resources are first
+//! *excluded*, then what survives is *ranked*. Most of the work is done by the
+//! exclusion — Matroska never reaches the ranking at all — and describing this
+//! as "the ranking reorders the server's list" understates the stronger half.
 //!
-//! 1. **`http-get` only.** `rtsp-rtp-udp`, `internal` and the rest are not
-//!    things a `<video>` element can open, and neither is the proxy.
-//! 2. **A container the browser will actually decode.** Matroska, AVI and
-//!    MPEG-2 are common DLNA offerings and are not playable in Safari, which is
-//!    the browser this has to work in — the phone is iOS and Web Bluetooth
-//!    means Bluefy, which is WebKit. Preferring `video/mp4` is not a taste.
-//! 3. **Byte-range support.** `DLNA.ORG_OP`'s second digit is "server supports
-//!    Range requests". **This is the acceptance condition of the whole task** —
-//!    a resource without it cannot be scrubbed no matter how correct the proxy
-//!    is, because there is nothing upstream to forward the range to.
-//! 4. **Original over transcode.** `DLNA.ORG_CI=1` marks converted content.
-//!    A transcode is usually on-demand, usually not seekable, and usually
-//!    worse.
+//! Excluded outright by [`choose_res`]:
+//!
+//! 1. **Anything but `http-get`.** `rtsp-rtp-udp`, `internal` and the rest are
+//!    not things a `<video>` element can open, and neither is the proxy.
+//! 2. **Anything that is not the kind of thing the item claims to be.** A
+//!    server attaches artwork to a video as further `<res>` elements, and the
+//!    captured `Browse` in `fixtures/ums-browse-2026-07-29.soap.xml` gives
+//!    every video **six resources: one `video/mp4` and five PNG and JPEG
+//!    thumbnails.** Without this filter a video can lose the ranking to a
+//!    160x160 thumbnail and the picker hands a still image to a `<video>`.
+//! 3. **Any container WebKit will not decode.** Matroska, AVI and MPEG-2 are
+//!    common DLNA offerings and none of them plays in Safari, which is the
+//!    engine this has to work in. See [`browser_playable`] for what the list
+//!    rests on.
+//!
+//!    **Correction, from that capture.** Earlier versions of this comment said
+//!    Universal Media Server lists `video/x-matroska` before `video/mp4` for
+//!    the same item. It does not — that came from a hand-written fixture, and
+//!    the real server offers one `video/mp4` and then thumbnails. The Matroska
+//!    exclusion is still right for the servers that do offer it, but the
+//!    *observed* first-`<res>` hazard on this server is a thumbnail, not a
+//!    container nobody can play.
+//!
+//! Then [`score`] ranks the survivors:
+//!
+//! 1. **How certain the container is.** `video/mp4` plays on every WebKit that
+//!    has ever existed; `video/webm` plays on iOS 17.4 and later. Certainty
+//!    comes first, above seeking, because **an offer that shows nothing is
+//!    worse than one that cannot be scrubbed** — and an earlier version had
+//!    this second, so a WebM advertising byte ranges beat an MP4 that merely
+//!    did not mention them. That is the silent-black-video failure this module
+//!    exists to prevent, chosen deliberately by the ranking.
+//! 2. **Byte-range support.** `DLNA.ORG_OP`'s second digit is "server supports
+//!    Range requests", and it is the acceptance condition of the whole task: a
+//!    resource without it cannot be scrubbed however correct the proxy is,
+//!    because there is nothing upstream to forward the range to. Second, not
+//!    first — an unseekable file still plays, and `seekable` says whose fault
+//!    the missing scrub bar is.
+//! 3. **Original over transcode.** `DLNA.ORG_CI=1` marks converted content.
+//!    A transcode is usually on-demand, usually not seekable, usually worse,
+//!    and its advertised `size` is an estimate — which is why
+//!    [`crate::mediaproxy`] will not refuse a range on the strength of it.
 //!
 //! ## Bounds
 //!
@@ -601,7 +633,13 @@ pub fn parse_didl(xml: &[u8]) -> Result<Listing, String> {
                 let name = local_name(e.name().as_ref());
                 depth += 1;
                 if depth > MAX_DEPTH {
-                    return Err("DIDL is nested too deeply".into());
+                    // Stop, but keep what parsed — the module contract is that a
+                    // malformed document loses items rather than the listing, and
+                    // returning `Err` here contradicted it for one input shape
+                    // while the truncation path honoured it for every other.
+                    log_warn!("[upnp] DIDL nested past {MAX_DEPTH}; keeping what parsed so far");
+                    truncated = true;
+                    break;
                 }
                 match name.as_str() {
                     "item" => {
@@ -776,21 +814,39 @@ pub struct Chosen {
 /// on offer?") is answerable from `/dlna/browse.json` rather than from a packet
 /// capture. Correct the list here; do not special-case at the call site.
 fn browser_playable(mime: &str) -> bool {
-    matches!(
-        mime.to_ascii_lowercase().as_str(),
-        "video/mp4"
-            | "video/quicktime"
-            | "video/webm"
-            | "audio/mpeg"
-            | "audio/mp4"
-            | "audio/aac"
-            | "audio/x-m4a"
-            | "audio/wav"
-            | "audio/x-wav"
-            | "image/jpeg"
-            | "image/png"
-            | "image/webp"
-    )
+    webkit_confidence(mime) > 0
+}
+
+/// How sure we are WebKit will decode this container. `0` means "do not offer".
+///
+/// A tier rather than a boolean because the answer genuinely has three values,
+/// and collapsing it to two is what let a conditionally-supported container
+/// outrank a universally-supported one.
+///
+/// - **2 — supported by every WebKit that matters.** H.264 and HEVC in MP4 and
+///   QuickTime, and the audio and image types that have been there for a
+///   decade. Apple's *Creating Video for Safari on iPhone* is the long-standing
+///   statement for the video pair; the rest predate any version this app could
+///   run on, and are listed because a ContentDirectory serves music and artwork
+///   alongside video, not because anything here plays them specially.
+/// - **1 — supported, but only recently enough that it is a constraint.**
+///   `video/webm` reached iOS and iPadOS in **Safari 17.4**; macOS has had it
+///   since 14.1. `image/webp` reached Safari 14 and iOS 14. Both are fine on a
+///   current phone and neither is safe to prefer over a tier-2 offer.
+/// - **0 — excluded.** Everything else, including Matroska, AVI and MPEG-2.
+fn webkit_confidence(mime: &str) -> u8 {
+    match mime.to_ascii_lowercase().as_str() {
+        // The reliable pair, plus the containers and codecs that have been in
+        // WebKit since before this project existed.
+        "video/mp4" | "video/quicktime" => 2,
+        "audio/mpeg" | "audio/mp4" | "audio/aac" | "audio/x-m4a" => 2,
+        "audio/wav" | "audio/x-wav" => 2,
+        "image/jpeg" | "image/png" => 2,
+        // Conditional on the phone's OS version. See above.
+        "video/webm" => 1,
+        "image/webp" => 1,
+        _ => 0,
+    }
 }
 
 /// Pick the resource most likely to play and to scrub, or say why none will.
@@ -801,8 +857,30 @@ pub fn choose_res(item: &Item) -> Result<Chosen, String> {
 
     let mut rejected: Vec<(String, String)> = Vec::new();
     let mut candidates: Vec<&Res> = Vec::new();
+    let family = wanted_family(&item.class);
 
     for r in &item.resources {
+        // **A thumbnail is not the item.** Servers attach artwork to a video as
+        // further `<res>` elements: in the captured `Browse` from Universal
+        // Media Server, every video carries **one `video/mp4` and five PNG and
+        // JPEG thumbnails**. Without this, a video whose own `<res>` is
+        // unremarkable can lose the ranking to a 160x160 PNG, and the picker
+        // hands a still image to a `<video>` element.
+        //
+        // Skipped when the class is unrecognised: an unknown class is not a
+        // licence to guess, and the other filters still apply.
+        if let Some(family) = family {
+            if !r.mime().to_ascii_lowercase().starts_with(family) {
+                rejected.push((
+                    r.url.clone(),
+                    format!(
+                        "{:?} is not a {family}* resource, so it is artwork or a thumbnail rather                          than the item itself",
+                        r.mime()
+                    ),
+                ));
+                continue;
+            }
+        }
         if r.protocol() != "http-get" {
             rejected.push((
                 r.url.clone(),
@@ -881,10 +959,35 @@ pub fn choose_res(item: &Item) -> Result<Chosen, String> {
     })
 }
 
+/// The MIME prefix an item's `upnp:class` calls for, if it names one.
+///
+/// `object.item.videoItem`, `.videoItem.movie` and the rest all contain
+/// `videoitem`, so a substring match is both sufficient and forward-compatible
+/// with the sub-classes servers invent.
+fn wanted_family(class: &str) -> Option<&'static str> {
+    let c = class.to_ascii_lowercase();
+    if c.contains("videoitem") {
+        Some("video/")
+    } else if c.contains("audioitem") {
+        Some("audio/")
+    } else if c.contains("imageitem") {
+        Some("image/")
+    } else {
+        None
+    }
+}
+
 /// Ranking key. Higher is better; ordering is by tuple, so earlier fields
 /// dominate — which is the ranking documented at the top of this module.
 fn score(r: &Res) -> (u8, u8, u8, u64) {
     (
+        // **Certainty that it decodes at all, first.** This used to be third,
+        // behind byte ranges, so a `video/webm` advertising `DLNA.ORG_OP=01`
+        // outranked a `video/mp4` that left `ORG_OP` unstated — and unstated is
+        // common. On a phone below iOS 17.4 the ranking therefore *preferred*
+        // the offer that shows nothing. An offer that will not decode is worse
+        // than one that will not seek, in every case, so this goes first.
+        webkit_confidence(r.mime()),
         // Byte ranges: stated-yes beats unstated beats stated-no.
         match r.byte_range() {
             Some(true) => 2,
@@ -893,9 +996,6 @@ fn score(r: &Res) -> (u8, u8, u8, u64) {
         },
         // Original beats transcode.
         u8::from(!r.is_transcode()),
-        // mp4 over everything else playable, because it is the one WebKit is
-        // certain about.
-        u8::from(r.mime().eq_ignore_ascii_case("video/mp4")),
         // Bigger is usually the original rather than a downscale. Last, so it
         // only breaks ties.
         r.size.unwrap_or(0),
@@ -993,6 +1093,13 @@ mod tests {
         assert_eq!(d.control_url.path_and_query, "/base/ctrl");
     }
 
+    /// A **hand-written** response, shaped to exercise the Matroska exclusion.
+    ///
+    /// Kept because that exclusion has to be tested and the real server does
+    /// not offer Matroska — but labelled, because an earlier version of this
+    /// module cited it as evidence about what UMS does. See
+    /// `a_captured_ums_response_chooses_the_video_and_not_a_thumbnail` for the
+    /// real thing.
     const BROWSE_RESPONSE: &[u8] = br#"<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
 <s:Body><u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
@@ -1059,6 +1166,69 @@ mod tests {
         );
     }
 
+    /// **Driven by a real `Browse` response, not by a fixture written to make
+    /// its own point.**
+    ///
+    /// `fixtures/ums-browse-2026-07-29.soap.xml` is a verbatim capture from the
+    /// user's Universal Media Server 15.7.0. It is committed whole, because a
+    /// trimmed capture stops being evidence.
+    ///
+    /// It corrects this module's own documentation. The claim used to be that
+    /// UMS lists `video/x-matroska` before `video/mp4`; it does not. What it
+    /// actually does is attach five thumbnails to every video, so the real
+    /// first-`<res>` hazard on this server is artwork, not an unplayable
+    /// container.
+    #[test]
+    fn a_captured_ums_response_chooses_the_video_and_not_a_thumbnail() {
+        let raw = include_bytes!("../fixtures/ums-browse-2026-07-29.soap.xml");
+        let didl = extract_soap_result(raw).expect("the capture has a <Result>");
+        let listing = parse_didl(didl.as_bytes()).unwrap();
+
+        // Two items, six resources each: one video and **five thumbnails**.
+        // That ratio is the whole reason the class filter exists.
+        assert_eq!(listing.items.len(), 2);
+        let total_res: usize = listing.items.iter().map(|i| i.resources.len()).sum();
+        assert_eq!(total_res, 12, "the capture must not be trimmed");
+
+        for item in &listing.items {
+            assert_eq!(item.class, "object.item.videoItem");
+            let images = item
+                .resources
+                .iter()
+                .filter(|r| r.mime().starts_with("image/"))
+                .count();
+            assert_eq!(images, 5, "{} should carry five thumbnails", item.title);
+
+            let chosen = choose_res(item).unwrap();
+            assert_eq!(chosen.res.mime(), "video/mp4", "{}", item.title);
+            assert!(chosen.seekable, "UMS advertises DLNA.ORG_OP=01 here");
+            // And the rejections say *why*, including for the artwork.
+            assert!(
+                chosen
+                    .rejected
+                    .iter()
+                    .any(|(_, why)| why.contains("thumbnail")),
+                "{:?}",
+                chosen.rejected
+            );
+        }
+    }
+
+    /// The correction, asserted so it cannot quietly revert: on this server the
+    /// first `<res>` really is the video. The hazard the code guards against is
+    /// what comes *after* it.
+    #[test]
+    fn the_captured_response_lists_no_matroska_at_all() {
+        let raw = include_bytes!("../fixtures/ums-browse-2026-07-29.soap.xml");
+        let didl = extract_soap_result(raw).unwrap();
+        assert!(
+            !didl.contains("matroska"),
+            "the Matroska claim came from a hand-written fixture, not from this server"
+        );
+        let listing = parse_didl(didl.as_bytes()).unwrap();
+        assert_eq!(listing.items[0].resources[0].mime(), "video/mp4");
+    }
+
     #[test]
     fn parses_protocol_info_fields() {
         let r = Res {
@@ -1113,6 +1283,89 @@ mod tests {
         let chosen = choose_res(&item).unwrap();
         assert!(!chosen.seekable);
         assert!(chosen.reason.contains("scrubbing will not work"), "{}", chosen.reason);
+    }
+
+    /// **Regression: a conditionally-supported container must not outrank a
+    /// universally-supported one on the strength of a seek flag.**
+    ///
+    /// `score` used to put byte-range support first, so `video/webm` with
+    /// `DLNA.ORG_OP=01` beat `video/mp4` with `ORG_OP` unstated — and unstated
+    /// is common. WebM reached iOS only in Safari 17.4, so on an older phone the
+    /// ranking actively preferred the offer that loads and shows nothing, which
+    /// is the exact failure this module exists to prevent.
+    #[test]
+    fn a_universally_supported_container_beats_a_seekable_conditional_one() {
+        let item = Item {
+            id: "1".into(),
+            title: "Two containers".into(),
+            class: "object.item.videoItem".into(),
+            resources: vec![
+                Res {
+                    url: "http://h/x.webm".into(),
+                    protocol_info: "http-get:*:video/webm:DLNA.ORG_OP=01".into(),
+                    size: Some(9_000_000),
+                    duration: None,
+                    resolution: None,
+                },
+                Res {
+                    url: "http://h/x.mp4".into(),
+                    // No `DLNA.ORG_OP` at all, which is common.
+                    protocol_info: "http-get:*:video/mp4:".into(),
+                    size: Some(1_000),
+                    duration: None,
+                    resolution: None,
+                },
+            ],
+        };
+        let chosen = choose_res(&item).unwrap();
+        assert!(chosen.res.url.ends_with(".mp4"), "{}", chosen.res.url);
+        // Unstated is not "no", so it is still offered as seekable — the
+        // proxy forwards the range and the server answers or does not.
+        assert!(chosen.seekable);
+    }
+
+    /// But between two equally-certain containers, seeking decides.
+    #[test]
+    fn byte_ranges_still_decide_within_a_confidence_tier() {
+        let item = Item {
+            id: "1".into(),
+            title: "Two mp4s".into(),
+            class: "object.item.videoItem".into(),
+            resources: vec![
+                Res {
+                    url: "http://h/unstated.mp4".into(),
+                    protocol_info: "http-get:*:video/mp4:".into(),
+                    size: Some(9_000_000),
+                    duration: None,
+                    resolution: None,
+                },
+                Res {
+                    url: "http://h/seekable.mp4".into(),
+                    protocol_info: "http-get:*:video/mp4:DLNA.ORG_OP=01".into(),
+                    size: Some(1_000),
+                    duration: None,
+                    resolution: None,
+                },
+            ],
+        };
+        assert!(choose_res(&item).unwrap().res.url.ends_with("seekable.mp4"));
+    }
+
+    /// The confidence tiers, stated so the version floor is visible in a test
+    /// and not only in a doc comment.
+    #[test]
+    fn container_confidence_is_three_valued() {
+        assert_eq!(webkit_confidence("video/mp4"), 2);
+        assert_eq!(webkit_confidence("video/quicktime"), 2);
+        assert_eq!(webkit_confidence("audio/x-m4a"), 2);
+        // Supported, but only since iOS 17.4 — safe to offer, not safe to
+        // prefer over a tier-2 container.
+        assert_eq!(webkit_confidence("video/webm"), 1);
+        assert_eq!(webkit_confidence("image/webp"), 1);
+        // Never offered.
+        assert_eq!(webkit_confidence("video/x-matroska"), 0);
+        assert_eq!(webkit_confidence("video/x-msvideo"), 0);
+        assert_eq!(webkit_confidence("video/mpeg"), 0);
     }
 
     #[test]
@@ -1184,16 +1437,24 @@ mod tests {
         }
     }
 
-    /// Deep nesting is refused rather than recursed into. The parser is
-    /// iterative so this is a bound on work, not a stack-overflow guard, but
-    /// the bound has to exist either way.
+    /// Deep nesting stops the parse without discarding what came before it.
+    ///
+    /// The parser is iterative, so the bound is on work rather than on stack
+    /// depth — but it has to exist either way, and it has to behave like the
+    /// other malformed-input paths. An earlier version returned `Err`, which
+    /// threw away a whole listing for one input shape while every other
+    /// malformation kept what parsed.
     #[test]
-    fn absurd_nesting_is_refused() {
-        let mut xml = Vec::new();
+    fn absurd_nesting_keeps_what_parsed_before_it() {
+        let mut xml = Vec::from(
+            &br#"<DIDL-Lite><item id="1"><dc:title>One</dc:title></item>"#[..],
+        );
         for _ in 0..(MAX_DEPTH + 10) {
             xml.extend_from_slice(b"<a>");
         }
-        assert!(parse_didl(&xml).is_err());
+        let listing = parse_didl(&xml).expect("a bound is not an error");
+        assert_eq!(listing.items.len(), 1);
+        assert_eq!(listing.items[0].title, "One");
     }
 
     /// An `ObjectID` a client hands back must not be able to rewrite the SOAP

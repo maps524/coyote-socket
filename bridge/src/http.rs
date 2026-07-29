@@ -981,7 +981,11 @@ where
         dlna::Action::Error(status, message) => {
             respond(stream, status, "text/plain; charset=utf-8", message.as_bytes()).await
         }
-        dlna::Action::Stream { upstream, title } => {
+        dlna::Action::Stream {
+            upstream,
+            title,
+            advertised_size,
+        } => {
             let range = header_value(request_head, "range");
             let if_range = header_value(request_head, "if-range");
             log_info!(
@@ -989,7 +993,15 @@ where
                 range.unwrap_or("(whole file)")
             );
             let outcome =
-                crate::mediaproxy::proxy(stream, method, &upstream, range, if_range).await;
+                crate::mediaproxy::proxy(
+                    stream,
+                    method,
+                    &upstream,
+                    range,
+                    if_range,
+                    advertised_size,
+                )
+                .await;
             log_debug!("[media] {title:?} finished: {outcome:?}");
             Ok(())
         }

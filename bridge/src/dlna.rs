@@ -38,11 +38,18 @@
 //! Answered concretely, because "we parse XML from the network" deserves a
 //! concrete answer:
 //!
+//! - **A responder may only describe itself.** `LOCATION` is a URL supplied by
+//!   anything on the network that can send a datagram, and an earlier version
+//!   fetched it unchecked — a GET-forgery primitive against loopback and the
+//!   LAN, fired every time a client opened the picker, with the outcome
+//!   rendered back as `unreadable[].problem`. [`crate::ssdp`] now requires
+//!   `LOCATION`'s host to be the datagram's source address, which is the one
+//!   field a sender cannot choose.
 //! - **A `<res>` URL on another host is refused at mint time.** It must match
 //!   the host of the device description the server was discovered at. So a
 //!   rogue media server — and anything on the network can answer an SSDP
 //!   search — cannot make the bridge fetch `http://192.168.0.1/admin` or
-//!   `http://127.0.0.1:8787/`.
+//!   `http://127.0.0.1:8787/`, at either layer.
 //! - **A `<res>` URL on another *port* of the same host is allowed.** Servers
 //!   legitimately serve descriptions and media on different ports. The residual
 //!   exposure is that a compromised media server can make the bridge fetch from
@@ -96,6 +103,13 @@ struct MediaRef {
     upstream: Url,
     /// For the log line when it is played.
     title: String,
+    /// `size` from the `<res>` that produced this reference, when the server
+    /// gave one.
+    ///
+    /// A second, independent statement of the file's length, which is what
+    /// makes it useful: [`crate::mediaproxy`] will only synthesise a `416` when
+    /// an origin's `Content-Length` agrees with it. See the comment there.
+    advertised_size: Option<u64>,
     /// Insertion order, for eviction.
     seq: u64,
 }
@@ -303,6 +317,7 @@ impl Dlna {
         item_id: &str,
         title: &str,
         res_url: &str,
+        advertised_size: Option<u64>,
     ) -> Option<String> {
         let upstream = Url::parse(res_url)?;
         if upstream.host != device.description_url.host {
@@ -352,6 +367,7 @@ impl Dlna {
             MediaRef {
                 upstream,
                 title: title.to_string(),
+                advertised_size,
                 seq,
             },
         );
@@ -503,7 +519,13 @@ pub enum Action {
     /// A status and a plain-text message.
     Error(u16, String),
     /// Stream this upstream URL, honouring the client's range headers.
-    Stream { upstream: Url, title: String },
+    Stream {
+        upstream: Url,
+        title: String,
+        /// What the `<res>` said the file is, if anything. Corroboration for
+        /// the origin's own `Content-Length`.
+        advertised_size: Option<u64>,
+    },
 }
 
 /// Route one `/dlna/…` request. `rest` is the path after `/dlna/`.
@@ -520,6 +542,7 @@ pub async fn handle(dlna: &Dlna, rest: &str, query: &str) -> Action {
                 Some(m) => Action::Stream {
                     upstream: m.upstream,
                     title: m.title,
+                    advertised_size: m.advertised_size,
                 },
                 // §0b: say what is actually missing. A stale reference after a
                 // restart is the common case and "not found" alone sends people
@@ -638,8 +661,8 @@ async fn browse(dlna: &Dlna, params: &HashMap<String, String>) -> Action {
         let (media_url, reason, seekable, unplayable, duration, resolution, size) = match chosen {
             Ok(c) => {
                 let minted = dlna
-                    .mint_media_ref(&device, &item.id, &item.title, &c.res.url)
-                    .await;
+                    .mint_media_ref(&device, &item.id, &item.title, &c.res.url, c.res.size)
+.await;
                 let unplayable = if minted.is_none() {
                     Some(format!(
                         "the chosen resource is on {}, which is not the host this server was \
@@ -797,8 +820,8 @@ mod tests {
         let dlna = Dlna::new();
         let d = device();
         let id = dlna
-            .mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/ums/media/x.mp4")
-            .await
+            .mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/ums/media/x.mp4", None)
+.await
             .unwrap();
 
         assert!(dlna.resolve(&id).await.is_some());
@@ -821,15 +844,16 @@ mod tests {
             "http://trusted@192.168.0.99/x.mp4",
         ] {
             assert!(
-                dlna.mint_media_ref(&d, "1", "t", hostile).await.is_none(),
+                dlna.mint_media_ref(&d, "1", "t", hostile, None)
+.await.is_none(),
                 "should refuse {hostile}"
             );
         }
         // The same host on another port is allowed: servers really do split
         // description and media across ports.
         assert!(dlna
-            .mint_media_ref(&d, "1", "t", "http://192.168.0.4:9001/media/x.mp4")
-            .await
+            .mint_media_ref(&d, "1", "t", "http://192.168.0.4:9001/media/x.mp4", None)
+.await
             .is_some());
     }
 
@@ -839,11 +863,14 @@ mod tests {
     async fn the_same_item_mints_the_same_reference() {
         let dlna = Dlna::new();
         let d = device();
-        let a = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4").await;
-        let b = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4").await;
+        let a = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4", None)
+.await;
+        let b = dlna.mint_media_ref(&d, "1$7$253", "Ep I", "http://192.168.0.4:5001/a.mp4", None)
+.await;
         assert_eq!(a, b);
 
-        let other = dlna.mint_media_ref(&d, "1$7$254", "Ep II", "http://192.168.0.4:5001/b.mp4").await;
+        let other = dlna.mint_media_ref(&d, "1$7$254", "Ep II", "http://192.168.0.4:5001/b.mp4", None)
+.await;
         assert_ne!(a, other);
     }
 
@@ -852,7 +879,7 @@ mod tests {
         let dlna = Dlna::new();
         let d = device();
         for i in 0..(MAX_REFS + 50) {
-            dlna.mint_media_ref(&d, &format!("id{i}"), "t", &format!("http://192.168.0.4:5001/{i}.mp4"))
+            dlna.mint_media_ref(&d, &format!("id{i}"), "t", &format!("http://192.168.0.4:5001/{i}.mp4"), None)
                 .await;
         }
         assert!(dlna.state.lock().await.refs.len() <= MAX_REFS);

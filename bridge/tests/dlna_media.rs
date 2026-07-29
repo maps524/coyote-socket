@@ -69,6 +69,9 @@ enum Catalogue {
     /// container WebKit will not decode, and one that says outright it does not
     /// honour byte ranges.
     Awkward,
+    /// One item whose DIDL `size` understates the file — which is what a DLNA
+    /// server emits for a transcoded resource, where the length is an estimate.
+    Understated,
 }
 
 async fn fake_media_server(support: RangeSupport) -> SocketAddr {
@@ -137,7 +140,11 @@ async fn fake_media_server_with(support: RangeSupport, catalogue: Catalogue) -> 
                     // Two `<res>` on purpose: Matroska first, which is what a
                     // "take the first one" proxy picks and which WebKit will
                     // not decode.
-                    let didl = if catalogue == Catalogue::Awkward {
+                    let didl = if catalogue == Catalogue::Understated {
+                        format!(
+                            r#"&lt;DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"&gt;&lt;item id="estimated" parentID="0"&gt;&lt;dc:title&gt;A Transcode With An Estimated Length&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;&lt;res protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=1" size="1000"&gt;http://{addr}/media.mp4&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;"#
+                        )
+                    } else if catalogue == Catalogue::Awkward {
                         format!(
                             r#"&lt;DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"&gt;&lt;item id="mkv-only" parentID="0"&gt;&lt;dc:title&gt;An Old Matroska Rip&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;&lt;res protocolInfo="http-get:*:video/x-matroska:DLNA.ORG_OP=01" size="123456"&gt;http://{addr}/media.mkv&lt;/res&gt;&lt;/item&gt;&lt;item id="no-ranges" parentID="0"&gt;&lt;dc:title&gt;Streamed Without Seeking&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;&lt;res protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=00" size="{MEDIA_LEN}" duration="0:01:23.000"&gt;http://{addr}/media.mp4&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;"#
                         )
@@ -551,6 +558,9 @@ async fn a_seek_past_the_end_is_416_not_the_whole_file() {
         &[("Range", "bytes=99999999999-")],
     )
     .await;
+    // The DIDL `<res>` advertises the same length the origin reports, so the
+    // refusal has two independent witnesses. Without that agreement the `200`
+    // is relayed instead — see `proxy`.
     assert!(head.starts_with("HTTP/1.1 416"), "{head}");
     assert!(head.contains(&format!("Content-Range: bytes */{MEDIA_LEN}")), "{head}");
     assert!(body.is_empty(), "{} bytes were sent for an unsatisfiable range", body.len());
@@ -652,6 +662,43 @@ async fn an_unseekable_item_is_still_playable_from_the_start() {
     let (head, bytes) = request(bridge, "GET", &format!("{path}?t={token}"), &[]).await;
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
     assert_eq!(bytes, media());
+}
+
+/// **A `416` must not be synthesised from a length only the origin claims.**
+///
+/// The synthesis branch runs *because the origin ignored `Range`* — it has
+/// already shown it is unreliable about ranges, so trusting its
+/// `Content-Length` hard enough to refuse on is trusting the wrong witness. A
+/// DLNA server emits an estimated length for a transcoded resource, and
+/// `score()` will pick a transcode when it is the only playable container.
+///
+/// Here the DIDL says 1,000 bytes and the file is 10,037. A seek to 2,000 is
+/// inside the real file and outside the advertised one, so the old code would
+/// have refused a range the origin would have served — playing, then declining
+/// to seek past an arbitrary early point, with the client getting the blame.
+#[tokio::test]
+async fn an_understated_length_does_not_produce_a_spurious_416() {
+    let server = fake_media_server_with(RangeSupport::Ignores, Catalogue::Understated).await;
+    let (bridge, token, _dlna) = bridge_with(server).await;
+    let path = media_path(bridge, &token).await;
+    let all = media();
+
+    let seek_to = 2_000;
+    let (head, body) = request(
+        bridge,
+        "GET",
+        &format!("{path}?t={token}"),
+        &[("Range", &format!("bytes={seek_to}-"))],
+    )
+    .await;
+
+    assert!(
+        !head.starts_with("HTTP/1.1 416"),
+        "refused a range the origin would have served: {head}"
+    );
+    // And the seek still works, by the skip-and-synthesise path.
+    assert!(head.starts_with("HTTP/1.1 206"), "{head}");
+    assert_eq!(body, all[seek_to..]);
 }
 
 /// Two clients streaming at once both get whole, correct files. The bridge
@@ -932,7 +979,7 @@ async fn bridge_for_proxy(
 ) -> (SocketAddr, String) {
     let device = dlna.add_server(device_url.clone()).await.unwrap();
     let reference = dlna
-        .mint_media_ref(&device, "bulk", "bulk", &format!("http://{origin}/bulk"))
+        .mint_media_ref(&device, "bulk", "bulk", &format!("http://{origin}/bulk"), None)
         .await
         .expect("the bulk URL is on the device's own host");
 

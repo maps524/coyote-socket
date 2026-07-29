@@ -92,8 +92,12 @@ pub struct Found {
     pub location: Url,
     /// `SERVER`, if given. Free text — "UMS/14.10.0 UPnP/1.0" and similar.
     pub server: Option<String>,
-    /// Where the datagram actually came from, which is not necessarily the host
-    /// in `LOCATION`. A mismatch is worth seeing.
+    /// Where the datagram actually came from.
+    ///
+    /// `location`'s host is now required to be this address — see
+    /// [`location_is_the_sender`] — so the two always agree. Kept because it is
+    /// the port and the evidence: it is the field that makes the check
+    /// checkable.
     pub from: String,
 }
 
@@ -296,6 +300,36 @@ pub async fn discover() -> Discovery {
             ));
             continue;
         };
+        // **A responder may only describe itself.**
+        //
+        // Without this, `LOCATION` is a URL supplied by anything on the network
+        // that can send a UDP datagram, and the bridge fetches it on every
+        // discovery — which is every time a client opens the picker. That is a
+        // GET-forgery primitive against loopback and the LAN, and it comes with
+        // an oracle attached: the outcome lands in `undescribable` and is
+        // rendered verbatim as `unreadable[].problem` in `/dlna/index.json`, so
+        // the sender can distinguish a 403 from a refused connection.
+        //
+        // The `<res>` gate one layer down was already fail-closed, so this was
+        // never a way to make the bridge *proxy* those bytes. It was still a
+        // way to make it fetch them, which is exactly what the module docs
+        // claimed it could not do.
+        //
+        // The datagram's source address is the one thing here a sender cannot
+        // choose: replies to `M-SEARCH` are unicast to an ephemeral port, so a
+        // forged source would not have reached this socket. Comparing against
+        // it is therefore the whole check.
+        if !location_is_the_sender(&location, &from) {
+            out.problems.push(format!(
+                "{from} advertised a LOCATION on another host ({}); refused, because a \
+                 responder may only describe itself",
+                location.host
+            ));
+            log_warn!(
+                "[ssdp] {from} advertised {location_raw:?}, which is not its own address; refused"
+            );
+            continue;
+        }
 
         // USN is the identity. Without one there is nothing stable to key on,
         // so fall back to the location — which at least deduplicates.
@@ -334,6 +368,37 @@ pub async fn discover() -> Discovery {
         );
     }
     out
+}
+
+/// Whether a `LOCATION` points back at the host the datagram came from.
+///
+/// **A hostname is refused, not resolved.** Resolving one would reintroduce the
+/// whole problem: the sender chooses the name, and DNS or a hosts file decides
+/// where it goes. UPnP 1.0 requires `LOCATION` to carry an IP address for
+/// exactly this reason — the protocol runs on networks where name resolution
+/// may not exist — so refusing a name costs nothing real.
+///
+/// Comparison is on the parsed address, never the string, so the textual
+/// aliases do not matter: `localhost`, a trailing dot and `127.0.0.001` all
+/// fail to parse and are refused, and an IPv4-mapped IPv6 literal is unmapped
+/// before comparison rather than being allowed to differ textually from the
+/// same address written the ordinary way.
+fn location_is_the_sender(location: &Url, from: &SocketAddr) -> bool {
+    let Ok(advertised) = location.host.parse::<IpAddr>() else {
+        return false;
+    };
+    canonical(advertised) == canonical(from.ip())
+}
+
+/// Unmap IPv4-in-IPv6 so `::ffff:127.0.0.1` and `127.0.0.1` compare equal.
+fn canonical(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        v4 => v4,
+    }
 }
 
 /// Case-insensitive header lookup on an SSDP datagram.
@@ -398,6 +463,63 @@ mod tests {
     fn tolerates_bare_lf_line_endings() {
         let lf = "HTTP/1.1 200 OK\nST: x\nLOCATION: http://h/d\n\n";
         assert_eq!(header(lf, "location"), Some("http://h/d"));
+    }
+
+    /// **A responder may only describe itself.**
+    ///
+    /// `LOCATION` is a URL chosen by anything on the network that can send a
+    /// datagram, and the bridge fetches it on every discovery — which is every
+    /// time a client opens the picker. Unchecked, that is a GET-forgery
+    /// primitive against loopback and the LAN, with an oracle attached, because
+    /// the outcome is rendered verbatim in `/dlna/index.json`.
+    ///
+    /// The datagram's source address is the one field a sender cannot choose:
+    /// `M-SEARCH` replies are unicast to an ephemeral port, so a forged source
+    /// would never have reached the socket.
+    #[test]
+    fn a_location_pointing_anywhere_but_the_sender_is_refused() {
+        let sender: SocketAddr = "192.168.0.4:56213".parse().unwrap();
+        let ok = |u: &str| location_is_the_sender(&Url::parse(u).unwrap(), &sender);
+
+        assert!(ok("http://192.168.0.4:5001/desc"), "its own address, any port");
+
+        for hostile in [
+            // The two the review demonstrated.
+            "http://127.0.0.1:8787/pair",
+            "http://192.168.0.1/admin",
+            // Link-local metadata, the classic SSRF target.
+            "http://169.254.169.254/latest/meta-data/",
+            // A name is refused rather than resolved: the sender picks the
+            // name and something else decides where it points.
+            "http://localhost:5001/desc",
+            "http://my-nas.local/desc",
+            // Textual aliases for loopback. None parses as an address, so none
+            // reaches the comparison at all.
+            "http://127.0.0.001/desc",
+            "http://127.0.0.1./desc",
+            // A different host that merely starts the same.
+            "http://192.168.0.44/desc",
+        ] {
+            assert!(!ok(hostile), "should refuse {hostile}");
+        }
+    }
+
+    /// The same address written as IPv4-mapped IPv6 is the same address.
+    /// Compared parsed rather than textually, so this is allowed and the
+    /// aliases above are not.
+    #[test]
+    fn an_ipv4_mapped_sender_matches_its_plain_form() {
+        let mapped: SocketAddr = "[::ffff:192.168.0.4]:56213".parse().unwrap();
+        assert!(location_is_the_sender(
+            &Url::parse("http://192.168.0.4:5001/desc").unwrap(),
+            &mapped
+        ));
+
+        let plain: SocketAddr = "192.168.0.4:56213".parse().unwrap();
+        assert!(!location_is_the_sender(
+            &Url::parse("http://192.168.0.5:5001/desc").unwrap(),
+            &plain
+        ));
     }
 
     /// An empty result must be able to say which of the three empties it is.

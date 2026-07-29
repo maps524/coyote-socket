@@ -58,6 +58,13 @@
 //! the first `N` bytes upstream and synthesises the `206` itself. Beyond that
 //! bound it relays the `200` and logs which happened, because silently reading
 //! four gigabytes to satisfy a scrub is worse than the scrub not working.
+//!
+//! Bounded (`bytes=N-M`) and suffix (`bytes=-S`) ranges are **not** compensated
+//! for, and that is a decision rather than an omission: answering either needs
+//! the file's true length, which in this branch is exactly what the origin has
+//! just demonstrated it cannot be trusted about. They are relayed as a `200`
+//! and logged in the same terms as the unbounded case, so the failure is not
+//! loud in one shape and silent in the others.
 
 use std::time::Duration;
 
@@ -149,6 +156,7 @@ pub async fn proxy<W>(
     upstream: &Url,
     range: Option<&str>,
     if_range: Option<&str>,
+    advertised_size: Option<u64>,
 ) -> Outcome
 where
     W: AsyncWrite + Unpin,
@@ -196,11 +204,38 @@ where
                 // answer is "there is nothing there", and instead receives the
                 // film from the beginning.
                 //
-                // We know it is unsatisfiable, because the upstream told us the
-                // length in the same breath. So this is answered here rather
-                // than passed on.
-                if total.is_some_and(|t| start >= t) {
-                    let total = total.unwrap_or(0);
+                // **But only when a second source agrees about the length.**
+                // The reason this branch is running at all is that the origin
+                // ignored `Range` — it has already demonstrated it is not
+                // reliable about ranges, so trusting its `Content-Length` hard
+                // enough to synthesise a refusal is trusting exactly the wrong
+                // witness. A DLNA server emits an *estimated* length for a
+                // transcoded resource, and [`crate::upnp::score`] will choose a
+                // transcode when it is the only playable container. An
+                // understated estimate would turn into a `416` for a range the
+                // origin would have served: plays, then refuses to seek past an
+                // arbitrary early point, and the client gets the blame.
+                //
+                // So the `<res>` `size` from the DIDL listing has to agree. Two
+                // independent statements of the same length is enough to refuse
+                // on; one from a server that just ignored a `Range` header is
+                // not. With no advertised size, the `200` is relayed — which
+                // wastes bytes and is merely the old behaviour, rather than
+                // breaking a seek that would have worked.
+                let corroborated = match (total, advertised_size) {
+                    (Some(t), Some(a)) if t == a => Some(t),
+                    (Some(t), Some(a)) => {
+                        log_warn!(
+                            "[media] {} says the file is {t} bytes and its own listing said {a};                              not refusing a range on the strength of a length the server                              contradicts itself about",
+                            upstream.authority()
+                        );
+                        None
+                    }
+                    _ => None,
+                };
+
+                if corroborated.is_some_and(|t| start >= t) {
+                    let total = corroborated.unwrap_or(0);
                     log_debug!(
                         "[media] bytes={start}- is past the end of {total}; 416 rather than \
                          relaying the {total}-byte 200 the media server offered"
@@ -244,6 +279,33 @@ where
                     }
                 };
             }
+        }
+    }
+
+    // The other two range forms against an origin that ignored the header.
+    //
+    // They are relayed as a bare `200`, which is the same outcome as the
+    // unbounded form beyond `MAX_SKIP` — but that case logs and this one did
+    // not, so an identical failure was loud in one shape and silent in two.
+    // The diagnosis has to be the same even where the behaviour is not.
+    //
+    // Not compensated for, deliberately. `bytes=N-` is what a seek is, and the
+    // synthesis for it is unambiguous: skip N, serve the rest, and the
+    // `Content-Range` writes itself. A bounded or suffix range needs the file's
+    // true length to answer, which in this branch is precisely the thing the
+    // origin has just shown it cannot be trusted about — see the corroboration
+    // note above. Recorded rather than guessed at.
+    if head.status == 200 {
+        match range.and_then(parse_range) {
+            Some(RangeSpec::FromTo(start, end)) => log_warn!(
+                "[media] {} ignored Range: bytes={start}-{end}; relaying the whole file, so a                  client expecting a 206 will read from the beginning",
+                upstream.authority()
+            ),
+            Some(RangeSpec::Suffix(n)) => log_warn!(
+                "[media] {} ignored Range: bytes=-{n}; relaying the whole file, so a client                  expecting the last {n} bytes will read from the beginning",
+                upstream.authority()
+            ),
+            _ => {}
         }
     }
 
