@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CoyoteBridge",
+  "version": "0.1.0",
+  "identifier": "com.coyotesocket.bridge",
+  "build": {
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build",
+    "devUrl": "http://localhost:1430",
+    "frontendDist": "./ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CoyoteSocket Bridge",
+        "width": 980,
+        "height": 780,
+        "minWidth": 720,
+        "minHeight": 560,
+        "resizable": true,
+        "backgroundColor": "#0b0b0f"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.ico", "icons/icon.png"]
+  }
+}

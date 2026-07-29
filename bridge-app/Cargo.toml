@@ -1,0 +1,26 @@
+[package]
+name = "coyote-bridge-app"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop shell for the CoyoteSocket bridge: a window, a tray, and a Connect button"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+# The whole point of this crate: the bridge stays a plain library with no
+# windowing stack, and this is the only place Tauri appears. `default-features
+# = false` drops the library's own `tao`/`tray-icon` tray, because the tray in
+# this build is Tauri's. The headless binary still gets it.
+coyote-bridge = { path = "../bridge", default-features = false }
+
+tauri = { version = "2.0", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+tauri-plugin-opener = "2.5.4"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

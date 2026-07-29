@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dev-server",
+  "description": "Grants the Vite dev origin the same IPC access as the bundled frontend. Only matches http://localhost:1430, which a release build never loads — it serves from tauri://localhost — so production permissions are unchanged. Mirrors the desktop app's own dev-server capability.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://localhost:1430"]
+  },
+  "permissions": ["core:default", "core:window:allow-show", "core:window:allow-hide"]
+}

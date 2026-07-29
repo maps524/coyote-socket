@@ -44,6 +44,7 @@ yarn-error.log*
 # Rust
 **/*.rs.bk
 Cargo.lock
+bridge/target/
 
 nul
 .playwright-mcp/
@@ -54,4 +55,8 @@ scripts/setup-local.js
 # Claude Code per-user settings (committed: .claude/settings.json)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
-.claude/worktrees/
+.claude/worktrees/bridge-app/ui/node_modules/
+bridge-app/ui/dist/
+bridge-app/target/
+bridge-app/gen/
+bridge/target/
