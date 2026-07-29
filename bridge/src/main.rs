@@ -5,15 +5,14 @@
 //! main thread and never returns. With `--no-tray` (or a build without the
 //! `tray` feature) the main thread just parks instead.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use coyote_bridge::state::{PlayerCommand, PlayerSnapshot};
-use coyote_bridge::{http, logging, player};
+use coyote_bridge::wire::Tap;
+use coyote_bridge::{http, logging, supervisor};
 use coyote_bridge::{log_info, log_warn};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch};
 
 const DEFAULT_PLAYER_PORT: u16 = 23554;
 const DEFAULT_HTTP_PORT: u16 = 8787;
@@ -127,7 +126,7 @@ fn main() {
         }
     }
 
-    let advertised_ip = local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let advertised_ip = http::local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let pairing_url = format!("http://{advertised_ip}:{}", args.http_port);
     let local_url = format!("http://127.0.0.1:{}", args.http_port);
 
@@ -142,14 +141,11 @@ fn main() {
     let pairing_for_http = pairing_url.clone();
 
     runtime.spawn(async move {
-        // watch: the phone wants current state, not a backlog. A slow client
-        // that misses intermediate positions is fine - it gets the latest.
-        let (snapshot_tx, snapshot_rx) =
-            watch::channel(PlayerSnapshot::new(player_endpoint.clone()));
-        // mpsc: commands are discrete and must not be coalesced.
-        let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>(16);
-
-        tokio::spawn(player::run(player_endpoint, snapshot_tx, cmd_rx));
+        // The headless binary connects on start and never stops trying: it is
+        // a service, and there is nobody here to press a button. The
+        // supervisor's Connect/Disconnect commands exist for the UI, and are
+        // simply left unused.
+        let bridge = supervisor::spawn(Some(player_endpoint), Tap::disabled());
 
         match TcpListener::bind(bind_addr).await {
             Ok(listener) => {
@@ -157,8 +153,8 @@ fn main() {
                 http::run(
                     listener,
                     Arc::new(http::Ctx {
-                        snapshot_rx,
-                        cmd_tx,
+                        snapshot_rx: bridge.snapshot_rx.clone(),
+                        cmd_tx: bridge.cmd_tx.clone(),
                         static_dir,
                         pairing_url: pairing_for_http,
                     }),
@@ -192,18 +188,4 @@ fn main() {
     loop {
         std::thread::park();
     }
-}
-
-/// Best-guess LAN address, for the URL we hand the phone.
-///
-/// Uses the connected-UDP-socket trick: connecting a UDP socket sends no
-/// packets, but it makes the OS pick a source address via its routing table -
-/// which is exactly "the interface I would reach the network on". Avoids a
-/// dependency and avoids the classic bug of picking the first interface,
-/// which on a dev machine is usually a virtual adapter.
-fn local_ip() -> Option<IpAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    // Any routable address works; nothing is sent to it.
-    socket.connect("192.0.2.1:9").ok()?;
-    socket.local_addr().ok().map(|a| a.ip())
 }

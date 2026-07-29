@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The bridge window drives its own Rust commands and nothing else. No filesystem, shell or HTTP plugin is enabled: everything this app does to the outside world goes through the bridge library.",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:allow-show", "core:window:allow-hide"]
+}

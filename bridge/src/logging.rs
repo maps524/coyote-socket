@@ -22,6 +22,26 @@ const FLUSH_INTERVAL: usize = 10;
 
 static LOGGER: OnceLock<Mutex<RingLogger>> = OnceLock::new();
 
+/// Live tap on the log, for a UI that wants to show it without tailing a file.
+///
+/// A `broadcast` rather than a callback so that a slow or absent reader can
+/// never stall a log call — logging sits on the protocol path and must stay
+/// non-blocking. A reader that falls behind is told how many lines it missed
+/// rather than being handed a silently truncated history.
+static TAP: OnceLock<tokio::sync::broadcast::Sender<String>> = OnceLock::new();
+
+/// How many lines a reader may fall behind before it starts losing them.
+/// Generous, because the interesting bursts are exactly when a connection is
+/// failing and someone is watching.
+const TAP_CAPACITY: usize = 512;
+
+/// Subscribe to log lines as they are written, in the same
+/// `[timestamp] [LEVEL] message` form they take on disk.
+pub fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
+    TAP.get_or_init(|| tokio::sync::broadcast::channel(TAP_CAPACITY).0)
+        .subscribe()
+}
+
 struct RingLogger {
     buffer: VecDeque<String>,
     log_path: PathBuf,
@@ -29,19 +49,24 @@ struct RingLogger {
 }
 
 impl RingLogger {
-    fn log(&mut self, level: &str, message: &str) {
+    fn log(&mut self, level: &str, message: &str) -> String {
         let line = format!("[{}] [{level}] {message}", now_ms());
 
         if self.buffer.len() >= MAX_LINES {
             self.buffer.pop_front();
         }
-        self.buffer.push_back(line);
+        self.buffer.push_back(line.clone());
 
         self.write_count += 1;
         if self.write_count >= FLUSH_INTERVAL {
             self.flush();
             self.write_count = 0;
         }
+        line
+    }
+
+    fn snapshot(&self) -> Vec<String> {
+        self.buffer.iter().cloned().collect()
     }
 
     fn flush(&self) {
@@ -78,12 +103,27 @@ pub fn init(dir: Option<PathBuf>) {
 }
 
 pub fn log(level: &str, message: &str) {
+    let mut line = None;
     if let Some(logger) = LOGGER.get() {
         if let Ok(mut guard) = logger.lock() {
-            guard.log(level, message);
+            line = Some(guard.log(level, message));
         }
     }
     eprintln!("[{level}] {message}");
+
+    // Only publish if someone has ever subscribed: on the headless path this
+    // channel is never created at all.
+    if let Some(tx) = TAP.get() {
+        let _ = tx.send(line.unwrap_or_else(|| format!("[{}] [{level}] {message}", now_ms())));
+    }
+}
+
+/// The whole ring buffer, oldest first. What a "copy the log" button copies.
+pub fn history() -> Vec<String> {
+    LOGGER
+        .get()
+        .and_then(|l| l.lock().ok().map(|g| g.snapshot()))
+        .unwrap_or_default()
 }
 
 /// Force the buffer to disk regardless of the flush interval.

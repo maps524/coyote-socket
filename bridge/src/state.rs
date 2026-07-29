@@ -69,15 +69,115 @@ pub struct PlayerCommand {
 }
 
 /// How the bridge's TCP link to the player is doing.
+///
+/// Four states rather than three, because "we are not trying" and "we are
+/// trying and failing" are different situations and a user needs to be told
+/// which one they are in. The original spike collapsed both into
+/// `Disconnected`, which made a bridge that had never been asked to connect
+/// look identical to one that could not reach the headset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkState {
-    /// No connection attempt has succeeded yet, or the last one dropped.
-    /// This is the normal state during development — the player is usually
-    /// not running.
-    Disconnected,
+    /// Nobody has asked for a connection, or the user disconnected.
+    Idle,
+    /// An attempt is in flight — probing or handshaking.
     Connecting,
     Connected,
+    /// The last attempt failed and we are backing off before the next.
+    /// [`PlayerSnapshot::fault`] says why.
+    Retrying,
+}
+
+/// What went wrong, in terms someone can act on.
+///
+/// Split by *cause* rather than by error code because the actions differ:
+/// a refusal means "the player is not listening — switch remote control on",
+/// a timeout means "wrong address, or the headset is asleep", and a framing
+/// fault means "our reading of the protocol is wrong", which is the finding
+/// this whole spike exists to surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FaultKind {
+    /// The host answered and refused the port. Almost always: remote control
+    /// is switched off in the player's settings.
+    Refused,
+    /// Nothing answered in time. Wrong IP, asleep headset, other network, or
+    /// a firewall dropping the SYN.
+    TimedOut,
+    /// The OS says there is no route to that host at all.
+    Unreachable,
+    /// The endpoint could not be parsed or resolved.
+    Address,
+    /// We were connected and the player hung up.
+    Closed,
+    /// The bytes did not fit the protocol. **This is the interesting one** —
+    /// it means our reading of the framing is wrong, not that the network is.
+    Framing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkFault {
+    pub kind: FaultKind,
+    /// The underlying error, verbatim. Never paraphrased away — if our
+    /// explanation is wrong, this is what lets someone see that.
+    pub detail: String,
+    /// What to try. `None` when we genuinely have no suggestion, which is
+    /// better than inventing one.
+    pub hint: Option<String>,
+}
+
+impl LinkFault {
+    pub fn new(kind: FaultKind, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        let hint = default_hint(kind);
+        Self { kind, detail, hint }
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+}
+
+fn default_hint(kind: FaultKind) -> Option<String> {
+    Some(match kind {
+        FaultKind::Refused => "The headset answered but nothing is listening on that port. \
+             Neither DeoVR nor HereSphere opens 23554 until remote control is \
+             switched on in the player's own settings, and you have to be inside \
+             the video player. Turn it on and try again."
+            .into(),
+        FaultKind::TimedOut => "No answer at all. Check the address, check the headset is awake \
+             and on the same network, and check nothing is filtering the port."
+            .into(),
+        FaultKind::Unreachable => {
+            "No route to that address. The two devices are probably on different networks.".into()
+        }
+        FaultKind::Address => "That does not look like a reachable address. Use the headset's \
+             IP, optionally with :23554."
+            .into(),
+        FaultKind::Closed => "The player closed the connection. If this happens about three \
+             seconds after connecting, our keepalive is not reaching it."
+            .into(),
+        FaultKind::Framing => "The bytes on the wire did not match what we expected. This is a \
+             finding, not a glitch — copy the wire log and send it back."
+            .into(),
+    })
+}
+
+/// Classify a connection error into something a person can act on.
+pub fn classify_connect_error(e: &std::io::Error) -> LinkFault {
+    use std::io::ErrorKind::*;
+    let kind = match e.kind() {
+        ConnectionRefused | ConnectionReset => FaultKind::Refused,
+        TimedOut => FaultKind::TimedOut,
+        // `HostUnreachable` / `NetworkUnreachable` are still unstable to name
+        // on some targets, so fall back to the message.
+        _ if e.to_string().to_lowercase().contains("unreachable") => FaultKind::Unreachable,
+        InvalidInput | NotFound => FaultKind::Address,
+        _ => FaultKind::TimedOut,
+    };
+    LinkFault::new(kind, e.to_string())
 }
 
 /// Everything the bridge knows about playback, as one snapshot.
@@ -108,6 +208,21 @@ pub struct PlayerSnapshot {
     pub duration_s: Option<f64>,
     /// Derived from `playerState`: `Some(true)` when playing, `Some(false)`
     /// when paused, `None` when the player has never said.
+    ///
+    /// **Advisory only. Never gate output on this.** Against a real DeoVR,
+    /// `playerState` was observed to echo the last value a remote client set
+    /// rather than to report what the player is doing — it stayed at `1`
+    /// ("paused") through two minutes of playback at 1.0×. A pause performed
+    /// inside the headset does not reach this field at all. See `capture.rs`.
+    ///
+    /// The reliable signal is whether [`Self::position_s`] is advancing, and
+    /// that signal is inherently late: two consecutive packets are needed to
+    /// establish that position stopped, and DeoVR's observed cadence is
+    /// ~1010 ms, so a pause is undetectable for **1.0–2.0 s** — a floor, not
+    /// an estimate. Anything driving hardware from script position has that
+    /// window to account for. Position holds rather than climbs during it, so
+    /// output does not run away; but a script's decline to zero will not have
+    /// started either.
     pub playing: Option<bool>,
     pub speed: Option<f64>,
 
@@ -119,13 +234,33 @@ pub struct PlayerSnapshot {
     /// but it is the fastest way to tell "connected but silent" from
     /// "connected and streaming" when looking at a live page.
     pub packets: u64,
+
+    /// Why the last attempt failed, when it did. Cleared on a successful
+    /// connection so a stale explanation never sits under a working link.
+    pub fault: Option<LinkFault>,
+    /// Connection attempts since the user last asked to connect. Makes a
+    /// silent retry loop visible instead of leaving the UI looking frozen.
+    pub attempts: u32,
+
+    /// Set when the player reports itself paused while its position advances
+    /// in step with the wall clock.
+    ///
+    /// This is not a defensive nicety — it fired on the first real capture we
+    /// ever took. DeoVR sent `playerState: 1` (documented as *paused*) through
+    /// three seconds of position advancing at exactly 1.0×. Either the
+    /// documented mapping is wrong or something stranger is happening, and
+    /// three frames from one session are not enough to decide. Rather than
+    /// silently flipping a mapping that DeoVR's own docs and MultiFunPlayer
+    /// both corroborate, the contradiction is carried on the snapshot so the
+    /// next session settles it. See `capture.rs`.
+    pub state_suspect: bool,
 }
 
 impl PlayerSnapshot {
     pub fn new(endpoint: String) -> Self {
         Self {
             kind: "player",
-            link: LinkState::Disconnected,
+            link: LinkState::Idle,
             endpoint,
             media: None,
             position_s: None,
@@ -134,7 +269,15 @@ impl PlayerSnapshot {
             speed: None,
             updated_at_ms: 0,
             packets: 0,
+            fault: None,
+            attempts: 0,
+            state_suspect: false,
         }
+    }
+
+    /// Whether the player's own play/pause flag disagrees with its position.
+    pub fn state_is_suspect(&self) -> bool {
+        self.state_suspect
     }
 
     /// Merge a packet in. Absent fields leave the previous value alone.
@@ -156,6 +299,18 @@ impl PlayerSnapshot {
             self.duration_s = Some(d);
         }
         if let Some(t) = packet.current_time {
+            // Compare against the previous position before overwriting it: a
+            // "paused" player whose position tracks the wall clock is telling
+            // us something about the protocol, not about the video.
+            if let Some(previous) = self.position_s {
+                let elapsed = now_ms.saturating_sub(self.updated_at_ms) as f64 / 1000.0;
+                let moved = t - previous;
+                let tracks_wall_clock =
+                    elapsed > 0.2 && moved > 0.2 && (moved - elapsed).abs() < elapsed * 0.5;
+                if self.playing == Some(false) && tracks_wall_clock {
+                    self.state_suspect = true;
+                }
+            }
             self.position_s = Some(t);
         }
         if let Some(s) = packet.playback_speed {
@@ -167,8 +322,10 @@ impl PlayerSnapshot {
 
     /// Reset the playback facts on disconnect, keeping the endpoint. The
     /// phone must not keep acting on a position from a player that is gone.
+    ///
+    /// `link` is left for the caller to set: the supervisor knows whether this
+    /// is a retry or a deliberate disconnect, and this function does not.
     pub fn on_disconnect(&mut self, now_ms: u64) {
-        self.link = LinkState::Disconnected;
         self.media = None;
         self.position_s = None;
         self.duration_s = None;
@@ -176,6 +333,7 @@ impl PlayerSnapshot {
         self.speed = None;
         self.updated_at_ms = now_ms;
         self.packets = 0;
+        self.state_suspect = false;
     }
 }
 
@@ -269,7 +427,6 @@ mod tests {
             1,
         );
         snap.on_disconnect(5);
-        assert_eq!(snap.link, LinkState::Disconnected);
         assert_eq!(snap.position_s, None);
         assert_eq!(snap.playing, None);
         assert_eq!(snap.endpoint, "192.168.1.50:23554");
@@ -280,11 +437,48 @@ mod tests {
         let snap = PlayerSnapshot::new("h:23554".into());
         let v: serde_json::Value = serde_json::to_value(&snap).unwrap();
         assert_eq!(v["type"], "player");
-        assert_eq!(v["link"], "disconnected");
+        assert_eq!(v["link"], "idle");
         assert!(v.get("positionS").is_some());
         assert!(v.get("updatedAtMs").is_some());
         // Unknown position must be null, never 0.
         assert!(v["positionS"].is_null());
+    }
+
+    /// The distinction the Quest test depends on: a refusal and a timeout must
+    /// not read the same, because they call for different actions.
+    #[test]
+    fn a_refusal_is_explained_as_remote_control_being_off() {
+        let fault = classify_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ));
+        assert_eq!(fault.kind, FaultKind::Refused);
+        let hint = fault.hint.unwrap();
+        assert!(hint.contains("remote control"), "got: {hint}");
+    }
+
+    #[test]
+    fn a_timeout_is_explained_as_an_addressing_problem() {
+        let fault = classify_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ));
+        assert_eq!(fault.kind, FaultKind::TimedOut);
+        assert!(fault.hint.unwrap().contains("address"));
+    }
+
+    #[test]
+    fn faults_keep_the_underlying_error_verbatim() {
+        // If our explanation is wrong, the raw text is what reveals it.
+        let fault = classify_connect_error(&std::io::Error::other("something we did not model"));
+        assert_eq!(fault.detail, "something we did not model");
+    }
+
+    #[test]
+    fn a_fault_serialises_with_a_kebab_case_kind() {
+        let v = serde_json::to_value(LinkFault::new(FaultKind::TimedOut, "x")).unwrap();
+        assert_eq!(v["kind"], "timed-out");
+        assert_eq!(v["detail"], "x");
     }
 
     #[test]

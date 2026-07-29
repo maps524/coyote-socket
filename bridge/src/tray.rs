@@ -130,43 +130,9 @@ fn open_url(url: &str) {
     }
 }
 
-/// A 32×32 RGBA lightning bolt, generated rather than shipped as a file so the
-/// spike has no asset pipeline. Matches the app's bolt wordmark closely enough
-/// to be recognisable in a tray.
+/// The shared bolt, as `tray-icon` wants it. The pixels come from
+/// [`crate::icon`] so this tray and the Tauri app's tray are the same mark.
 fn bolt_icon() -> Icon {
-    const SIZE: u32 = 32;
-    // 16×16 bitmask, one u16 per row, MSB = leftmost pixel. Scaled ×2.
-    const BOLT: [u16; 16] = [
-        0b0000_0111_1100_0000,
-        0b0000_1111_1000_0000,
-        0b0001_1111_0000_0000,
-        0b0011_1110_0000_0000,
-        0b0111_1100_0000_0000,
-        0b1111_1111_1110_0000,
-        0b1111_1111_1110_0000,
-        0b0000_0011_1110_0000,
-        0b0000_0111_1100_0000,
-        0b0000_0111_1000_0000,
-        0b0000_1111_0000_0000,
-        0b0001_1110_0000_0000,
-        0b0011_1100_0000_0000,
-        0b0111_1000_0000_0000,
-        0b0111_0000_0000_0000,
-        0b1110_0000_0000_0000,
-    ];
-
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let bit = (BOLT[(y / 2) as usize] >> (15 - (x / 2))) & 1;
-            if bit == 1 {
-                // Amber, matching the app's accent.
-                rgba.extend_from_slice(&[0xFB, 0xBF, 0x24, 0xFF]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            }
-        }
-    }
-
-    Icon::from_rgba(rgba, SIZE, SIZE).expect("bolt icon buffer is 32x32 RGBA by construction")
+    Icon::from_rgba(crate::icon::bolt_rgba(), crate::icon::SIZE, crate::icon::SIZE)
+        .expect("bolt icon buffer is 32x32 RGBA by construction")
 }

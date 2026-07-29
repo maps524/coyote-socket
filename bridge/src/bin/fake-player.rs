@@ -91,7 +91,9 @@ async fn main() {
         cfg.enforce_timeout
     );
 
-    serve(listener, cfg).await;
+    // Everything the fake sees is already logged; the wire tap exists for the
+    // desktop app's live view, which this binary does not have.
+    serve(listener, cfg, coyote_bridge::wire::Tap::disabled()).await;
 }
 
 fn fail(message: &str) -> ! {

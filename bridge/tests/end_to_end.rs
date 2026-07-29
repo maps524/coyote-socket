@@ -14,6 +14,7 @@ use std::time::Duration;
 use coyote_bridge::fake_player::{serve_client, FakePlayerConfig};
 use coyote_bridge::http;
 use coyote_bridge::state::{LinkState, PlayerCommand, PlayerSnapshot};
+use coyote_bridge::wire::Tap;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
@@ -41,7 +42,7 @@ async fn spawn_fake_player(
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
-            let reason = serve_client(stream, &cfg).await;
+            let reason = serve_client(stream, &cfg, &Tap::disabled()).await;
             eprintln!("[test] fake player finished with a client: {reason}");
         }
         // Dropping the listener here is deliberate: the reconnect test needs
@@ -55,8 +56,10 @@ fn spawn_bridge_client(
     endpoint: String,
 ) -> (watch::Receiver<PlayerSnapshot>, mpsc::Sender<PlayerCommand>) {
     let (snapshot_tx, snapshot_rx) = watch::channel(PlayerSnapshot::new(endpoint.clone()));
-    let (cmd_tx, cmd_rx) = mpsc::channel(16);
-    tokio::spawn(coyote_bridge::player::run(endpoint, snapshot_tx, cmd_rx));
+    let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        coyote_bridge::player::run(endpoint, &snapshot_tx, &mut cmd_rx, Tap::disabled()).await
+    });
     (snapshot_rx, cmd_tx)
 }
 
@@ -183,10 +186,10 @@ async fn bridge_reconnects_after_the_player_goes_away() {
                 // abruptly - the "headset went to sleep" case.
                 let cfg = cfg.clone();
                 let _ =
-                    tokio::time::timeout(Duration::from_millis(400), serve_client(stream, &cfg))
+                    tokio::time::timeout(Duration::from_millis(400), serve_client(stream, &cfg, &Tap::disabled()))
                         .await;
             } else {
-                serve_client(stream, &cfg).await;
+                serve_client(stream, &cfg, &Tap::disabled()).await;
             }
         }
     });
@@ -392,6 +395,52 @@ async fn traversal_outside_the_static_root_is_refused() {
     assert_eq!(status, 403, "traversal must be refused, not served");
 
     let _ = tokio::fs::remove_dir_all(&dir).await;
+}
+
+/// The client against **recorded traffic from a real DeoVR on a Quest**.
+///
+/// Every other test in this file runs the client against a fake written from
+/// the same reading of the same documents as the client itself, so a shared
+/// misreading passes them all. This one does not have that problem: the bytes
+/// came off a real headset. It is the only test here whose failure would mean
+/// "we broke compatibility with a real player" rather than "we broke
+/// compatibility with our own assumptions".
+///
+/// Scope, precisely: one player, one version, one platform, three frames of
+/// steady-state playback. See `capture.rs`.
+#[tokio::test]
+async fn client_reads_recorded_traffic_from_a_real_deovr() {
+    let (addr, _player) = spawn_fake_player(FakePlayerConfig::replay_deovr(), 1).await;
+    let (mut rx, _cmd) = spawn_bridge_client(addr);
+
+    let snap = wait_for(&mut rx, "the recorded session to be read", |s| {
+        s.link == LinkState::Connected && s.packets >= 2
+    })
+    .await;
+
+    // Values taken from the capture, not from anything we invented.
+    assert_eq!(snap.duration_s, Some(7693.12));
+    assert!(
+        snap.media.as_deref().unwrap_or_default().starts_with("http://"),
+        "a real DeoVR reports a URL, not a filesystem path: {:?}",
+        snap.media
+    );
+    assert!(snap.position_s.unwrap() >= 32.0);
+    assert_eq!(snap.speed, Some(1.0));
+
+    // The unresolved contradiction, asserted rather than glossed: the real
+    // player called itself paused while its position tracked the wall clock.
+    // If this ever stops holding, the capture or the mapping has changed and
+    // somebody should find out which.
+    let advanced = wait_for(&mut rx, "position to advance", |s| {
+        s.position_s.unwrap_or(0.0) > 33.0
+    })
+    .await;
+    assert_eq!(advanced.playing, Some(false));
+    assert!(
+        advanced.state_is_suspect(),
+        "a 'paused' player advancing at 1.0x must be flagged, not accepted"
+    );
 }
 
 async fn next_text<S>(ws: &mut S) -> String

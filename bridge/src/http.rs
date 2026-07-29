@@ -46,6 +46,23 @@ pub struct Ctx {
     pub pairing_url: String,
 }
 
+/// Best-guess LAN address, for the URL we hand the phone.
+///
+/// Uses the connected-UDP-socket trick: connecting a UDP socket sends no
+/// packets, but it makes the OS pick a source address via its routing table —
+/// which is exactly "the interface I would reach the network on". Avoids a
+/// dependency and avoids the classic bug of picking the first interface, which
+/// on a dev machine is usually a virtual adapter.
+///
+/// Lives here rather than in a binary because both front ends need the same
+/// answer: the QR the tray shows and the QR the window shows must agree.
+pub fn local_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // Any routable address works; nothing is sent to it.
+    socket.connect("192.0.2.1:9").ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
+}
+
 pub async fn run(listener: TcpListener, ctx: Arc<Ctx>) {
     loop {
         match listener.accept().await {
