@@ -61,19 +61,24 @@ pub mod certs;
 pub mod clients;
 pub mod codec;
 pub mod devices;
+pub mod dlna;
 pub mod fake_player;
 pub mod http;
+pub mod httpc;
 pub mod icon;
 pub mod install;
 pub mod library;
 pub mod logging;
 pub mod mdns;
+pub mod mediaproxy;
 pub mod player;
 pub mod probe;
 pub mod qr;
+pub mod ssdp;
 pub mod state;
 pub mod supervisor;
 pub mod tls;
+pub mod upnp;
 pub mod wire;
 
 #[cfg(feature = "tray")]

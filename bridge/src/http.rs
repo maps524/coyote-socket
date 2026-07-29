@@ -63,6 +63,7 @@ use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
 
 use crate::auth::{self, Token};
 use crate::clients::{self, ClientRegistry};
+use crate::dlna::{self, Dlna};
 use crate::library::{self, Library};
 use crate::state::{PlayerCommand, PlayerSnapshot};
 use crate::{log_debug, log_info, log_warn, qr};
@@ -79,6 +80,13 @@ pub struct Ctx {
     /// have not pointed me at a folder" rather than showing a failure. See
     /// [`crate::library`].
     pub library: Option<Arc<Library>>,
+    /// DLNA browsing and the media proxy, if enabled.
+    ///
+    /// `None` disables `/dlna/…` entirely rather than serving an empty
+    /// listing, because a bridge with DLNA switched off has not "found no
+    /// servers" — it did not look, and those are different answers. See
+    /// [`crate::dlna`].
+    pub dlna: Option<Arc<Dlna>>,
     /// The URL to show on the pairing page — the LAN one, not `localhost` —
     /// **without** the token.
     ///
@@ -399,6 +407,12 @@ where
 
     let origin = header_value(&head, "origin").map(|o| o.to_string());
     let cookie = header_value(&head, "cookie").map(|c| c.to_string());
+    // The media proxy needs `Range` and `If-Range`, which live in the head —
+    // and the head is about to be moved into `Prefixed`. Copied rather than
+    // borrowed: bounded by `MAX_HEAD_BYTES`, one allocation per request, and
+    // the alternative is threading a lifetime through a routing function that
+    // three other branches are editing.
+    let head_copy = head.clone();
     let mut stream = Prefixed::new(head, stream);
 
     if method != "GET" && method != "HEAD" {
@@ -419,6 +433,8 @@ where
         cookie.as_deref(),
         secure,
         &ctx,
+        &method,
+        &head_copy,
     )
     .await;
 }
@@ -499,6 +515,7 @@ fn authorised(path_and_query: &str, origin: Option<&str>, cookie: Option<&str>, 
     auth::token_from_query(path_and_query).is_some_and(|t| ctx.token().matches(t))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn route<W>(
     stream: &mut W,
     path: &str,
@@ -506,6 +523,8 @@ async fn route<W>(
     cookie: Option<&str>,
     secure: bool,
     ctx: &Ctx,
+    method: &str,
+    request_head: &[u8],
 ) where
     W: AsyncWrite + Unpin,
 {
@@ -725,6 +744,27 @@ async fn route<W>(
             )
             .await
         }
+        // Gated, on the same reasoning as `/healthz`: the listing names
+        // everything on a media server the user owns, and the media arm streams
+        // its contents.
+        //
+        // Cookie-aware like every other gated route since the device pairing
+        // landed: a phone that paired holds a cookie and no token, so checking
+        // only the token here would refuse exactly the clients that completed
+        // the flow.
+        p if p.starts_with("/dlna/") => {
+            if !authorised(full, origin, cookie, ctx) {
+                respond(
+                    stream,
+                    Status::UNAUTHORIZED,
+                    "text/plain; charset=utf-8",
+                    b"unauthorized",
+                )
+                .await
+            } else {
+                serve_dlna(stream, p, full, method, request_head, ctx).await
+            }
+        }
         "/qr.svg" => match qr::to_svg(&ctx.pairing_url()) {
             Ok(svg) => {
                 respond(
@@ -893,6 +933,105 @@ async fn route<W>(
 
     if let Err(e) = result {
         log_debug!("[http] response write failed: {e}");
+    }
+}
+
+/// DLNA browsing and the media proxy.
+///
+/// All of the logic is in [`crate::dlna`] and [`crate::mediaproxy`] — this is
+/// the transport, kept deliberately small so the feature is one arm in
+/// [`route`] and one function here, and does not compete for space in a file
+/// that TLS and library work are also editing.
+///
+/// The media arm does **not** go through [`respond`]. That function writes a
+/// whole body from a `&[u8]`, which for a 40 GB video is not a slow response
+/// but a dead process — and it would have passed every test done on a short
+/// clip.
+/// Map [`crate::dlna`]'s numeric status onto this module's table.
+///
+/// `dlna` deals in numbers because it does not import this module's private
+/// `Status`, and the alternative — exporting it — would put a routing type in
+/// a protocol module's signature. The arms are exhaustive over what
+/// `dlna::handle` actually returns; anything unexpected becomes a 500 rather
+/// than a silent 200, because an unmapped status is our bug and should read as
+/// one.
+fn dlna_status(code: u16) -> Status {
+    match code {
+        400 => Status::BAD_REQUEST,
+        401 => Status::UNAUTHORIZED,
+        404 => Status::NOT_FOUND,
+        502 => Status::BAD_GATEWAY,
+        _ => Status::INTERNAL_ERROR,
+    }
+}
+
+async fn serve_dlna<W>(
+    stream: &mut W,
+    path: &str,
+    path_and_query: &str,
+    method: &str,
+    request_head: &[u8],
+    ctx: &Ctx,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(dlna) = ctx.dlna.as_deref() else {
+        // Not "no servers found". DLNA is switched off, and saying so is the
+        // difference between a setting to change and a network to debug.
+        return respond(
+            stream,
+            Status::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            b"DLNA browsing is not enabled on this bridge",
+        )
+        .await;
+    };
+    let Some(rest) = path.strip_prefix("/dlna/") else {
+        return respond(stream, Status::NOT_FOUND, "text/plain; charset=utf-8", b"not found")
+            .await;
+    };
+    let query = path_and_query.split_once('?').map(|(_, q)| q).unwrap_or("");
+
+    match dlna::handle(dlna, rest, query).await {
+        dlna::Action::Json(body) => {
+            respond(stream, Status::OK, "application/json; charset=utf-8", &body).await
+        }
+        dlna::Action::Error(status, message) => {
+            respond(
+                stream,
+                dlna_status(status),
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            )
+            .await
+        }
+        dlna::Action::Stream {
+            upstream,
+            title,
+            advertised_size,
+            mime,
+        } => {
+            let range = header_value(request_head, "range");
+            let if_range = header_value(request_head, "if-range");
+            log_info!(
+                "[media] {method} {title:?} range={}",
+                range.unwrap_or("(whole file)")
+            );
+            let outcome =
+                crate::mediaproxy::proxy(
+                    stream,
+                    method,
+                    &upstream,
+                    range,
+                    if_range,
+                    advertised_size,
+                    &mime,
+                )
+                .await;
+            log_debug!("[media] {title:?} finished: {outcome:?}");
+            Ok(())
+        }
     }
 }
 
@@ -1131,6 +1270,10 @@ impl Status {
     pub(crate) const PAYLOAD_TOO_LARGE: Self = Self::new(413, "Payload Too Large");
     pub(crate) const HEADERS_TOO_LARGE: Self = Self::new(431, "Request Header Fields Too Large");
     pub(crate) const INTERNAL_ERROR: Self = Self::new(500, "Internal Server Error");
+    /// The upstream failed, not us. Distinct from 500 deliberately: the DLNA
+    /// media server is a component this bridge does not own, and answering 500
+    /// would put the blame on the one part of the path that worked.
+    pub(crate) const BAD_GATEWAY: Self = Self::new(502, "Bad Gateway");
 }
 
 /// Send the phone on to the app, optionally setting a cookie on the way.
@@ -1966,14 +2109,28 @@ mod tests {
         }));
 
         let mut out = Vec::new();
-        route(&mut out, "/", None, None, false, &ctx).await;
+        route(&mut out, "/", None, None, false, &ctx, "GET", b"GET / HTTP/1.1
+
+").await;
         let response = String::from_utf8_lossy(&out);
         assert!(response.starts_with("HTTP/1.1 303"), "got: {response}");
         assert!(response.contains("Location: /install"));
 
         // Over TLS the root is the app, and must stay so.
         let mut secure_out = Vec::new();
-        route(&mut secure_out, "/", None, None, true, &ctx).await;
+        route(
+            &mut secure_out,
+            "/",
+            None,
+            None,
+            true,
+            &ctx,
+            "GET",
+            b"GET / HTTP/1.1
+
+",
+        )
+        .await;
         let secure = String::from_utf8_lossy(&secure_out);
         assert!(
             !secure.contains("Location: /install"),
@@ -1989,6 +2146,7 @@ mod tests {
             cmd_tx,
             static_dir: None,
             library: None,
+            dlna: None,
             pairing_base: "http://192.168.0.9:8787".into(),
             token: std::sync::RwLock::new(Token::generate()),
             allowed_hosts: vec!["192.168.0.9:8787".into()],

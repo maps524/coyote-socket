@@ -293,6 +293,7 @@ Then:
 - `http://127.0.0.1:8787/library/index.json` — the funscript listing
 - `wss://coyote.local:8443/ws` — the state relay (a page served over HTTPS
   cannot open a `ws://` socket, so this is the address the app actually uses)
+- `http://127.0.0.1:8787/dlna/index.json` — media servers on the network
 - Tray icon — left-click opens the pairing page
 
 `--help` on either binary lists the rest.
@@ -416,6 +417,315 @@ domain, so the install page says so rather than burying it, names the
 certificate so it can be found months later, and documents removal.
 
 Deleting `<config>/tls/` means every phone has to install a new certificate.
+
+## DLNA browsing and the media proxy
+
+The phone cannot discover anything on the network — SSDP needs UDP multicast
+and JavaScript has no UDP primitive, permanently. And it cannot play from a
+media server directly either: the app is on HTTPS because Web Bluetooth
+requires a secure context, and an HTTPS page cannot load an `http://` video.
+
+Both problems land on the bridge. Three endpoints, token-gated exactly like
+`/healthz`, sharing `/library`'s JSON envelope:
+
+```text
+GET /dlna/index.json[?refresh=1]                    media servers, and why the list is what it is
+GET /dlna/browse.json?server=<udn>&object=<id>      one directory level
+GET /dlna/media/<ref>                               the bytes, range-correct
+```
+
+### What is proven and what is not
+
+| Part | Status |
+|---|---|
+| Range handling — `206`, `Content-Range`, `If-Range`, `bytes=N-`, suffix, `416`, `HEAD` | **Tested against a real socket** through the real router and proxy, in `tests/dlna_media.rs`. |
+| Streaming rather than buffering | **Tested** — the response head must arrive before the upstream body is complete. |
+| Compensating for a server that ignores `Range` | **Tested** against a fake server that does exactly that. |
+| Refusing a `<res>` on another host | **Tested.** |
+| DIDL and device-description parsing | **Tested** against captured-shape documents, including truncated and malformed input. |
+| SSDP `M-SEARCH` against a real network | **Run, once, by hand.** Found `MPVR-UMS` (UMS 15.7.0, Linux) at `192.168.0.4:5001` in 2.5 s: 3 searches sent from `192.168.0.9`, 3 replies. No test multicasts. |
+| Browsing a real Universal Media Server | **Run by hand.** Root, then a 48-entry `videos` folder, with real `dc:title`, `duration`, `resolution` and `size`. |
+| Range requests against a real UMS | **Run by hand**, and byte-for-byte verified — see below. |
+| Playing and **scrubbing** in a browser | **Run, in Chrome (Blink), against the real UMS.** See below. |
+| The picker, end to end through the UI | **Run**, at phone width, against the real UMS. See below. |
+| The whole surface over **TLS** | **Run**, against the merged TLS listener and the real UMS. See below. |
+| Safari, Bluefy, or any phone | **Never tried.** The `<res>` ranking is built on what WebKit is documented to decode, not on what it did decode — see `browser_playable` in `upnp.rs` for the sources and the one version floor it assumes. |
+| HereSphere, on-device media | Out of scope here, and unobserved as ever. |
+
+Scope that precisely: the transport is exercised, one real media server has been
+browsed and streamed from, and one browser engine has played and seeked through
+the proxy. The phone — which is the actual target — remains untried.
+
+### `<res>` selection is not "take the first one"
+
+A server advertises the same item several times — the original, a transcode,
+sometimes a stream over a protocol a browser cannot open at all. Taking the
+first gives a video element that loads and shows nothing, which is a silent
+failure that gets blamed on the file. `upnp::choose_res` ranks by byte-range
+support (`DLNA.ORG_OP`'s **second** digit), then original over transcode, then
+container; and it carries the ones it rejected, with reasons, into
+`/dlna/browse.json`. When something will not play, what else was on offer is
+one field away rather than a packet capture away.
+
+`seekable: false` in a listing means the *server* said it does not honour byte
+ranges. Scrubbing will not work and the proxy is not the reason.
+
+### Verified against a real media server
+
+UMS 15.7.0, a 2,097,190,731-byte video, bridge and server on **different**
+machines. 64 KiB fetched through the proxy and straight from UMS, at four
+offsets including the last block: **byte-identical every time.**
+
+```text
+bytes=0-65535                    IDENTICAL
+bytes=1000000000-1000065535      IDENTICAL
+bytes=2000000000-2000065535      IDENTICAL
+bytes=2097125195-2097190730      IDENTICAL   (the final block)
+```
+
+An open-ended seek 2 GB in answered `206 … Content-Range: bytes
+2000000000-2097190730/2097190731` with **15 ms** to first byte.
+
+### It plays, and it scrubs
+
+The acceptance condition, met by a real browser media stack rather than by
+`curl`. `fixtures/proxy-probe.html` loads a proxied video, plays it, seeks, and
+reports what the `<video>` element actually did — including reading a frame back
+through a canvas, so "seeked" means a decoded picture and not merely a
+`currentTime` that changed.
+
+Chrome (headless, Blink), against the 2,023-second, 2 GB video on the real UMS:
+
+```text
+METADATA duration=2023.304 size=1920x1080
+PLAYING
+ADVANCED to=0.463
+SEEKING to=1900
+SEEKED to=1900.000 readyState=4
+AFTER-SEEK-PLAYBACK from=1900.000 now=1902.460 advanced=2.460 readyState=4
+FRAME-DECODED nonblack=true luma-sum=313046
+```
+
+The bridge's own log for the same run shows the media stack's three requests,
+which is what a seek looks like from this side:
+
+```text
+[media] GET "brainmelter-Gooner-Odyssey" range=bytes=0-
+[media] GET "brainmelter-Gooner-Odyssey" range=bytes=5799936-
+[media] GET "brainmelter-Gooner-Odyssey" range=bytes=1973354496-
+```
+
+### The picker, end to end
+
+Not just the proxy: the app's own UI, driven through the DOM at 430x932, against
+the real server. Open the picker, walk into a folder, pick a video, and let the
+app's `<video>` load it.
+
+```text
+picker open on MPVR-UMS
+in MPVR-UMS › videos                      46 items
+  BluebubblesPMV-Riley-Reid-vol-5   0:07:14.600 · 1920x1080 · 561 MB
+  Bouncy Bitches                    0:02:12.285 · 1920x1080 ·  74 MB
+  brainmelter-Gooner-Odyssey        0:33:43.304 · 1920x1080 · 2.0 GB
+picked BluebubblesPMV-Riley-Reid-vol-5 -> /dlna/media/4e402722b8a4e128
+metadata 434.6 s, 1920x1080     scrub bar max 434.6
+played to 1.149, seeked to 347.000, still advancing at 348.957
+frame decoded, non-black
+```
+
+The bridge logged `bytes=0-`, `bytes=3997696-` and `bytes=466583552-` for that
+run — the third being the seek.
+
+The app reported *"No script matches this video's name"*, which is the matching
+path running against the filename rather than the title, as intended.
+
+Every one of those 46 items was playable, so that run rendered none of the
+warnings — see `FOLLOW-UPS.md` §0c for why a fully successful run is a weak
+result for the failure paths, and what was done about it.
+
+### And against a server built to misbehave
+
+`FOLLOW-UPS.md` §0c, acted on rather than only recorded. A fixture offering one
+item in a container WebKit will not decode, and one whose `protocolInfo` says
+outright it does not honour byte ranges. Both are covered by
+`tests/dlna_media.rs`, and both were then rendered in the real picker for the
+first time:
+
+```text
+An Old Matroska Rip            [disabled]
+  no playable resource for "An Old Matroska Rip". Offered: video/x-matroska (http-get)
+Streamed Without Seeking       0:01:23.000 · 1920x1080 · 9.8 KB
+  The media server does not offer byte ranges for this file, so seeking will not
+  work. It will play from the start.
+A Perfectly Ordinary File      0:01:23.000 · 1920x1080 · 9.8 KB
+```
+
+The unseekable item is still served and still plays; only its scrub bar is a
+lie, and the notice says whose fault that is. Refusing to serve it on the
+strength of its own advertisement would be worse.
+
+The same exercise found a real defect in `--dlna-server`, which had only ever
+been run on its success path: **a pinned server that could not be described
+vanished.** It was logged once at startup and then absent from
+`/dlna/index.json` entirely — not in `servers`, not in `unreadable`, never
+retried. On a headless service, where the startup log is the one thing nobody
+reads, that is the whole failure. Fixed, and both failure modes now report
+themselves on every fetch:
+
+```text
+unreadable: http://127.0.0.1:1/nothing
+  -> could not fetch the device description … the target machine actively refused it
+unreadable: http://127.0.0.1:5099/media.mp4
+  -> is a device description with no …ContentDirectory:1 service
+```
+
+
+Reproduce it by serving the page from the bridge and opening it:
+
+```bash
+cargo run --bin coyote-bridge -- --http-port 8799 --token <hex> --static-dir <dir-containing-proxy-probe.html>
+# then, with a mediaUrl taken from /dlna/browse.json:
+#   http://127.0.0.1:8799/probe.html?t=<hex>&media=<url-encoded mediaUrl>&seek=1900
+```
+
+The page reports its result by navigating to `/probe-result/<encoded>`, because
+the access log redacts query strings — that is where the token lives — and keeps
+paths. Headless Chrome's `--dump-dom` is no use here: `--virtual-time-budget`
+does not advance media loading, so the dump lands before the video has done
+anything.
+
+### Over TLS, which is how the phone will actually reach it
+
+Until the TLS branch merged, "`serve_conn` is generic over the transport, so
+these routes are served over TLS unchanged" was **a reading of the code** — a
+claim of capability nobody had exercised, which is the shape §0 is about, and
+being in prose rather than in a type does not make it less of one. The merge
+made it testable, so it was tested.
+
+The media proxy is the one route that matters here: it writes its own response
+head and never goes through `respond`, so it is the only route that never saw
+whatever TLS changed there. No conflict would have fired and every test would
+still have passed.
+
+Against `https://127.0.0.1:8453` and the real UMS:
+
+```text
+HEAD                       200, Content-Length 2097190731, Accept-Ranges: bytes
+bytes=2000000000-          206, Content-Range: bytes 2000000000-2097190730/2097190731
+                           42 ms to first byte, 97,190,731 bytes
+bytes=99999999999-         416
+```
+
+64 KiB through the TLS proxy against the same range straight from UMS, at three
+offsets including the final block: **byte-identical every time.** So a
+multi-gigabyte body through a TLS writer — different backpressure, partial
+writes and record boundaries from the small buffered path — moves the same
+bytes.
+
+And a real browser over `https://`, seeking 1,900 seconds into the 2 GB file:
+
+```text
+METADATA duration=2023.304 size=1920x1080
+PLAYING -> SEEKING to=1900 -> SEEKED to=1900.000 readyState=4
+AFTER-SEEK-PLAYBACK advanced=2.472
+FRAME-DECODED nonblack=true
+```
+
+**What this does not show.** Chrome was run with `--ignore-certificate-errors`,
+because trusting a local CA into the machine's store to run a test is a change
+that outlives the test. So this verifies the **transport** path — a range
+request survives a TLS writer — and says nothing about whether a phone trusts
+the certificate. That is a separate fact with a separate source: Justin
+installed the CA on his iPhone and Bluefy honoured it. Two facts, two sources;
+neither stands in for the other.
+
+### The cost of being in the playback path
+
+**The mechanism is certain; the arithmetic below it was not, and has been
+withdrawn.**
+
+When the bridge and the media server are on different machines the bytes cross
+the network twice — server to bridge, bridge to phone. That is structural, and
+if both hops share one Wi-Fi radio the throughput available to the stream is
+roughly halved. On a wired or decent wireless link this is not the constraint;
+on a congested 2.4 GHz network it is the difference between playing and
+stalling.
+
+An earlier version of this section published **107 MB/s direct against 55 MB/s
+proxied** and called it "almost exactly half". That figure is retracted, for two
+reasons:
+
+- **It cannot be re-run.** It was an ad-hoc `curl` measurement against the
+  user's own server. There is no harness in this tree that reproduces it, so it
+  is a number nobody can check — which is the thing `measure_the_loopback_proxy_cost`
+  exists to avoid.
+- **Its baseline has the same flaw the loopback measurement documents.** The
+  "direct" side was a single-socket read in lockstep with the origin's writes,
+  which the loopback figures show is *slower* than reading from a proxy that has
+  buffered ahead. So 107 MB/s is a floor on direct throughput, not a measurement
+  of it, and a ratio taken against a floor is not a ratio.
+
+The agreement between "almost exactly half" and the arithmetic was what made it
+convincing, and it is exactly why it should not have been published: a number
+that confirms the expected answer gets less scrutiny, not more.
+
+What survives is the mechanism, and the observation that the proxy moved 200 MB
+across two hops without difficulty. If the real figure matters to someone, the
+honest way to get it is a harness that measures both sides the same way.
+
+**Co-location removes the second hop entirely** — that is the deployment this
+was designed for. It cannot be measured against the real server, because the
+machine to measure it on is the one running UMS. What *can* be measured is the
+proxy's own contribution with both hops on loopback, which bounds it:
+`measure_the_loopback_proxy_cost` in `tests/dlna_media.rs`, 512 MB, three
+alternating rounds after a warm-up.
+
+```text
+direct from the origin  :    190 MB/s median   (190, 244, 171)
+through the proxy       :    385 MB/s median   (446, 343, 385)
+```
+
+**Do not read a ratio into that.** The proxy is consistently *faster* than the
+"direct" read, which means the direct figure is not a baseline: reading one
+socket in lockstep with the origin's writes is slower than reading from a proxy
+that has already buffered ahead. The bottleneck is the test's own reader. The
+one claim it supports is the one that matters — a 25 Mb/s VR stream is about
+3 MB/s, and both figures are two orders of magnitude above it, so on loopback
+the proxy is not the constraint.
+
+It is an `#[ignore]`d test rather than an assertion, because a throughput number
+depends on the machine. Run it and read the output rather than trusting this
+paragraph:
+
+```bash
+cargo test --release --test dlna_media -- --ignored --nocapture measure_the_loopback
+```
+
+There is no way to avoid any of this while the page is on HTTPS, which it must
+be for Web Bluetooth.
+
+### When discovery finds nothing
+
+An empty list is three different situations and they are reported as three
+different messages, because "no media servers found" otherwise reads as a
+statement about the network when the search may never have left the machine:
+
+- **Nothing answered at all** — including devices that are not media servers.
+  That points at the search not reaching the network. On a Windows box the
+  usual cause is the datagram leaving via a WSL or Hyper-V adapter.
+- **Things answered, none was a media server** — the search works. If UMS is
+  running, check its **IP allowlist** includes this host; that is a component
+  we do not own and it fails silently.
+- **A server answered but could not be described** — reported separately, with
+  the HTTP status, because it is not an empty network.
+
+`/dlna/index.json` carries the evidence for whichever it is: where the search
+was sent from, how many went out, and how many replies of any kind came back.
+
+**`--dlna-server http://192.168.0.4:5001/description/fetch`** pins a server by
+address and skips discovery entirely, for a network where multicast cannot
+work. Repeatable. A bad address is reported at startup rather than as an empty
+library later.
 
 ### Against a real Quest
 

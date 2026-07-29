@@ -1,10 +1,30 @@
 # Bridge follow-ups
 
-Sections **0**, **0a** and **0b** are not tasks. They are three defect signatures
-this work produced repeatedly, written as recognition rules because each has
-already caught its next instance. Read them before adding a field that records
-whether something worked, a check that guards one, or an error message about a
-component you do not own.
+Sections **0** through **0e** are not tasks. They are defect signatures this
+work produced repeatedly, written as recognition rules because each has already
+caught its next instance.
+
+**They are siblings, not a sequence.** The table is an index, not an order, and
+none of the questions substitutes for another — a green answer to one says
+nothing about the rest.
+
+| | The shape | The question to ask |
+|---|---|---|
+| **0** | A field promising a capability nobody confirmed | What does this mean when nobody set it? |
+| **0a** | A check whose success path is reached without the check happening | What would have to be true for this to run, and is that what it measured? |
+| **0b** | A diagnostic naming the wrong subsystem | Could the component printing this have caused it? |
+| **0c** | Verification concentrating where the system succeeds | Which paths did success prevent me from exercising? |
+| **0d** | A defence that admits whatever does not resemble its threat | What did I name the threat as? |
+| **0e** | A correct behaviour at a frequency nobody decided | This is correct once — what is it a thousand times a second? |
+
+The wording in each row is the section's own. A summary that paraphrases the
+thing it summarises is §0d in miniature: the table exists so people do not read
+the sections, so a row that drifts is a defence with the wrong threat named.
+
+Read them before adding a field that records whether something worked, a check
+that guards one, or an error message about a component you do not own; before
+reporting that a change was verified against real hardware; and before writing
+an allowlist or a retry.
 
 Sections **1** onward are work identified and deliberately not done.
 
@@ -312,6 +332,104 @@ said the feature was broken. It was the test that was wrong.
 The counter-question matches the one above: not *"does this line exist?"* or
 *"did this test pass?"* but **"what would have to be true for this to run, and
 is that what it measured?"**
+### The edit that silently did nothing — and the wrong story told about it
+
+A `stale()` doc comment went on describing a write-based liveness check that
+ping/pong had replaced. The *code* was correct and the *body copy* the user
+reads was correct; only the comment was stale, so nothing failed and nothing
+looked wrong.
+
+**The first diagnosis was that a rebase had dropped the hunk**, and it was
+written up here as one — a third merge failure mode, complete with a table. It
+was wrong. `git range-diff` against the pre-rebase range paired all six commits
+and showed no such loss, and the pre-rebase commit itself turned out never to
+have contained the new text at all.
+
+The actual cause: a scripted `str.replace(old, new)` whose `old` did not match.
+Python returns the string unchanged and the script reports success. The edit
+never happened, the commit was made, `svelte-check` passed — because a comment
+is not type-checked — and the adjacent replacement in the same script *did*
+match, so the change looked half-applied rather than absent.
+
+> **A search-and-replace that matches nothing succeeds.** `str.replace`,
+> `sed`, and every editor scripted the same way report no error for a pattern
+> that was never found. A script that makes five replacements and lands four is
+> indistinguishable, from its exit code, from one that lands five.
+
+This is the same defect signature as the rest of section 0a, in the tooling
+rather than in the product: **a success path taken for input the code could
+already tell was wrong.** The fix is the same shape too — make the guard match
+the condition. Assert the match count, or use a tool that fails on a missing
+pattern.
+
+And the misdiagnosis is section 0b: a failure attributed to the component
+nearest the symptom rather than to its cause. It was written into this document,
+in the section warning against exactly that, and stood for one commit.
+
+### Two checks, and what each is actually good for
+
+Both were run on this week's three-branch sequence. Neither result was known
+until someone looked, and "the tests pass" had already been offered for both.
+
+**`git range-diff <old-base>..<old-tip> <new-base>..<new-tip>`** compares a
+rebase against its original. `--no-patch` gives one line per commit — `=`
+unchanged, `!` altered, `<`/`>` on one side only — and the full form shows the
+diff of the diffs, in which a genuinely lost hunk is a `+` line the old commit's
+patch had and the new one does not. It needs both ranges to still be reachable,
+and it pairs *commits*, so it covers rebases and cherry-picks and does nothing
+for a squash or a true merge.
+
+**Grepping the tree for phrases you know you wrote** finds a missing sentence
+whatever caused it to be missing — a lost hunk, a no-op edit, or a change never
+made. It can only find what you remember writing, which makes it strongest just
+after your own work and weakest on someone else's.
+
+The division is sharper than "use both", and it is why the wrong story survived
+as long as it did:
+
+| | Finds | Blind to |
+|---|---|---|
+| Read the diff | wrong resolutions | absences |
+| Grep for remembered phrases | that something is missing | *why* it is missing |
+| `git range-diff` | whether a rebase dropped it | squashes, merges, a discarded pre-rebase ref |
+
+Grep found the symptom here and was read as identifying the cause. It cannot:
+an absent sentence looks identical whether a merge ate it or the edit never
+ran. **Establishing that a merge lost something needs the comparison, not the
+search** — and running it is what turned a plausible story into a false one.
+
+### A fourth mode, which none of the three catches
+
+Attributed to scarlet, who found it by noticing an unfamiliar SHA in an agent's
+final report rather than by any of the checks above.
+
+PR #12 was merged at `9924843`; the agent pushed another commit afterwards.
+**Nothing was lost in a rebase and no resolution was wrong — the commit was
+never in the merge at all.** Every method above misses it, and for a different
+reason each time: `range-diff` pairs commits within two ranges and a squash
+merge produces neither range; grep fails because you do not remember writing
+lines you did not write; and reading the diff shows a correct diff of the wrong
+tip.
+
+> **A merge is a snapshot of a moving branch, and "ready to merge" is a claim
+> about a moment.**
+
+The check is one line, and not running it is how this happened three times:
+**after merging, compare the branch tip against the `headRefOid` you actually
+merged.** If they differ, someone pushed while you were merging.
+
+| | Finds | Blind to |
+|---|---|---|
+| Compare tip to merged `headRefOid` | commits that were never in the merge | anything inside the merge |
+
+### What all four have in common
+
+**The correct action is to go looking for something that is not there.**
+
+Every one of these is invisible to the checks that ask whether what is present
+is right. A clean diff, a green build and a passing suite are all statements
+about the code that arrived; none of them is a statement about the code that
+did not.
 
 ---
 
@@ -363,6 +481,262 @@ was found by accident.
 For any error message: **could the component printing this have caused it?**
 If not, it is relaying someone else's failure, and the reader will act on where
 it appeared rather than where it came from.
+
+---
+
+## 0c. Success hides the failure paths
+
+A third signature, and the recognition rule is different again. Section 0 is
+about **a field lying about state**. Section 0b is about **the diagnostic
+pointing at the wrong subsystem**. The one on the clients branch is about **a
+check whose success path is reached without the check running**. This one is
+about **where the testing went**, and it is the only one of the four that is
+produced by things going *well*.
+
+> **Verification concentrates where the system succeeds. So the failure paths
+> end up the least-exercised code in a change precisely because everything
+> worked — and they are what a user on a different setup meets first.**
+
+### The instance
+
+The DLNA work was verified against the user's real Universal Media Server. The
+whole journey ran: discovery, browsing, a 48-entry folder, the picker at phone
+width, a video picked, played, seeked 1,900 seconds into a 2 GB file, and a
+decoded non-black frame afterwards. Byte-identical ranges at four offsets.
+Everything worked.
+
+**All 46 items in that folder were playable.** So the two paths that exist
+purely to explain failure —
+
+- `unplayable`, when nothing a browser can decode was offered, and
+- the "the media server does not offer byte ranges, so seeking will not work"
+  notice —
+
+**were never rendered, not once.** They are unit-tested and nothing more, while
+every line around them was exercised against real hardware. The better the
+happy path went, the wider that gap grew.
+
+And it compounds in the worst direction. The happy path is *this* user's server:
+one implementation, one codec profile, one library. Somebody else's is Matroska,
+or a server that declines byte ranges, or a NAS that answers `M-SEARCH` and
+cannot be described. **The first thing they see is the least-tested thing that
+shipped.** The code most likely to be met by a stranger is the code a successful
+run guarantees you did not touch.
+
+### Why it is not a restatement of the other two
+
+Worth separating, because they look adjacent:
+
+- **Section 0** is a value that is wrong — an `Option` where `None` means both
+  "fine" and "not asked yet". The defect is *in the code*, and it is there
+  whether or not anyone runs it.
+- **The guard that never runs** is a branch that is never taken, so a check
+  silently does not happen. The defect is *in the control flow*.
+- **This one is a value you never construct.** The `unplayable` string is
+  correct; `choose_res` returns the right `Err`. Nothing is wrong with the code
+  at all. What is missing is *evidence*, and the missing evidence is invisible
+  because the test output is green.
+
+A `Result` you never construct is a different failure from a guard that never
+runs. The first leaves no trace anywhere; the second at least exists in a
+coverage report.
+
+### The recognition question
+
+Sections 0 and 0b ask what a value means and who could have caused a message.
+This one asks:
+
+> **Which paths did success prevent me from exercising?**
+
+A green run is evidence about the paths it took and **silence about the rest**,
+and the louder the success, the easier that silence is to mistake for coverage.
+"It worked against the real thing" is a strong claim about one configuration and
+no claim at all about the branches that configuration never entered.
+
+### What to do about it
+
+Not "test more" — that is advice, not a rule. Three concrete things:
+
+1. **Enumerate the failure paths a run did not take, by name, in the report.**
+   Not "some edge cases remain": *these two messages have never been rendered*.
+   Naming them is what makes the gap actionable rather than a feeling.
+2. **Make the happy path hostile on purpose.** A fake server that offers only
+   Matroska, or advertises `DLNA.ORG_OP=00`, costs almost nothing next to one
+   that behaves. `tests/dlna_media.rs` has a `RangeSupport::Ignores` variant for
+   exactly this reason, and it is the only thing that exercises the
+   skip-and-synthesise path at all — the real server honours ranges, so nothing
+   about that code would have been run without a fixture built to misbehave.
+3. **Treat "everything passed" as a prompt, not a conclusion.** The moment a
+   run is fully green against real hardware is the moment to ask which arms it
+   proved nothing about.
+
+### Still open, in this crate
+
+- `unplayable` and the unseekable notice, above.
+- **All three empty-discovery explanations.** `ssdp` distinguishes "nothing
+  answered at all", "things answered but none was a MediaServer" and "a server
+  answered but could not be described" — and the search succeeded first time on
+  a real network, so **none of the three has ever been produced by one.** They
+  exist only as unit tests. The one that names UMS's IP allowlist is the message
+  most likely to matter to somebody else and the least likely to have been seen
+  by anyone.
+- **The `--dlna-server` failure path.** The success path is exercised by every
+  integration test; a mistyped address has only been reasoned about.
+
+---
+
+## 0d. A defence admits whatever does not look like its threat
+
+Sections 0, 0a and 0c are about code nobody examined closely enough. This one is
+about code that was examined, defended, tested, and reasoned about in a comment
+— and where the reasoning is what kept the hole in.
+
+> **A defence written against a named threat will admit anything that does not
+> look like that threat, and the more carefully the threat was named the more
+> confidently it will admit it.**
+
+### The instance
+
+`mediaproxy::relay` forwards a fixed allowlist of upstream headers. The
+allowlist exists for a stated reason, written in the code: an upstream
+`Set-Cookie` or `Access-Control-Allow-Origin` reaching the phone would be
+someone else's header arriving with this origin's authority. There is a test,
+`upstream_headers_are_allowlisted`, asserting exactly that. It passes. It has
+always passed.
+
+`Content-Type` was on the allowlist, because a media proxy forwards the content
+type. That is not an oversight; it is the obvious, correct-looking answer, and
+it is what any reviewer would expect to see.
+
+But `/dlna/media/<ref>` is a URL a browser can be **navigated to**, not only
+fetched by a `<video>` element. So a media server answering `text/html` there
+was serving HTML on the bridge's own origin — the origin holding the pairing
+token, the WebSocket and the app. `X-Content-Type-Options: nosniff` did not
+help and was never going to: it stops a browser *guessing* a type, not
+honouring a declared one.
+
+**The defence and the hole were the same line.** The allowlist worked perfectly
+at the thing it was pointed at.
+
+### Why this is not section 0 or 0c
+
+- **§0** is a value that lies about state. Here nothing lies: the header is
+  faithfully what the upstream said.
+- **§0c** is a path nothing exercised. Here the path was exercised, by a test
+  written for it, which passed for the right reason.
+- The difference is **scope of the threat model, not coverage of the code.** The
+  question asked was "which headers carry someone else's authority?" and the
+  answer was correct. The question never asked was "what does this response
+  become if a person navigates to it?"
+
+A green test on a well-argued defence is the most comfortable place in a
+codebase, and that is the point of writing this down.
+
+### The same fingerprint, one layer up
+
+`dlna`'s device map has it too, and it is worse there because the mitigation was
+*documented*. Pinned entries are described before discovered ones **precisely so
+they cannot be displaced** — that ordering was deliberate and carries a comment
+saying why. It did nothing, because a later insert overwrote the earlier one
+regardless of order. An absent guard is a gap; a documented inert guard is a gap
+that answers "is this handled?" with **yes**.
+
+That half is §0a — a guard whose success path is reached without the guard
+running. What §0d adds is why nobody looked: the comment had already settled the
+question.
+
+### The recognition question
+
+Not "is this defended?" and not "is this tested?" — both were yes.
+
+> **What did I name the threat as, and what is admitted by not resembling it?**
+
+And the companion, for anything that reasons in a comment:
+
+> **If this comment is right, what does it stop the next reader from checking?**
+
+### Where to look first
+
+Anywhere a decision is expressed as *what to exclude*. An allowlist encodes its
+threat model in what it omits, so every entry is a claim that the entry is
+harmless, and those claims are invisible — nobody reviews a list for the things
+that are on it. The stronger form, where it is available, is to stop forwarding
+the value and **supply it yourself from something already validated**, which is
+what the fix here does: the `Content-Type` served is now the `<res>` MIME
+`choose_res` already checked against a fixed list, and the upstream's version is
+logged rather than honoured. That removes the question instead of answering it.
+
+---
+
+## 0e. A correct behaviour, at a rate nobody chose
+
+The compounding family, in its cheapest form: two independently correct
+decisions, neither of them a defect, and an emergent one where they meet.
+
+> **A behaviour that is right once can be a defect at a frequency nobody
+> decided. The frequency is rarely written down, because it is not a decision —
+> it falls out of something else.**
+
+### The instance
+
+`DlnaPicker` clears its error banner at the top of each attempt to load the
+index. That is not merely acceptable, it is the right thing to write: a stale
+error left on screen during a retry is worse than no error, and clearing it is
+what any reviewer would ask for if it were missing.
+
+Separately, the effect that triggers the load read `index` and `busy`. A failed
+load leaves `index` null and returns `busy` to false, so the effect re-triggered
+itself. Nobody chose a retry rate; there was no ceiling to choose one with.
+
+Measured against a bridge refusing the token: **1,294 requests in six seconds**,
+climbing linearly — and `bannerShown: false` throughout. Every attempt erased
+the banner before the next attempt set it, so the message
+*"The bridge refused this page. Re-open it from the pairing link or QR code."*
+was never once visible. The user gets a blank sheet; the bridge gets 215
+requests a second.
+
+The banner logic is correct. The effect's dependencies are a bug. **The
+invisibility is neither of them** — it is the correct behaviour running at a
+frequency that was never a decision.
+
+### Why the rate is the part that hides
+
+Both halves review well in isolation, which is how this survives. "Clear the
+error before retrying" is obviously right. "Re-run when the inputs change" is
+obviously right. Neither review asks *how often*, because frequency is not
+visible in either diff — it emerges from the pair.
+
+And the symptom points away from both. What a user reports is "the picker shows
+nothing", which reads as a rendering problem or an empty library. The 401 that
+caused it was correctly detected, correctly turned into a message, and correctly
+placed on screen — 215 times a second.
+
+### The recognition question
+
+> **This is correct once. What is it at a thousand times a second, and who
+> decided that number?**
+
+If the answer to the second half is "nothing decided it, it fell out of a loop",
+that is the finding, whether or not you can name the symptom yet.
+
+### Where to look first
+
+- **Anything that clears, resets or overwrites state that a human is meant to
+  read.** Erasure is the behaviour that turns rate into invisibility.
+- **Any loop whose ceiling is a side effect rather than a constant.** A retry
+  bounded by "the condition stopped being true" has no rate; it has whatever
+  rate the machine can produce.
+- **Reactive effects whose dependencies include the thing they set.** The
+  failure path is where this bites, because the success path breaks the cycle by
+  assigning the value the effect reads — which is also why it is invisible in a
+  green run. See §0c.
+
+### Related, on the clients branch
+
+Retention as an eraser: a bounded gone-row list whose ids are attacker-chosen,
+so evidence of a real disconnect can be evicted by churn. Same shape — a
+correct bound and a correct record, and an emergent defect at a rate the
+attacker picks rather than the author.
 
 ---
 
@@ -739,3 +1113,41 @@ does not percent-decode**, so the PWA cannot have an asset with a space in its
 name. `library::percent_decode` is the decoder to reuse; the reason it was not
 wired in here is that doing so means auditing every static path at the same
 time, which is a different change.
+
+---
+
+## 4. `HEAD` returns a body on every `respond` route
+
+**Confirmed by running it**, not read off the code:
+`head_on_a_respond_route_wrongly_carries_a_body` in `tests/dlna_media.rs`
+asserts the defect and is `#[ignore]`d, so it documents the behaviour without
+failing the build. It will start failing the day someone fixes this, which is
+when it should be deleted.
+
+`serve_conn` accepts `GET` and `HEAD`. `route` never looks at the method, and
+`respond` writes `body` unconditionally after the head. So `HEAD /healthz`,
+`HEAD /pair` and a `HEAD` for any static asset return the full body.
+
+Not urgent, and not the DLNA branch's to fix — `http.rs` is contended and this
+touches the one function every route calls. But worth writing down before it
+becomes the cause of something with a symptom somewhere else, which is
+§0b's pattern:
+
+- A cache or a proxy in front of the bridge that issues `HEAD` to revalidate
+  gets a body it did not ask for, on a connection that then closes. Harmless
+  here only because `Connection: close` means nothing tries to reuse the
+  socket — on a keep-alive connection the surplus body would be read as the
+  start of the next response, and the failure would appear on some later,
+  unrelated request.
+- The media proxy already handles `HEAD` correctly (`mediaproxy::relay`
+  returns after the head), so the two halves of the surface currently
+  disagree. That is the sort of inconsistency someone eventually "fixes" in
+  the wrong direction.
+
+The fix is one branch in `respond`, or a check in `route`.
+
+It was left alone because `http.rs` had four branches open against it. **They
+have all merged now, so that reason has expired** — this is a note about a live
+defect with no remaining excuse, and it should be fixed by whoever next opens
+that file rather than carried further. The `#[ignore]`d test is already written
+and will start failing the moment it is.

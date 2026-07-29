@@ -119,6 +119,7 @@ async fn serve_https(
         cmd_tx,
         static_dir: None,
         library: None,
+        dlna: None,
         pairing_base: "http://127.0.0.1:8787/install".to_string(),
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: tls::browser_origins(
@@ -129,6 +130,12 @@ async fn serve_https(
         on_token_rotated: None,
         tls: Some(public),
         devices: Arc::clone(&device_store),
+        // Absent on the merged base: the clients branch added this field to
+        // `Ctx` and updated `end_to_end.rs` but not this file, so
+        // `cargo check --all-targets` did not build there. Not this branch's
+        // change to make and it is made here only because the tree has to
+        // compile — flagged rather than folded in silently.
+        clients: Default::default(),
     });
 
     let (certs_tx, certs_rx) = watch::channel(material);

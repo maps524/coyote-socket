@@ -39,6 +39,26 @@ mdns-sd = "0.20.3"
 time = { version = "0.3.54", default-features = false, features = ["std"] }
 x509-parser = "0.18.1"
 ring = "0.17.14"
+# The one dependency that is **not** already in `src-tauri`, added deliberately
+# rather than by drift. The rule elsewhere in this crate is that its
+# dependencies stay a subset of what `src-tauri` builds, so this is a stated
+# exception and can be reversed in one file (`upnp.rs`) if it is not wanted.
+#
+# Why: UPnP device descriptions and DIDL-Lite listings are XML produced by a
+# media server we did not write, reachable by anything that can answer an SSDP
+# search. Hand-rolling a scanner for that means hand-rolling CDATA, character
+# and entity references, namespace prefixes, self-closing elements, comments,
+# and elements nested inside identically-named ones. Those are exactly where a
+# scanner goes quietly wrong, and quietly wrong here means the wrong `<res>` URL
+# — a video element that loads and shows nothing, which the handoff document
+# names as the failure to avoid.
+#
+# `default-features = false` takes the pull reader and nothing else: no serde,
+# no encoding detection, no async. It performs no DTD processing and no external
+# entity resolution, so XXE and entity-expansion attacks are not in scope for
+# it; the bounds that *are* ours — input size, element depth, item count — are
+# enforced in `upnp.rs` rather than assumed of the library.
+quick-xml = { version = "0.37", default-features = false }
 
 [dev-dependencies]
 # `test-util` gives the paused clock, so keepalive-cadence tests assert
