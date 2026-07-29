@@ -1,5 +1,12 @@
 # Bridge follow-ups
 
+Sections **0** and **0b** are not tasks. They are two defect signatures this
+work produced repeatedly, written as recognition rules because each has already
+caught its next instance. Read them before adding a field that records whether
+something worked, or an error message about a component you do not own.
+
+Sections **1** onward are work identified and deliberately not done.
+
 ---
 
 ## 0. The singleton assumption
@@ -105,9 +112,54 @@ connection can sever the first. When auditing the list above, do not
 
 ---
 
-Two pieces of work this session identified but deliberately did not build, plus
-the evidence that scopes them. Both are sessions of their own; half-building
-either would have been worse than writing them down.
+## 0b. Misattributed failure
+
+A second signature, distinct from section 0 and worth separating because the
+recognition rule is different. Section 0 is about **a field lying about
+state**. This one is about **the diagnostic pointing at the wrong subsystem**.
+
+> **When a failure is reported by a component that did not cause it, the fix
+> belongs where the cause is and the *message* belongs where the user is
+> looking.**
+
+Both halves are needed. Fixing only the cause leaves the next occurrence just
+as confusing; fixing only the message papers over a real defect.
+
+### Five instances, three of them shipped
+
+| What failed | What got blamed |
+|---|---|
+| The HTTPS listener never bound | The certificate. The trust-check page rendered in full and said "you missed the trust step." |
+| The HTTP listener never bound | The phone, the Wi-Fi, then the certificate. The QR scanned perfectly and led nowhere. |
+| A headset went to sleep (`WSAECONNRESET`) | **Our reading of the protocol.** Any non-EOF read error raised the framing alarm — the loudest signal in the app — for an ordinary disconnect. |
+| An untrusted certificate on a `wss:` subresource | The network. It closes as 1006 with no interstitial and nothing the page can inspect, so it presents as "bridge unreachable". |
+| `coyote.local` resolving to the WSL adapter | The certificate, again — for a name that never resolved to this machine at all. Avoided only because we wrote our own mDNS responder rather than using Windows'. |
+
+The third is the sharpest, because the misattribution was *by our own alarm*
+and it pointed at the one thing the whole spike existed to test. An alarm that
+cries wolf about the hypothesis under test is worse than no alarm: the one time
+it fires correctly, nobody believes it.
+
+The fourth is still live. It cannot be fixed at the cause — browsers give no
+certificate UI to a subresource — so it is handled entirely by the second half
+of the rule: `ws_relay`'s contract tells consumers not to render 1006 as
+"unreachable" without qualification, and names the distinguishing test.
+
+### Why the two signatures are worse together
+
+A confident optional and a misattributed failure compose into something neither
+produces alone. Two bridges running at once: one instance's trust check blames
+the certificate for a listener that never bound, while the other hands out a QR
+that scans perfectly and leads nowhere. Nothing in either message mentions a
+port. That is an hour spent debugging TLS for a port collision, and **neither
+review predicted it** — both defects were found separately and the interaction
+was found by accident.
+
+### The recognition question
+
+For any error message: **could the component printing this have caused it?**
+If not, it is relaying someone else's failure, and the reader will act on where
+it appeared rather than where it came from.
 
 ---
 
