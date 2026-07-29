@@ -41,8 +41,14 @@
 //!    did not resolve — multicast blocked, wrong network — and no amount of
 //!    certificate fiddling will help.
 //! 2. Reach it over HTTPS. Failure only at this stage means the name is fine
-//!    and the certificate is not trusted yet, which almost always means step 2
-//!    of the install was missed.
+//!    and the certificate is not trusted yet, which almost always means **step
+//!    3** of the install — Certificate Trust Settings — was missed.
+//!
+//! (Step 3, not step 2. The install list grew from two steps to three when
+//! "Profile Downloaded → Install" was separated from enabling full trust, and
+//! this sentence kept the old number while the page it describes moved on. It
+//! pointed a reader at "you installed the profile wrong" when the actual
+//! failure is the trust toggle — the single most-missed action in the flow.)
 //!
 //! A verification step that distinguishes those two is worth more than any
 //! quantity of instructions, because it converts a silent failure into a
