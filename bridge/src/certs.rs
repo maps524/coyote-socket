@@ -37,7 +37,15 @@
 //!    would already be public.
 //! 2. **The private key never leaves the machine.** Not in the QR, not over the
 //!    network, not in a log line. [`CertMaterial::ca_cert_pem`] — the public
-//!    certificate — is the only thing the install page serves.
+//!    certificate — is the only *certificate material* the install page serves.
+//!
+//!    Narrowed deliberately. This used to say the public certificate was "the
+//!    only thing the install page serves", which was true when written and is
+//!    not true now: the page carries the **pairing token** in its handoff link,
+//!    by design, because that is the one crossing of the origin boundary the
+//!    flow depends on (see [`crate::install::app_query`]). Left as written, a
+//!    reader auditing what escapes this machine would have taken a sentence
+//!    about key material as a claim about the whole page.
 //!
 //! ## Apple's requirements, which are strict and fail silently
 //!
