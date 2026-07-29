@@ -192,6 +192,27 @@ pub fn looks_like_an_endpoint(endpoint: &str) -> bool {
     split_endpoint(endpoint).is_some_and(|(host, port)| port > 0 && !host.trim().is_empty())
 }
 
+/// # Tests in this module must stay on loopback
+///
+/// [`probe`] is the one function here that reaches outward on its own
+/// initiative: when the target port is silent it opens connections to
+/// [`LIVENESS_PORTS`] on the same host. Handed a LAN address, a test would
+/// port-scan a real machine on every `cargo test` — and a test suite that
+/// touches other people's devices can break a running system from a process
+/// that has already exited.
+///
+/// This is not hypothetical in this project: `bridge-tls` found a unit test
+/// multicasting `coyote.local -> 127.0.0.1` onto the real LAN, able to break
+/// the user's phone from a test that had already finished.
+///
+/// So: **every address in these tests is `127.0.0.1`, and every listener binds
+/// `127.0.0.1:0`.** Loopback keeps it on this machine; the ephemeral port keeps
+/// it from colliding with a bridge that is already running, which is the same
+/// singleton assumption that has bitten us four times elsewhere.
+///
+/// The LAN-looking addresses that do appear are handled by string functions
+/// only — `split_endpoint`, `normalise_endpoint`, `looks_like_an_endpoint` —
+/// and never dialled.
 #[cfg(test)]
 mod tests {
     use super::*;

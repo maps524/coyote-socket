@@ -72,6 +72,29 @@ confirmed to fail against the old implementation before the fix went in.
 - **Two instances mean two tray icons**, identical and unlabelled, with no way
   to tell which one holds the port.
 
+### A related hazard: tests that reach off the machine
+
+Same family, different axis — code that assumes it is the only thing on the
+network, running somewhere it is not.
+
+`bridge-tls` found a unit test multicasting `coyote.local -> 127.0.0.1` onto
+the real LAN on every `cargo test`, able to break the user's phone from a
+process that had already exited. Prompted by that, this crate's tests were
+audited: **nothing here touches a real network.** Every listener binds
+`127.0.0.1:0` and every dialled address is loopback. The LAN-looking addresses
+in `probe`, `state` and `settings` tests are handled by string functions and
+never connected to, and `http::local_ip` — which opens a UDP socket — is
+called only from the two binaries' startup, never from a test.
+
+The invariant is recorded on `probe`'s test module, since [`probe`] is the one
+function that reaches outward on its own initiative: given a silent port it
+scans sibling ports on the same host, so a single LAN address in a test would
+port-scan a real machine on every run.
+
+Ephemeral ports (`:0`) matter for the second reason: a fixed port in a test
+collides with a bridge that is already running, which is the singleton
+assumption again.
+
 ### The inverse, which is a real constraint and not an assumption
 
 Worth keeping straight: **the player genuinely does accept one client at a
