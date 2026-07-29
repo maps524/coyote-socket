@@ -238,7 +238,7 @@ async fn spawn_full_stack(limit: usize) -> (String, mpsc::Sender<PlayerCommand>,
         snapshot_rx,
         cmd_tx: cmd_tx.clone(),
         static_dir: None,
-        pairing_url: coyote_bridge::auth::with_token(&base, &token),
+        pairing_base: base.clone(),
         token: std::sync::RwLock::new(token.clone()),
         allowed_hosts: vec![format!("127.0.0.1:{port}")],
         on_token_rotated: None,
@@ -388,7 +388,7 @@ async fn traversal_outside_the_static_root_is_refused() {
             snapshot_rx,
             cmd_tx,
             static_dir: Some(dir.clone()),
-            pairing_url: base.clone(),
+            pairing_base: base.clone(),
             token: std::sync::RwLock::new(Token::generate()),
             allowed_hosts: vec![format!("127.0.0.1:{port}")],
             on_token_rotated: None,
@@ -511,6 +511,21 @@ async fn the_token_never_appears_in_the_log() {
         history.contains("<redacted>"),
         "expected a redaction marker in:\n{history}"
     );
+}
+
+/// Rotation is refused over plaintext. A replacement token delivered in
+/// cleartext hands the eavesdropper the replacement too.
+#[tokio::test]
+async fn rotation_is_refused_over_plain_http() {
+    let (base, _cmd, token) = spawn_full_stack(1).await;
+    let (status, body) = get(&format!("{base}/pair/rotate?t={token}")).await;
+    assert_eq!(status, 403);
+    assert!(body.contains("secure transport"), "got: {body}");
+
+    // And the token still works, so a refused rotation is not a silent
+    // half-rotation.
+    let (status, _) = get(&format!("{base}/healthz?t={token}")).await;
+    assert_eq!(status, 200);
 }
 
 /// The pairing page has to stay reachable: it is how a phone *obtains* the

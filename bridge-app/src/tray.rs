@@ -49,7 +49,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, urls: &Urls) -> tauri::Result<()>
 
     TrayIconBuilder::with_id("bridge")
         .icon(icon)
-        .tooltip(format!("CoyoteSocket bridge — {}", urls.pairing))
+        .tooltip(format!("CoyoteSocket bridge — {}", urls.pairing_base))
         .menu(&menu)
         // Left click should surface the window, not open the menu. Without
         // this, Tauri shows the menu on either button and the click gesture

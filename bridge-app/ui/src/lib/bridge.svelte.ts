@@ -161,6 +161,17 @@ class Bridge {
     await this.run(() => invoke('stop_fake_player'))
   }
 
+  /**
+   * Revoke the pairing token and take the new QR.
+   *
+   * Un-pairs every device at once — there is one shared token. The confirm
+   * lives in the UI because that consequence is not guessable from the button.
+   */
+  async revokeToken() {
+    const svg = await this.run(() => invoke<string>('rotate_token'))
+    if (svg) this.qrSvg = svg
+  }
+
   async open(url: string) {
     await this.run(() => invoke('open_external', { url }))
   }

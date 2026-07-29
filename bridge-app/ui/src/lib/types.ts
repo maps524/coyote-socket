@@ -88,7 +88,8 @@ export interface WireEvent {
 }
 
 export interface Urls {
-  pairing: string
+  /** Without the token. The full URL is `Status.pairingUrl`. */
+  pairingBase: string
   local: string
   httpPort: number
 }
@@ -96,6 +97,13 @@ export interface Urls {
 export interface Status {
   snapshot: PlayerSnapshot
   urls: Urls
+  /**
+   * The full pairing URL with the live token — password-equivalent.
+   *
+   * Derived per call rather than stored, so revoking a token changes what the
+   * window shows instead of leaving it advertising a dead one.
+   */
+  pairingUrl: string
   httpError: string | null
   endpoint: string
   recents: string[]

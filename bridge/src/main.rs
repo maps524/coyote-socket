@@ -162,7 +162,7 @@ fn main() {
     let bind_addr = SocketAddr::new(args.bind, args.http_port);
     let player_endpoint = args.player.clone();
     let static_dir = args.static_dir.clone();
-    let pairing_for_http = pairing_url.clone();
+    let base_for_http = base_url.clone();
     let token_for_http = token.clone();
 
     runtime.spawn(async move {
@@ -181,7 +181,7 @@ fn main() {
                         snapshot_rx: bridge.snapshot_rx.clone(),
                         cmd_tx: bridge.cmd_tx.clone(),
                         static_dir,
-                        pairing_url: pairing_for_http,
+                        pairing_base: base_for_http,
                         token: std::sync::RwLock::new(token_for_http),
                         allowed_hosts,
                         on_token_rotated: None,

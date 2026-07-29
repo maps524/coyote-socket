@@ -29,6 +29,9 @@ type Shared<'a> = State<'a, Arc<AppState>>;
 pub struct Status {
     pub snapshot: PlayerSnapshot,
     pub urls: Urls,
+    /// The full pairing URL with the live token. Derived each call rather than
+    /// stored, so revoking a token changes what the window shows.
+    pub pairing_url: String,
     /// Non-null when the phone-facing server failed to start; the QR will not
     /// work and the window should say so.
     pub http_error: Option<String>,
@@ -45,6 +48,7 @@ pub fn bridge_status(state: Shared) -> Status {
     Status {
         snapshot: state.bridge.snapshot(),
         urls: state.urls.clone(),
+        pairing_url: state.pairing_url(),
         http_error: state.http_error.lock().ok().and_then(|e| e.clone()),
         endpoint: settings.endpoint.clone(),
         recents: settings.recents.clone(),
@@ -165,7 +169,32 @@ pub async fn send_player_command(
 /// The pairing QR as an SVG document, rendered server-side.
 #[tauri::command]
 pub fn pairing_qr(state: Shared) -> Result<String, String> {
-    qr::to_svg(&state.urls.pairing).map_err(|e| e.to_string())
+    qr::to_svg(&state.pairing_url()).map_err(|e| e.to_string())
+}
+
+/// Revoke the current pairing token and issue a new one.
+///
+/// Deliberately a user action rather than something the pairing flow does on
+/// its own. There is one shared token, so this un-pairs **every** device at
+/// once — the phone, a tablet, a desktop browser tab. Doing it automatically
+/// after a phone paired would silently break every other device, which is a
+/// larger and far more likely harm than the exposure it would close.
+///
+/// The situations this is actually for: a QR that was shown to someone, or a
+/// URL that was pasted somewhere it should not have been.
+#[tauri::command]
+pub fn rotate_token(state: Shared) -> Result<String, String> {
+    let http = state
+        .http_ctx
+        .lock()
+        .map_err(|_| "state lock poisoned")?
+        .clone()
+        .ok_or("the phone-facing server is not running, so there is no token to rotate")?;
+
+    http.rotate_token();
+    log_info!("[app] pairing token revoked by the user; every paired device must re-scan");
+    // The QR is derived from the token, so it changes with it.
+    qr::to_svg(&state.pairing_url()).map_err(|e| e.to_string())
 }
 
 /// The whole ring buffer, for the copy button.
@@ -252,7 +281,7 @@ pub fn set_static_dir(path: Option<String>, state: Shared) -> Result<(), String>
 /// command is a door worth closing before someone walks through it.
 #[tauri::command]
 pub fn open_external(url: String, state: Shared) -> Result<(), String> {
-    if !is_bridge_url(&url, &[&state.urls.local, &state.urls.pairing]) {
+    if !is_bridge_url(&url, &[&state.urls.local, &state.urls.pairing_base]) {
         return Err(format!("refusing to open {url}: not a bridge URL"));
     }
     crate::tray::open_url(&url);

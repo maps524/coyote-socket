@@ -60,9 +60,17 @@ pub struct Ctx {
     pub cmd_tx: mpsc::Sender<PlayerCommand>,
     /// Where the PWA's `dist` lives. `None` serves a placeholder at `/`.
     pub static_dir: Option<PathBuf>,
-    /// The URL to show on the pairing page — the LAN one, not `localhost`.
-    /// Carries the token; see [`crate::auth`].
-    pub pairing_url: String,
+    /// The URL to show on the pairing page — the LAN one, not `localhost` —
+    /// **without** the token.
+    ///
+    /// Stored without it and composed on demand by [`Ctx::pairing_url`]. It
+    /// used to hold the finished URL, which was a latent bug: rotation
+    /// replaces the token but could not replace a string captured at startup,
+    /// so `/pair` and `/qr.svg` would have gone on serving a QR encoding the
+    /// token that had just been revoked. Nothing called rotation yet, so it had
+    /// never fired — deriving it removes the possibility rather than the
+    /// symptom.
+    pub pairing_base: String,
     /// Shared secret required on `/healthz` and `/ws`.
     ///
     /// Behind a lock because it can be rotated at runtime — see
@@ -80,6 +88,11 @@ pub struct Ctx {
 impl Ctx {
     pub fn token(&self) -> Token {
         self.token.read().expect("token lock").clone()
+    }
+
+    /// The full pairing URL, with whatever token is current.
+    pub fn pairing_url(&self) -> String {
+        auth::with_token(&self.pairing_base, &self.token())
     }
 
     /// Replace the token and notify the owner.
@@ -346,21 +359,33 @@ where
         // hand out a credential — which is a real exposure, and the reason the
         // pairing page says so and the tray offers rotation.
         "/pair" => {
-            let body = pairing_page(&ctx.pairing_url);
+            let body = pairing_page(&ctx.pairing_url());
             respond(stream, 200, "text/html; charset=utf-8", body.as_bytes()).await
         }
-        // Exchange a token that travelled in cleartext for one that did not.
+        // Revoke the current token and issue a new one.
         //
-        // The pairing QR must point at plain HTTP: a phone that has not yet
-        // trusted the local CA meets a full-page certificate interstitial with
-        // no route back to the instructions. So the first token is always
-        // sniffable by anyone on the LAN at that moment. This narrows the
-        // window from "forever" to "until the phone finishes pairing" — it
-        // does not close it, and a sniffer who acts within that window can
-        // rotate the token themselves and lock the user out.
+        // **This is deliberately not called by the pairing flow**, and the
+        // reason is worth stating because the opposite looked obviously right.
         //
-        // Refused over plaintext, because a rotation delivered in cleartext
-        // would hand the eavesdropper the replacement too.
+        // The original idea was to rotate automatically once the phone had
+        // trusted the CA, exchanging a token that travelled in cleartext for
+        // one that did not. That works for one device and breaks the moment
+        // there are two. There is a single shared token, so rotating it
+        // un-pairs *everything* — pair a tablet and the phone stops working,
+        // with no message, and the symptom arrives hours later as "the app
+        // stopped connecting". A household with a phone and a tablet is not an
+        // exotic case, and silently breaking it is worse than the exposure the
+        // rotation was closing: a LAN eavesdropper present during the few
+        // seconds of pairing.
+        //
+        // So rotation stays a deliberate act with an understood consequence —
+        // "revoke everything and re-pair" — surfaced in the UI rather than
+        // fired as a side effect. It is the right tool for "I showed someone
+        // the QR" or "I pasted a URL I should not have", which are the
+        // situations people actually find themselves in.
+        //
+        // Refused over plaintext, because a replacement token delivered in
+        // cleartext hands the eavesdropper the replacement too.
         "/pair/rotate" => {
             if !secure {
                 respond(
@@ -384,7 +409,7 @@ where
                 .await
             }
         }
-        "/qr.svg" => match qr::to_svg(&ctx.pairing_url) {
+        "/qr.svg" => match qr::to_svg(&ctx.pairing_url()) {
             Ok(svg) => respond(stream, 200, "image/svg+xml; charset=utf-8", svg.as_bytes()).await,
             Err(e) => {
                 let msg = format!("could not render QR: {e}");
@@ -407,7 +432,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let Some(root) = ctx.static_dir.as_ref() else {
-        let body = placeholder_page(&ctx.pairing_url);
+        let body = placeholder_page(&ctx.pairing_url());
         return respond(stream, 200, "text/html; charset=utf-8", body.as_bytes()).await;
     };
 
@@ -901,6 +926,75 @@ mod tests {
             out.extend_from_slice(&chunk[..n]);
         }
         assert_eq!(out, b"HEADHEADTAIL");
+    }
+
+    fn test_ctx() -> Ctx {
+        let (_snap_tx, snapshot_rx) =
+            watch::channel(PlayerSnapshot::new("127.0.0.1:23554".into()));
+        let (cmd_tx, _cmd_rx) = mpsc::channel(4);
+        Ctx {
+            snapshot_rx,
+            cmd_tx,
+            static_dir: None,
+            pairing_base: "http://192.168.0.9:8787".into(),
+            token: std::sync::RwLock::new(Token::generate()),
+            allowed_hosts: vec!["192.168.0.9:8787".into()],
+            on_token_rotated: None,
+        }
+    }
+
+    /// The pairing URL must follow the token, not a copy of it.
+    ///
+    /// Regression: `pairing_url` used to be a `String` fixed at startup, so
+    /// after a rotation `/pair` and `/qr.svg` would have gone on serving a QR
+    /// encoding the token that had just been revoked. Nothing called rotation
+    /// yet, so it had never fired — but a revoke button that leaves the QR
+    /// advertising the revoked credential is worse than no revoke button.
+    #[test]
+    fn the_pairing_url_follows_a_rotation() {
+        let ctx = test_ctx();
+        let before = ctx.pairing_url();
+        assert!(before.contains(ctx.token().as_str()));
+
+        let fresh = ctx.rotate_token();
+
+        let after = ctx.pairing_url();
+        assert_ne!(before, after, "the URL must change with the token");
+        assert!(after.contains(fresh.as_str()));
+        assert!(
+            !after.contains(before.rsplit("t=").next().unwrap()),
+            "the revoked token must not survive in the URL"
+        );
+    }
+
+    /// Rotation notifies its owner, which is how the desktop app persists the
+    /// new token. Without it, a revoke would silently revert on restart.
+    #[test]
+    fn rotation_notifies_the_owner() {
+        let seen = Arc::new(std::sync::Mutex::new(None::<String>));
+        let sink = Arc::clone(&seen);
+        let mut ctx = test_ctx();
+        ctx.on_token_rotated = Some(Box::new(move |t: &Token| {
+            *sink.lock().unwrap() = Some(t.as_str().to_string());
+        }));
+
+        let fresh = ctx.rotate_token();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some(fresh.as_str()));
+    }
+
+    /// The old token stops authorising the moment it is revoked.
+    #[test]
+    fn a_revoked_token_no_longer_authorises() {
+        let ctx = test_ctx();
+        let old = ctx.token();
+        let target = format!("/healthz?t={old}");
+        assert!(authorised(&target, None, &ctx));
+
+        ctx.rotate_token();
+        assert!(
+            !authorised(&target, None, &ctx),
+            "a revoked token must be refused"
+        );
     }
 
     #[test]

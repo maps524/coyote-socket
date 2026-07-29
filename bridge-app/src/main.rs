@@ -64,6 +64,10 @@ pub struct AppState {
     pub urls: Urls,
     /// Why the HTTP server is not up, when it is not. `None` means it is.
     pub http_error: Mutex<Option<String>>,
+    /// The serving context, once the listener is up. Holds the live token, so
+    /// anything that needs the current pairing URL asks here rather than
+    /// caching a copy that revocation cannot reach.
+    pub http_ctx: Mutex<Option<Arc<http::Ctx>>>,
 }
 
 pub struct FakePlayer {
@@ -76,14 +80,39 @@ pub struct FakePlayer {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Urls {
-    /// What the phone should open — the LAN address, not loopback.
-    pub pairing: String,
+    /// What the phone should open — the LAN address, not loopback — **without
+    /// the token**. The full URL is derived, because the token can be revoked
+    /// at runtime and a captured string would go on advertising a dead one.
+    pub pairing_base: String,
     /// What this machine should open.
     pub local: String,
     pub http_port: u16,
 }
 
 impl AppState {
+    /// The pairing URL with whatever token is current.
+    ///
+    /// Falls back to the settings copy before the listener is up, so the
+    /// window has something to show during startup rather than a bare base
+    /// URL that would not work if scanned.
+    pub fn pairing_url(&self) -> String {
+        if let Ok(guard) = self.http_ctx.lock() {
+            if let Some(ctx) = guard.as_ref() {
+                return auth::with_token(&self.urls.pairing_base, &ctx.token());
+            }
+        }
+        let token = self
+            .settings
+            .lock()
+            .ok()
+            .and_then(|s| s.token.clone())
+            .map(auth::Token::from_string);
+        match token {
+            Some(token) => auth::with_token(&self.urls.pairing_base, &token),
+            None => self.urls.pairing_base.clone(),
+        }
+    }
+
     pub fn save_settings(&self) {
         if let Ok(settings) = self.settings.lock() {
             settings.save(&self.settings_path);
@@ -115,10 +144,10 @@ fn main() {
             let advertised = http::local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
             let base = format!("http://{advertised}:{http_port}");
             let urls = Urls {
-                // Carries the token: this is the URL that grants access, which
-                // is why it is treated as a secret in the UI rather than
-                // displayed as a plain address.
-                pairing: auth::with_token(&base, &token),
+                // Without the token. The full URL grants access, so it is
+                // derived on demand from the live token rather than captured
+                // here where revocation could not reach it.
+                pairing_base: base.clone(),
                 local: format!("http://127.0.0.1:{http_port}"),
                 http_port,
             };
@@ -149,6 +178,7 @@ fn main() {
                 fake_player: Mutex::new(None),
                 urls: urls.clone(),
                 http_error: Mutex::new(None),
+                http_ctx: Mutex::new(None),
             });
             app.manage(Arc::clone(&state));
 
@@ -174,7 +204,7 @@ fn main() {
             // a button that copies it for pasting into bug reports.
             log_info!(
                 "[app] bridge window ready; phone should open {}",
-                auth::redact_url(&urls.pairing)
+                auth::redact_url(&state.pairing_url())
             );
             Ok(())
         })
@@ -185,6 +215,7 @@ fn main() {
             commands::check_reachability,
             commands::send_player_command,
             commands::pairing_qr,
+            commands::rotate_token,
             commands::log_history,
             commands::start_fake_player,
             commands::stop_fake_player,
@@ -265,7 +296,7 @@ fn serve_http(
     allowed_hosts: Vec<String>,
 ) {
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
-    let pairing_url = state.urls.pairing.clone();
+    let pairing_base = state.urls.pairing_base.clone();
     let snapshot_rx = state.bridge.snapshot_rx.clone();
     let cmd_tx = state.bridge.cmd_tx.clone();
 
@@ -284,19 +315,21 @@ fn serve_http(
         match TcpListener::bind(bind).await {
             Ok(listener) => {
                 log_info!("[app] serving the phone app on http://{bind}");
-                http::run(
-                    listener,
-                    Arc::new(http::Ctx {
-                        snapshot_rx,
-                        cmd_tx,
-                        static_dir,
-                        pairing_url,
-                        token: std::sync::RwLock::new(token),
-                        allowed_hosts,
-                        on_token_rotated: Some(on_token_rotated),
-                    }),
-                )
-                .await;
+                let ctx = Arc::new(http::Ctx {
+                    snapshot_rx,
+                    cmd_tx,
+                    static_dir,
+                    pairing_base,
+                    token: std::sync::RwLock::new(token),
+                    allowed_hosts,
+                    on_token_rotated: Some(on_token_rotated),
+                });
+                // Published before serving starts, so anything asking for the
+                // current pairing URL gets the live token rather than a copy.
+                if let Ok(mut slot) = state.http_ctx.lock() {
+                    *slot = Some(Arc::clone(&ctx));
+                }
+                http::run(listener, ctx).await;
             }
             Err(e) => {
                 // Not fatal: the player link is the thing under test, and it
