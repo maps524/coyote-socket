@@ -431,6 +431,16 @@ fn authorised(path_and_query: &str, origin: Option<&str>, cookie: Option<&str>, 
     // `fetch` and on WebSocket upgrades, which is how the app actually talks to
     // the bridge. Only navigations omit it, and no route here is meant to be
     // reached by navigating to it with a credential.
+    // Keyed on a cookie being *present*, not on it being what authorises.
+    //
+    // Measured consequence: `token + no Origin + some unrelated cookie` is
+    // refused. Nothing real hits it — `curl`, `websocat` and the desktop app
+    // send no cookies at all — but the predicate is stricter than the reasoning
+    // above, and the honest version is *"try the token first; require `Origin`
+    // only when falling through to the cookie."* That is a reorder rather than
+    // a change of behaviour, and it is deliberately not made here: the current
+    // form fails closed, and a security predicate that is too strict is the
+    // direction to leave a residue in.
     if cookie.is_some() && origin.is_none() {
         return false;
     }
@@ -635,12 +645,22 @@ async fn route<W>(
         // It discloses nothing. An unpaired caller learns they are unpaired,
         // which they already knew; a paired one learns they are paired. No id,
         // no label, no count — those are behind `/healthz`.
+        //
+        // One honest residue: this is an **oracle for whether a device id
+        // exists**, because `verify` returns early on an unknown id and only
+        // reaches the hash comparison when one is found, so the two cases are
+        // distinguishable by timing. That is accepted rather than overlooked.
+        // Ids are public by design — they are rendered in the clients panel and
+        // appear in bug reports — and knowing one is provably insufficient:
+        // `devices::tests::a_minted_cookie_verifies_and_a_forged_one_does_not`
+        // presents a real id with a wrong secret and is refused. The oracle
+        // reveals something already published.
         "/paired" => {
             let paired = ctx.devices.verify(cookie).is_some();
             let body = serde_json::json!({ "paired": paired }).to_string();
             respond_with_headers(
                 stream,
-                200,
+                Status::OK,
                 "application/json; charset=utf-8",
                 "Access-Control-Allow-Origin: *\r\n",
                 body.as_bytes(),
@@ -682,12 +702,32 @@ async fn route<W>(
         // check is two-stage.
         "/install" => match ctx.tls.as_ref() {
             Some(tls) => {
-                // The live token, not merely whatever the request carried.
-                // The handoff crosses an origin boundary, so the URL is the
-                // only thing that can carry it — see `install::app_query`.
-                let query = crate::install::app_query(full, ctx.token().as_str());
-                let body = crate::install::page(&tls.install_page(&query));
-                respond(stream, Status::OK, "text/html; charset=utf-8", body.as_bytes()).await
+                // Ungated is not the same as unchecked.
+                //
+                // The page must be reachable without a credential so the
+                // certificate can be fetched — that part is a bootstrap. But
+                // rendering the *success path* for a token we can already see
+                // is wrong is a separate choice, and it was the wrong one:
+                // `/install?t=wrongtoken` walked the user through installing a
+                // certificate, told them they were all set, and handed them on
+                // with a credential that could not authorise. Every failure
+                // after that reads as "bridge unreachable".
+                //
+                // A stale QR from a previous run does it. So does one mistyped
+                // character.
+                let token = ctx.token();
+                let verdict = crate::install::classify_token(full, |t| token.matches(t));
+                if verdict == crate::install::TokenVerdict::Invalid {
+                    let body = crate::install::expired_page(&tls.hostname, tls.http_port);
+                    respond(stream, Status::GONE, "text/html; charset=utf-8", body.as_bytes()).await
+                } else {
+                    // The live token, not merely whatever the request carried.
+                    // The handoff crosses an origin boundary, so the URL is the
+                    // only thing that can carry it — see `install::app_query`.
+                    let query = crate::install::app_query(full, token.as_str());
+                    let body = crate::install::page(&tls.install_page(&query));
+                    respond(stream, Status::OK, "text/html; charset=utf-8", body.as_bytes()).await
+                }
             }
             None => {
                 respond(
@@ -761,6 +801,29 @@ async fn route<W>(
                 "text/plain; charset=utf-8",
                 "Access-Control-Allow-Origin: *\r\n",
                 body.as_bytes(),
+            )
+            .await
+        }
+        // Landing on the app over plain HTTP is always a wrong turn, so send
+        // them where they were going.
+        //
+        // The SPA fallback answers every unknown path with the app, which is
+        // what it is for — but on the plaintext listener it means every wrong
+        // turn in the pairing flow ends at an app that *looks* like it is
+        // working and can never reach the Coyote, because Web Bluetooth needs a
+        // secure context. That is the shape that produced the original QR
+        // incident: a scan led straight to the app and never mentioned the
+        // certificate.
+        //
+        // Only the root, and only when TLS is actually up, so the plain-HTTP
+        // path stays debuggable — which is a stated reason it exists.
+        "/" | "/index.html" if !secure && ctx.tls.is_some() => {
+            respond_with_headers(
+                stream,
+                Status::SEE_OTHER,
+                "text/plain; charset=utf-8",
+                "Location: /install\r\n",
+                b"the phone needs the setup page first",
             )
             .await
         }
@@ -1722,6 +1785,40 @@ mod tests {
                 .await
                 .is_err(),
             "there is no second wake — 500 updates produced exactly one"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_plaintext_root_sends_the_phone_to_setup_rather_than_the_app() {
+        // The SPA fallback answers every unknown path with the app, which is
+        // what it is for. On the plaintext listener it meant every wrong turn
+        // ended at an app that looks like it is working and can never reach the
+        // Coyote — the shape that produced the original QR incident, where a
+        // scan led straight to the app and never mentioned the certificate.
+        let mut ctx = test_ctx();
+        ctx.tls = Some(Arc::new(crate::install::TlsPublicInfo {
+            ca_cert_pem: String::new(),
+            ca_display_name: "test".into(),
+            hostname: "coyote.local".into(),
+            http_port: 8787,
+            https_port: 8443,
+            ip: None,
+            instance_nonce: "nonce".into(),
+        }));
+
+        let mut out = Vec::new();
+        route(&mut out, "/", None, None, false, &ctx).await;
+        let response = String::from_utf8_lossy(&out);
+        assert!(response.starts_with("HTTP/1.1 303"), "got: {response}");
+        assert!(response.contains("Location: /install"));
+
+        // Over TLS the root is the app, and must stay so.
+        let mut secure_out = Vec::new();
+        route(&mut secure_out, "/", None, None, true, &ctx).await;
+        let secure = String::from_utf8_lossy(&secure_out);
+        assert!(
+            !secure.contains("Location: /install"),
+            "the secure origin serves the app, not the setup page"
         );
     }
 

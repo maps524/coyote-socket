@@ -510,10 +510,15 @@ trust and nothing else.
 ### Still open
 
 - **Revocation has no command yet, and the half-built version is a safety
-  defect.** `DeviceStore::revoke` deletes the credential and
-  `ClientRegistry::revoke` closes the live sockets. Neither PR wires either to
-  an IPC command, so there is currently no button — and the way this ships wrong
-  is somebody adding the obvious one that calls the store and not the registry.
+  defect.** `DeviceStore::revoke` and `DeviceStore::revoke_all` delete
+  credentials; `ClientRegistry::revoke` closes the live sockets. Nothing wires
+  either to an IPC command yet, so there is no button — and the way this ships
+  wrong is somebody adding the obvious one that calls the store and not the
+  registry.
+
+  **A live socket is authorised once, at upgrade, and never re-checked.**
+  That is why deleting the record cannot reach it, and why this is not a
+  tidiness item.
 
   That failure is silent and it is the dangerous direction: the record is gone,
   the panel says revoked, the user believes the device is disconnected — and the
@@ -529,13 +534,29 @@ trust and nothing else.
   let closed = state.clients.revoke(&id);  // and stop what is running now
   ```
 
+  **`revoke_all` has the same shape and the same hole.** It returns every id
+  precisely so the caller can close every socket; a caller that ignores the
+  return value un-pairs everything on disk and leaves every phone driving:
+
+  ```rust
+  for id in state.devices.revoke_all()? {
+      state.clients.revoke(&id);
+  }
+  ```
+
   **`closed == 0` is not a failure and must not be reported as one.** It means
   the device was offline, which is an ordinary way to revoke something. The
   panel is correct either way, so the command needs no "was it connected"
   special case.
 
-  Owned by whoever merges second, together with installing the credential
-  resolver — the two are the same wiring job.
+  **Owned by whichever branch merges last** — by role, not by name, because the
+  merge order has already changed once. That branch is the first point at which
+  both `DeviceStore` and `ClientRegistry` exist in one tree, and therefore the
+  first point at which this *can* be written. It is the same wiring job as
+  installing the credential resolver.
+
+  This entry must survive rebases intact. It is the one item where the next
+  commit can introduce a hardware-safety failure by doing the obvious thing.
 
 ---
 
@@ -550,6 +571,7 @@ Five instances across two crates in one evening, and they are the same bug:
 | `Urls.tls_ready` | computed from intent, never corrected by the bind |
 | Clients panel | a revoked row kept its **verified** tag for ten minutes |
 | `DeviceStore` write order | memory revoked, disk unchanged — the device returns on restart |
+| Install page token | `?t=wrongtoken` rendered the setup flow and said **you are all set** |
 
 **The diagnosis, which is more useful than the list:** *the safe-looking state
 is almost always the one you get by not writing code.* The new mechanism gets
@@ -561,6 +583,59 @@ Both halves of the fix follow from that. It is nearly always **making an
 existing value change**, not adding a mechanism. And the review question that
 finds these is not "what did this change?" but **"what did this leave alone
 that now means something different?"**
+
+### The sixth one was found by probing, and neither review found it by reading
+
+`/install?t=wrongtoken` rendered the complete setup flow, announced **"Trusted —
+you are all set"**, and passed the bad token into the button. A stale QR from an
+earlier run reaches it; so does one mistyped character. Everything afterwards
+then failed as "bridge unreachable" — the confusion `/paired` had just been
+added to end, reachable from the *first screen* of the flow.
+
+It is the same family with a sharper edge: **a check whose success path is
+reached without the check happening.** The trust probe answers "does this phone
+trust the certificate", which can be perfectly true while the token is wrong —
+two independent facts, one of them verified, both of them announced.
+
+Two separate defects wearing one symptom, and both had to be fixed:
+
+1. **The page claimed more than it had established.** Now it says "Certificate
+   trusted" and that tapping the button finishes pairing, because that is what
+   the probe actually shows.
+2. **The page rendered a success path for input it could already reject.**
+   Ungated is not the same as unchecked: the certificate must be fetchable
+   without a credential, but a token the bridge can see is wrong now gets a page
+   that says so and points at a fresh QR.
+
+**Why neither review caught it:** both verified the page against conditions they
+had chosen — an unbound listener, a missing certificate — and neither varied the
+token, because the token was not what the page was thought to be about. Reading
+finds bugs in the thing you are looking at. This was found by diffing the page
+against itself with one input changed.
+
+The generalisable move is cheap: **take the input the page is not "about" and
+make it wrong.**
+
+### The same defect applies to reading code, not only to writing it
+
+The mDNS unit test was reported as a live hazard across two separate reviews,
+and in one propagated further. It was not live: it had carried `#[ignore]` for
+several commits. The claim rested on a grep that matched the call site fifteen
+lines below the attribute that disables it.
+
+> **A grep result is a string match, not a proof of execution.** Attributes,
+> `cfg`, feature gates and early returns all live outside the matched line, and
+> a search pattern can be constructed so that none of them can appear in the
+> output.
+
+That is this same family read backwards. The guard was there; what was reported
+was the success path being reached, without checking whether the guard ran —
+which is exactly what the five bugs above do, with the roles of author and
+reviewer swapped. The reviewing version is cheaper to fix and easier to repeat,
+because a grep that confirms a suspicion feels like evidence.
+
+The counter-question matches the other one: not *"does this line exist?"* but
+**"what would have to be true for this line to run?"**
 
 Related, and worth keeping when the next convenience feature is proposed:
 **any credential a client can re-acquire without a person present is not

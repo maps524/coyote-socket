@@ -190,6 +190,72 @@ pub fn pairing_base(http_origin: &str, tls_available: bool) -> String {
     }
 }
 
+/// What the install page should do about the token it was handed.
+///
+/// The page is ungated so the certificate can always be fetched. That is not
+/// the same as rendering the **success path** for a token we can already see is
+/// wrong, which is what it used to do: `/install?t=wrongtoken` walked the user
+/// through installing a certificate, told them they were all set, and handed
+/// them onward with a credential that could not authorise. Every failure after
+/// that presents as "bridge unreachable" — the exact confusion `/paired` exists
+/// to end, reachable from the first screen of the flow.
+///
+/// A mistyped character or a QR left over from a previous run is enough.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TokenVerdict {
+    /// No token on the URL. Legitimate — someone opened `/install` directly —
+    /// and the page supplies the live one, because it is on the same LAN as
+    /// `/pair`, which already renders it.
+    Absent,
+    /// Present and correct.
+    Valid,
+    /// Present and wrong. **Do not render the setup flow.**
+    Invalid,
+}
+
+/// Classify the token on an incoming request.
+pub fn classify_token(path_and_query: &str, matches: impl FnOnce(&str) -> bool) -> TokenVerdict {
+    match crate::auth::token_from_query(path_and_query) {
+        None => TokenVerdict::Absent,
+        Some(t) if matches(t) => TokenVerdict::Valid,
+        Some(_) => TokenVerdict::Invalid,
+    }
+}
+
+/// The page shown for a pairing link that cannot work.
+///
+/// It terminates the confusion where it starts, rather than letting the user
+/// discover it three screens later as a network fault. It still links to the
+/// certificate, because that part is genuinely unaffected by a bad token and
+/// someone re-scanning a good QR afterwards will not have to install it twice.
+pub fn expired_page(hostname: &str, http_port: u16) -> String {
+    let pair_url = html_escape(&format!("http://{hostname}:{http_port}/pair"));
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>This pairing link is not valid</title>
+<style>
+:root {{ color-scheme: light dark; }}
+body {{ font: 16px/1.6 system-ui, sans-serif; margin: 0 auto; max-width: 32rem; padding: 1.5rem; }}
+h1 {{ font-size: 1.3rem; }}
+.hint {{ opacity: .75; font-size: .92rem; }}
+code {{ background: color-mix(in srgb, currentColor 12%, transparent);
+  padding: .1rem .35rem; border-radius: .25rem; }}
+</style></head><body>
+<h1>This pairing link is not valid</h1>
+<p>The link this phone opened carries a pairing code the bridge does not
+recognise. That usually means the QR code was from an earlier session, or a
+character was mistyped.</p>
+<p><strong>Get a fresh QR code from the bridge window on the computer</strong>
+and scan it again. Nothing is wrong with your phone or your network.</p>
+<p class="hint">On the computer, the pairing page is at <code>{pair_url}</code>.</p>
+<p class="hint">You have not installed anything yet, and nothing needs undoing.
+If you have already installed this bridge's certificate on a previous attempt,
+it is still fine — you will not be asked to install it twice.</p>
+</body></html>"#
+    )
+}
+
 /// The query to put on the link that sends the phone from here to the app.
 ///
 /// **This is the one place the pairing flow can silently break, and it did.**
@@ -338,8 +404,9 @@ kbd {{ white-space: nowrap; }}
   which is why this is client-side rather than decided server-side.
 -->
 <div id="ready" class="hidden">
-  <h1>You are set up</h1>
-  <p>This phone already trusts this bridge, so there is nothing to install.</p>
+  <h1>Certificate already installed</h1>
+  <p>This phone already trusts this bridge, so there is nothing to install.
+  Opening the app finishes pairing.</p>
   <div class="row">
     <a class="btn primary" href="{https_url}">Open the app</a>
     <a class="btn" href="{secure_check_url}">Test Bluetooth</a>
@@ -497,8 +564,14 @@ authority from the computer as well.</p>
               'bridge. Stop the other instance, or use the numeric address below.');
           return;
         }}
-        say('Trusted — you are all set.',
-            'Your phone accepts this bridge’s certificate. You can open the app now.');
+        // Says only what was established. The probe proves the phone trusts
+        // the certificate; it proves nothing about pairing, which has not
+        // happened yet and happens when the button below is tapped. "You are
+        // all set" asserted both, so a page that had verified one fact
+        // announced two — and when the second turned out to be false, the
+        // failure surfaced as "bridge unreachable" with no way back to here.
+        say('Certificate trusted.',
+            ' Your phone accepts this bridge’s certificate. Tap Open the app to finish pairing.');
         next.className = 'row show';
         settle(true);
       }}).catch(function () {{
@@ -690,6 +763,54 @@ mod tests {
         assert!(page.contains(r#"<div id="setup" class="hidden">"#));
         // And the check runs itself rather than waiting to be pressed.
         assert!(page.contains("runCheck(false);"));
+    }
+
+    #[test]
+    fn a_wrong_token_is_classified_as_invalid_not_absent() {
+        // The distinction is the whole fix. Absent means "opened /install
+        // directly", which is fine and gets the live token. Invalid means a
+        // stale QR or a mistyped character, and rendering the setup flow for it
+        // walks the user through installing a certificate, tells them they are
+        // set, and hands them on with a credential that cannot authorise.
+        assert_eq!(classify_token("/install", |_| false), TokenVerdict::Absent);
+        assert_eq!(
+            classify_token("/install?t=right", |t| t == "right"),
+            TokenVerdict::Valid
+        );
+        assert_eq!(
+            classify_token("/install?t=wrong", |t| t == "right"),
+            TokenVerdict::Invalid
+        );
+    }
+
+    #[test]
+    fn the_expired_page_sends_the_user_back_to_the_source_and_reassures_them() {
+        // It has to terminate the confusion here rather than let it be
+        // rediscovered three screens later as a network fault.
+        let page = expired_page("coyote.local", 8787);
+        assert!(page.contains("not valid"));
+        assert!(page.contains("fresh QR code"));
+        // And say what is *not* wrong, because the natural next suspicion is
+        // the phone or the Wi-Fi, and both are fine.
+        assert!(page.contains("Nothing is wrong with your phone or your network"));
+        // It must not offer the setup flow it is refusing to run.
+        assert!(!page.contains("Certificate&nbsp;Trust&nbsp;Settings"));
+    }
+
+    #[test]
+    fn the_trust_check_claims_only_what_it_verified() {
+        // The probe establishes that the phone trusts the certificate. It
+        // establishes nothing about pairing, which has not happened yet.
+        // "You are all set" asserted both, so a page that had verified one fact
+        // announced two — and when the second was false the failure surfaced as
+        // "bridge unreachable" with no route back here.
+        let page = page(&ctx(""));
+        assert!(page.contains("Certificate trusted."));
+        assert!(
+            !page.contains("you are all set"),
+            "the page must not claim pairing it has not observed"
+        );
+        assert!(page.contains("finish pairing"));
     }
 
     #[test]

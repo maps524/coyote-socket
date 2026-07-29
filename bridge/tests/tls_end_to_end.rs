@@ -678,3 +678,59 @@ async fn responses_do_not_leak_the_token_through_a_referer() {
         "the policy must be explicit: {response}"
     );
 }
+
+#[tokio::test]
+async fn a_wrong_token_does_not_get_the_setup_flow() {
+    // Found by probing the live bridge, not by reading: `/install?t=wrongtoken`
+    // rendered the whole setup page, said "Trusted — you are all set", and
+    // passed the bad token into the button. A stale QR from a previous run does
+    // it, and so does one mistyped character. Every failure afterwards then
+    // presents as "bridge unreachable".
+    //
+    // A check whose success path is reached without the check happening — in
+    // the flow whose entire purpose is telling a user where they stand.
+    let (addr, ca_pem, _token, _store) = serve_https("install-bad-token").await;
+
+    let refused = https_get_with(addr, &ca_pem, "/install?t=deadwrong", None, None).await;
+    assert!(
+        refused.starts_with("HTTP/1.1 410"),
+        "a token this bridge cannot recognise must not get the setup flow: {refused}"
+    );
+    assert!(refused.contains("not valid"));
+    assert!(
+        !refused.contains("Certificate&nbsp;Trust&nbsp;Settings"),
+        "the refusal must not also walk them through installing a certificate"
+    );
+    assert!(
+        !refused.contains("deadwrong"),
+        "the bad token must not be handed onward"
+    );
+}
+
+#[tokio::test]
+async fn a_correct_or_absent_token_still_gets_the_setup_flow() {
+    // The other side of the branch. Absent is legitimate — someone opened
+    // /install directly — and must keep working, or the fix for a stale QR
+    // becomes a new way to be stuck.
+    let (addr, ca_pem, token, _store) = serve_https("install-good-token").await;
+
+    for path in ["/install", &format!("/install?t={}", token.as_str())] {
+        let page = https_get_with(addr, &ca_pem, path, None, None).await;
+        assert!(page.starts_with("HTTP/1.1 200"), "{path} got: {page}");
+        assert!(
+            page.contains("Certificate&nbsp;Trust&nbsp;Settings"),
+            "{path} must render the setup flow"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_success_message_does_not_claim_pairing_it_has_not_seen() {
+    // The trust probe proves the certificate is trusted. Pairing happens later,
+    // when the button is tapped. Announcing both from evidence for one is what
+    // made a wrong token look like success.
+    let (addr, ca_pem, _token, _store) = serve_https("install-claims").await;
+    let page = https_get_with(addr, &ca_pem, "/install", None, None).await;
+    assert!(page.contains("Certificate trusted."));
+    assert!(!page.contains("you are all set"));
+}
