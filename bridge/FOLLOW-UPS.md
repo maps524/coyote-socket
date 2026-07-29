@@ -363,6 +363,40 @@ already tell was wrong.** The fix is the same shape too — make the guard match
 the condition. Assert the match count, or use a tool that fails on a missing
 pattern.
 
+**The risk is not spread evenly across a script, and knowing where it
+concentrates tells you which replaces to check first.** An unasserted replace
+against Rust is usually safe by accident: if it fails to match, the surrounding
+edit no longer type-checks and the compiler says so. The same replace against a
+*comment*, a doc string or Markdown has **no backstop at all** — nothing
+compiles the output, no test exercises it, and the only reader who would notice
+is a human who happens to look. Every instance found this week was in a comment
+or a doc, in three different files across two branches, and that is not a
+coincidence.
+
+### The audit that finds them: look for absolutes
+
+Comments do not go stale at random. **A hedged sentence tends to survive a
+change in behaviour; a categorical one is what goes false.** So grep the
+comments for *"the only"*, *"never"*, *"always"*, *"the entire"*, *"cannot"*,
+and check each against what the code does now.
+
+Run against this branch it found two, both mine, both written this session:
+
+- `Credential` said the bearer value **"never leaves the bridge"**. False, and
+  false in the dangerous direction: the bearer value is handed to the browser as
+  a cookie and comes back on every request — that *is* the mechanism. What never
+  leaves is the stored SHA-256 hash. Someone auditing what escapes this machine
+  would have read a true statement about the stored form as a claim about the
+  credential.
+- `id_is_usable` said it rejects **"only what cannot be displayed at all"**,
+  then listed "or something too long to be a name" in the same sentence. The
+  summary contradicted its own next clause.
+
+The security-relevant one is the pattern to fear: an absolute about *what leaves
+the machine* that was true of a narrower thing. `bridge-tls` found the same
+shape independently — a comment claiming the public certificate was "the only
+thing the install page serves", on a page that also carries the pairing token.
+
 And the misdiagnosis is section 0b: a failure attributed to the component
 nearest the symptom rather than to its cause. It was written into this document,
 in the section warning against exactly that, and stood for one commit.
