@@ -17,6 +17,7 @@
   // thing to be happening while developing one.
   const http = $derived(bridge.status?.http ?? { state: 'starting' as const })
   const serving = $derived(http.state === 'serving')
+  const tls = $derived(bridge.status?.tls ?? { state: 'starting' as const })
 
   // The URL grants access, so it is not shown by default — a window on a desk
   // or in a screen share should not be a credential.
@@ -75,18 +76,44 @@
   </div>
 
   <!--
-    Deliberately phrased as a requirement rather than a status. "HTTPS is not
-    built" was true when written and stops being true the moment the TLS work
-    lands, at which point this panel would be confidently wrong — and the copy
-    that tells a user which of three things to go and check is the worst place
-    to be confidently wrong.
+    Phrased as a requirement rather than a status, because "HTTPS is not built"
+    was true when written and stopped being true the moment the TLS work landed
+    — and the copy that tells a user which of three things to go and check is
+    the worst place to be confidently wrong.
+
+    The requirement is stated unconditionally; what changes is only whether we
+    can add that this bridge satisfies it. `tls.state` comes from the TLS bind,
+    so `serving` here means a listener exists, not that we intended one.
   -->
   <p class="small muted">
     Both devices must be on the same network. Web Bluetooth needs an HTTPS
     origin, so the phone cannot reach the Coyote over a plain
     <span class="mono">http://</span> address however well everything else
     works.
+    {#if tls.state === 'serving'}
+      The pairing page walks the phone through installing this bridge's
+      certificate, which is what provides one.
+    {/if}
   </p>
+
+  <!--
+    A failed TLS bind is worth its own line. Without it the phone reaches the
+    pairing page, finds no certificate to install, and there is nothing in the
+    app that says why — so the search starts at the phone and ends, much later,
+    at a port that was already taken.
+  -->
+  {#if tls.state === 'failed'}
+    <p class="small warn">
+      HTTPS is not running, so the phone will not be able to use Bluetooth —
+      everything else still works.
+      <span class="mono">{tls.detail}</span>
+    </p>
+  {:else if tls.state === 'notConfigured'}
+    <p class="small muted">
+      No certificate: <span class="mono">{tls.detail}</span>. The phone can open
+      the app but cannot reach the Coyote.
+    </p>
+  {/if}
 
   <!--
     Revocation is a user action, not something pairing does on its own. There

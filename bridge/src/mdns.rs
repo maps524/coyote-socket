@@ -99,18 +99,28 @@ impl Responder {
 /// `coyote.local` goes on announcing an address nothing is listening on. The
 /// name would be stable and wrong, which is worse than unstable and right,
 /// because nothing in the failure points at DNS.
-pub fn follow(responder: Responder, mut rx: tokio::sync::watch::Receiver<IpAddr>) {
-    tokio::spawn(async move {
-        // Held for the lifetime of the task: dropping the responder withdraws
-        // the name from the network.
-        let responder = responder;
-        while rx.changed().await.is_ok() {
-            let ip = *rx.borrow_and_update();
-            if responder.announce(ip) {
-                log_info!("[mdns] {BRIDGE_HOSTNAME} now answers with {ip}");
-            }
+/// Returns a future the **caller** spawns, rather than spawning itself.
+///
+/// It used to call `tokio::spawn` directly, which panicked with "there is no
+/// reactor running" for the Tauri app: `setup()` runs on a plain `main` with no
+/// runtime entered, so the app crashed on launch on its default path. The
+/// headless binary happened to be fine only because it called this from inside
+/// an already-spawned task.
+///
+/// A library that spawns has to be right about which runtime it is on; a
+/// library that returns a future cannot be wrong. The two callers here are on
+/// different runtimes — Tauri's and plain tokio's — which is exactly the
+/// situation where that distinction stops being stylistic.
+pub async fn follow(responder: Responder, mut rx: tokio::sync::watch::Receiver<IpAddr>) {
+    // Held for the lifetime of the future: dropping the responder withdraws the
+    // name from the network.
+    let responder = responder;
+    while rx.changed().await.is_ok() {
+        let ip = *rx.borrow_and_update();
+        if responder.announce(ip) {
+            log_info!("[mdns] {BRIDGE_HOSTNAME} now answers with {ip}");
         }
-    });
+    }
 }
 
 /// Start answering `coyote.local` with `ip`.
@@ -158,9 +168,21 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "announces coyote.local on the real LAN; see the comment"]
     fn a_responder_starts_and_stops_without_taking_the_bridge_with_it() {
-        // Multicast may well be unavailable wherever this test runs, so the
-        // assertion is about the failure being survivable, not about success.
+        // IGNORED BY DEFAULT, and it must stay that way.
+        //
+        // `start` does not simulate anything — it multicasts a real
+        // announcement on every interface. Run in a normal `cargo test` it
+        // publishes `coyote.local -> 127.0.0.1` to the whole network, and any
+        // phone that caches that answer then tries to reach the bridge at its
+        // own loopback. The bridge is fine, the certificate is fine, and the
+        // phone cannot connect — with the cause sitting in a unit test that
+        // finished milliseconds later.
+        //
+        // That is a worse failure than the one this test checks for. Run it
+        // deliberately with `--ignored`, on a network where poisoning a cache
+        // does not matter.
         let responder = start(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8443);
         drop(responder);
     }

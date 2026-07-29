@@ -466,68 +466,67 @@ What was **measured**, rather than assumed:
 | `wss://` works on the TLS listener | Integration test. A secure page cannot open `ws://`, so this is the acceptance path, not a nicety |
 | The CA survives a restart | Second run logs "using the existing local CA"; the PEM is byte-identical |
 
-### The one thing not verified
+### Verified on a real iPhone, 2026-07-29
 
-**No iPhone has been through this flow.** Everything above was established with
-rustls, curl and OpenSSL. They enforce the same certificate rules, but they are
-not Apple's trust store and they do not have Apple's profile-install UI.
-Specifically unverified:
+The acceptance condition was never "the certificate is well-formed" — it was
+**does Web Bluetooth work from the resulting origin**. It does.
 
-- whether iOS resolves `coyote.local` **on this network** — Windows mDNS
-  responders coexist unevenly, and consumer access points sometimes suppress
-  multicast entirely;
-- whether the two-step install (profile, then Certificate Trust Settings) reads
-  clearly enough to be followed without someone standing over it;
-- **whether Bluefy honours a CA installed in the iOS system trust store.** See
-  below. This is the real open question.
+| Step | Result |
+|---|---|
+| `coyote.local` resolves from the phone | **Yes** |
+| Profile downloads and installs in Safari | **Yes** |
+| Certificate Trust Settings toggle appears and works | **Yes** |
+| Safari reports the origin trusted | **Yes** |
+| **Bluefy honours the system-store CA** | **Yes** |
+| **Coyote connected over Bluetooth from `https://coyote.local:8443`** | **Yes** |
 
-Treat the certificate machinery as proven and the iOS flow as a hypothesis.
+Scope it as tightly as the DeoVR capture is scoped: **one handset, one iOS
+version, one Bluefy version, one network, once.** That is enough to build on
+and not enough to call universal. In particular, that Bluefy honours the iOS
+system trust store is an observation about the build that was installed that
+evening, not a documented guarantee from its author.
 
-### What is settled, and should not be re-litigated
+**The mDNS responder is why any of this worked.** Windows' own responder was
+measured advertising `172.21.160.1` — the WSL virtual switch — for this
+machine's `.local` name. A phone handed that address cannot reach anything, and
+the failure would have presented as a certificate problem, because that is what
+every visible symptom points at. If this crate is ever refactored, the responder
+is not an optimisation to be dropped in favour of the OS.
 
-**iOS Safari has no Web Bluetooth.** Established by this project's capability
-probe, and the reason Bluefy is in the plan. A missing `navigator.bluetooth` in
-Safari is the expected reading of a known constraint, not a discovery.
+### The failure mode to check first when someone else's phone does not work
 
-**The phone is a proven Bluetooth host.** Real output was driven to a Coyote
-from Bluefy on that handset. So a failure in this flow is a failure of *this*
-work, not evidence that the architecture needs rethinking.
+Unexercised now rather than wrong, and still the right first suspicion:
 
-### The open risk, stated in advance because it will not look like itself
+> An untrusted `wss:` subresource fails **silently**. Certificate UI only exists
+> for top-level navigations, so the socket closes as code 1006 with no
+> interstitial and nothing the page can inspect. It reaches the user as "bridge
+> unreachable", which is indistinguishable from an unplugged router.
 
-**Does Bluefy honour a CA installed in the iOS system trust store?** It is
-third-party and its certificate handling is unverified by us. If it is
-`WKWebView`-based it should inherit system trust — but "should" is carrying the
-weight, and this project has spent a day finding things that should have worked.
-
-The failure mode is genuinely confusing, so predict it rather than diagnose it:
-
-> The certificate is valid. Safari's trust check says **Trusted**. Bluefy still
-> refuses — and because a `wss:` subresource gets **no interstitial**, it fails
-> silently as close code 1006, i.e. "bridge unreachable". It looks exactly like
-> a network fault and is not one.
-
-If that happens the answer is **not** "TLS didn't work" and **not** "rethink the
-architecture". It is: *Bluefy needs the CA by another route, or the origin needs
-a publicly-trusted certificate* — for which Tailscale's `*.ts.net`, documented
-below, is the cheapest option that requires no domain purchase.
+The distinguishing test is whether the same origin loads in a top-level tab —
+which is exactly what `/secure-check` is for. **If that page loads, the
+certificate is trusted and the network is fine**, so a failing socket is about
+trust and nothing else.
 
 ### Still open
 
-- **Token exposure on the first hop.** The QR must point at plain HTTP, so the
-  pairing token is readable by anyone on the LAN at that moment. `/pair/rotate`
-  narrows the window to "until the phone finishes pairing"; it does not close
-  it, because a sniffer acting inside that window can rotate the token itself.
+- **Token exposure on the first hop.** The QR points at plain HTTP by
+  necessity, so the pairing token is readable by anyone on the LAN at that
+  moment. `/pair/rotate` narrows the window to "until the phone finishes
+  pairing" and does not close it.
 - **Renewal has never been observed.** The re-issue path is exercised by unit
-  tests against synthetic timestamps, not by a bridge that has actually run for
-  a year or had its DHCP lease move underneath it.
+  tests against synthetic timestamps, not by a bridge that has run for a year or
+  had its DHCP lease move underneath it.
+- **HereSphere, media changes, on-device media** — unchanged from the spike.
 
 ### The documented alternative
 
 **Tailscale** gives a real certificate on a stable `*.ts.net` hostname via
 `tailscale cert` / Serve — no certificate to install on the phone, and it works
-off-LAN. It costs a dependency and an account on both machines. Worth knowing
-about for anyone already running it; not worth building instead.
+off-LAN. It costs a dependency and an account on both machines.
+
+It is no longer the contingency, because the local CA works. It remains the
+answer for anyone who cannot or will not install a root certificate on their
+phone, which is a legitimate position and not one to argue with.
 
 **Cloudflare quick tunnels are the wrong default.** The hostname churns every
 restart, which is a new origin every launch, which makes the PWA amnesiac —

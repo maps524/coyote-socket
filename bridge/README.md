@@ -257,10 +257,14 @@ On first run it generates a CA, keeps the private key in `<config>/tls/`, and
 serves the public certificate from `/install`. The phone installs it once.
 
 - **The address is `coyote.local`**, answered by an mDNS responder inside the
-  bridge. It has to be the bridge's own: Windows' built-in responder was
-  measured advertising a virtual adapter (`172.21.160.1`, WSL's switch) rather
-  than the LAN address, which a phone cannot reach. The current IP is in the
-  certificate too, as a fallback for networks that block multicast.
+  bridge, and it is what the QR carries. It has to be the bridge's own
+  responder: Windows' built-in one was measured advertising a virtual adapter
+  (`172.21.160.1`, WSL's switch) rather than the LAN address, which a phone
+  cannot reach — and the resulting failure would have looked like a certificate
+  problem, because every visible symptom points there. **That responder is why
+  this works at all**; it is not an optimisation to drop in favour of the OS.
+  The current IP is in the certificate too, and is used on the QR only when
+  mDNS could not start.
 - **A stable name is the point.** The origin is what OPFS, the PWA install and
   the Web Bluetooth device grant are keyed on. A tunnel that mints a new
   hostname every restart resets all three — that is the difference between an
@@ -280,11 +284,13 @@ serves the public certificate from `/install`. The phone installs it once.
   probe, and the reason Bluefy is in the plan at all. Opening the app in Safari
   gives a page that loads and simply never finds the Coyote.
 
-The certificate is installed into the iOS system trust store, so any browser on
-the device should inherit it. **Whether Bluefy actually honours it is not yet
-verified** — see FOLLOW-UPS.
+The certificate is installed into the iOS system trust store, and **Bluefy does
+inherit it** — verified on a real iPhone on 2026-07-29, with the Coyote
+connected over Bluetooth from `https://coyote.local:8443`. One handset, one iOS
+version, one Bluefy version, once; enough to build on, not enough to call
+universal.
 
-### The failure you will actually hit looks like a network problem
+### The failure to check first looks like a network problem
 
 Browsing to an untrusted HTTPS address shows an interstitial you can read. The
 app does not browse — it opens a `wss://` socket, and **an untrusted socket in a

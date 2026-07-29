@@ -529,7 +529,14 @@ where
                     stream,
                     Status::NOT_FOUND,
                     "text/plain; charset=utf-8",
-                    b"this bridge is not serving HTTPS, so there is no certificate to install",
+                    // Careful about *why*. In the common case — another bridge
+                    // already holding 8443 — a certificate exists and it is the
+                    // listener that is missing, so "there is no certificate"
+                    // would send the reader looking in the wrong place.
+                    b"this bridge is not serving HTTPS, so there is nothing to install here. \
+                      Either TLS is switched off, or the HTTPS port could not be bound \
+                      (most often because another bridge is already using it). \
+                      The bridge log says which.",
                 )
                 .await
             }

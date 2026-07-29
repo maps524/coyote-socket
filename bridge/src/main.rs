@@ -202,11 +202,23 @@ fn main() {
     // mDNS record, the QR and the allowed origins must all name the same
     // interface. Three independent calls to `local_ip()` only usually agreed,
     // and disagreed exactly when detection failed.
-    let advertised_ip = args
-        .advertise
-        .or_else(http::local_ip)
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    let base_url = format!("http://{advertised_ip}:{}", args.http_port);
+    // `None` when there is genuinely no routable address, and that stays `None`
+    // rather than becoming loopback.
+    //
+    // Loopback was the old fallback and it is the worst of the three options.
+    // It puts 127.0.0.1 in the certificate's IP SAN *and* announces
+    // `coyote.local -> 127.0.0.1` on the LAN, so a phone that resolves the name
+    // connects to itself and reports the bridge unreachable — with the bridge
+    // running perfectly and everything on this machine looking correct. The
+    // honest answer to "which address should the phone use" is sometimes "I do
+    // not know", and saying so beats a confident wrong one.
+    let advertised_ip = args.advertise.or_else(http::local_ip);
+    if advertised_ip.is_none() {
+        log_warn!(
+            "[main] no routable address detected, so the certificate will carry no IP              and {} will not be announced. Pass --advertise <ip> to say which address              the phone should use.",
+            coyote_bridge::certs::BRIDGE_HOSTNAME
+        );
+    }
     let local_url = format!("http://127.0.0.1:{}", args.http_port);
 
     // The headless binary has no settings file, so its token is per-run. That
@@ -235,7 +247,7 @@ fn main() {
             &tls_config_dir,
             args.http_port,
             args.https_port,
-            Some(advertised_ip),
+            advertised_ip,
         ) {
             Ok(prepared) => Some(prepared),
             Err(e) => {
@@ -254,16 +266,6 @@ fn main() {
         None
     };
 
-    // The QR points at the **install page on plain HTTP**, not at HTTPS.
-    // A phone that has not yet trusted the CA meets a full-page certificate
-    // interstitial with no route back to the instructions, so sending it
-    // straight to HTTPS strands it exactly when it needs help most. The install
-    // page hands it on to HTTPS once the trust check passes.
-    let pairing_url = match &prepared {
-        Some(_) => auth::with_token(&format!("{base_url}/install"), &token),
-        None => auth::with_token(&base_url, &token),
-    };
-
     // mDNS gives the phone an address that survives DHCP. Windows' own
     // responder cannot be used for this — measured, it answers with a virtual
     // adapter's address — so the bridge runs its own. See `mdns`.
@@ -271,7 +273,8 @@ fn main() {
     // The responder follows the address: a certificate that moved while the
     // name did not would leave `coyote.local` stable and wrong, which is worse
     // than unstable and right because nothing in the failure points at DNS.
-    let (advertised_tx, advertised_rx) = tokio::sync::watch::channel(advertised_ip);
+    let (advertised_tx, advertised_rx) =
+        tokio::sync::watch::channel(advertised_ip.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)));
     let advertise = tls::Advertise {
         pinned: args.advertise,
         mdns_tx: Some(advertised_tx),
@@ -280,14 +283,55 @@ fn main() {
     // once the runtime exists.
     let mut mdns_follow = None;
     if prepared.is_some() {
-        if let Some(responder) = mdns::start(advertised_ip, args.https_port) {
+        // Skipped entirely without an address: announcing a name we cannot
+        // back with a reachable address is worse than not answering at all.
+        if let Some(responder) =
+            advertised_ip.and_then(|ip| mdns::start(ip, args.https_port))
+        {
             mdns_follow = Some((responder, advertised_rx));
         }
     }
 
+    // The name goes on the QR, not the address — now that the name is proven.
+    //
+    // The IP was the default while mDNS was a hypothesis, because an address
+    // always resolves. `coyote.local` has now resolved from a real iPhone, and
+    // it is strictly better: it survives DHCP moving this machine, which is the
+    // entire reason the responder exists. An IP on the QR would hand the phone
+    // a bookmark that breaks on the next lease — a new origin, so OPFS wiped,
+    // PWA install dead and the Bluetooth grant reset.
+    //
+    // The address stays as the fallback for networks that eat multicast, and
+    // the log says which is in use so "why is it using the number?" has a
+    // visible answer.
+    let (pairing_host, using_mdns) = match (&mdns_follow, advertised_ip) {
+        (Some(_), _) => (coyote_bridge::certs::BRIDGE_HOSTNAME.to_string(), true),
+        (None, Some(ip)) => (ip.to_string(), false),
+        (None, None) => ("127.0.0.1".to_string(), false),
+    };
+    let base_url = format!("http://{pairing_host}:{}", args.http_port);
+    if using_mdns {
+        log_info!(
+            "[main] the phone will use {} — a name that survives this machine's address changing",
+            coyote_bridge::certs::BRIDGE_HOSTNAME
+        );
+    } else {
+        log_warn!(
+            "[main] mDNS is not running, so the phone gets {pairing_host} instead of {}.              That works until this machine's address changes.",
+            coyote_bridge::certs::BRIDGE_HOSTNAME
+        );
+    }
+
+    // One value, used by the QR, the tray and the log alike. They were separate
+    // expressions once and disagreed: the log said `/install` while the QR kept
+    // the bare root, so scanning it dropped the phone into the app over plain
+    // HTTP with the certificate never offered.
+    let pairing_base = coyote_bridge::install::pairing_base(&base_url, prepared.is_some());
+    let pairing_url = auth::with_token(&pairing_base, &token);
+
     // Origins the phone can legitimately present once TLS is in play. Omitting
     // the HTTPS ones means the app loads and is then refused its own WebSocket.
-    let allowed_hosts = tls::browser_origins(Some(advertised_ip), args.http_port, args.https_port);
+    let allowed_hosts = tls::browser_origins(advertised_ip, args.http_port, args.https_port);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -298,7 +342,11 @@ fn main() {
     let player_endpoint = args.player.clone();
     let static_dir = args.static_dir.clone();
     let library_dir = args.library_dir.clone();
-    let base_for_http = base_url.clone();
+    // `pairing_base`, not `base_url`: it carries the `/install` path when TLS is
+    // up, and this is what `/pair` renders into the QR. Using the bare base here
+    // is the bug where the log described the intended flow and the QR silently
+    // skipped it.
+    let base_for_http = pairing_base.clone();
     let token_for_http = token.clone();
     let https_bind = args.bind;
     let https_port = args.https_port;
@@ -308,7 +356,7 @@ fn main() {
 
     runtime.spawn(async move {
         if let Some((responder, rx)) = mdns_follow.take() {
-            mdns::follow(responder, rx);
+            tokio::spawn(mdns::follow(responder, rx));
         }
         // The headless binary connects on start and never stops trying: it is
         // a service, and there is nobody here to press a button. The

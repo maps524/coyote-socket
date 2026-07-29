@@ -143,17 +143,15 @@ impl<'a> InstallPage<'a> {
         format!("https://{}:{}/trustcheck", self.hostname, self.https_port)
     }
 
-    /// The Bluetooth check, on the HTTPS origin, with the query preserved.
+    /// The Bluetooth check, on the HTTPS origin, **without the token**.
     ///
-    /// Routed through [`to_https_origin`] rather than formatted inline so there
-    /// is exactly one place that rewrites an origin, and it is the one that has
-    /// tests.
+    /// The query is dropped deliberately. `/secure-check` ignores a token, and
+    /// this is the one link on the page the user is told to open in *Bluefy* —
+    /// so carrying it would copy a password-equivalent string into a second
+    /// browser's history and leave it there, buying nothing.
     pub fn secure_check_url(&self) -> String {
         to_https_origin(
-            &format!(
-                "http://{}:{}/secure-check{}",
-                self.hostname, self.http_port, self.query
-            ),
+            &format!("http://{}:{}/secure-check", self.hostname, self.http_port),
             self.hostname,
             self.https_port,
         )
@@ -162,6 +160,22 @@ impl<'a> InstallPage<'a> {
     fn ip_fallback_url(&self) -> Option<String> {
         self.ip
             .map(|ip| format!("https://{}:{}/{}", ip, self.https_port, self.query))
+    }
+}
+
+/// The path the QR must point at, given whether a certificate exists.
+///
+/// A function rather than an inline `match` at each call site because there are
+/// three of them — the headless binary, the app, and the log line — and when
+/// they were written separately they disagreed. The QR kept the bare root while
+/// the log said `/install`, so scanning it landed the phone in the app over
+/// plain HTTP: no secure context, no Web Bluetooth, and the certificate never
+/// offered. It looks exactly like the app being broken.
+pub fn pairing_base(http_origin: &str, tls_available: bool) -> String {
+    if tls_available {
+        format!("{http_origin}/install")
+    } else {
+        http_origin.to_string()
     }
 }
 
@@ -258,7 +272,37 @@ kbd {{ white-space: nowrap; }}
   padding-left: .9rem; margin: 1.5rem 0; }}
 #next {{ display: none; }}
 #next.show {{ display: block; }}
+.hidden {{ display: none; }}
+#ready h1 {{ margin-bottom: .25rem; }}
 </style></head><body>
+
+<!--
+  Two states, one page, decided by the bridge rather than by the user.
+
+  There used to be a separate QR for the app and a user who had to know which
+  one they wanted — and the app QR skipped the certificate entirely, so scanning
+  the obvious one produced an app that could never find the Coyote. `/trustcheck`
+  means we can just ask: the phone already knows whether it trusts us, and one
+  fetch turns that into the right page.
+
+  The check has to run on the phone, not on the desktop that rendered the QR,
+  which is why this is client-side rather than decided server-side.
+-->
+<div id="ready" class="hidden">
+  <h1>You are set up</h1>
+  <p>This phone already trusts this bridge, so there is nothing to install.</p>
+  <div class="row">
+    <a class="btn primary" href="{https_url}">Open the app</a>
+    <a class="btn" href="{secure_check_url}">Test Bluetooth</a>
+  </div>
+  <p class="hint">Open the app in <strong>Bluefy</strong>. Safari does not support Web
+  Bluetooth, so there it will load and never find the Coyote.</p>
+  <!-- Single-quoted href on purpose: a double quote followed by a hash would
+       close the Rust raw-string literal this page lives in. -->
+  <p class="hint"><a href='#' id="show-setup">Show the certificate instructions anyway</a></p>
+</div>
+
+<div id="setup" class="hidden">
 
 <h1>Set up a secure connection to this bridge</h1>
 
@@ -316,6 +360,7 @@ network.</p>
   <a class="btn" href="{secure_check_url}">Test Bluetooth</a>
 </div>
 {fallback}
+</div>
 
 <h2>What you are agreeing to</h2>
 <div class="trade">
@@ -358,9 +403,29 @@ authority from the computer as well.</p>
                  {{ cache: 'no-store', mode: 'cors' }});
   }}
 
-  button.addEventListener('click', function () {{
-    button.disabled = true;
-    say('Checking…', '');
+  var ready = document.getElementById('ready');
+  var setup = document.getElementById('setup');
+  var settled = false;
+
+  // Decide which of the two pages this is. Until the check answers, show
+  // neither: a flash of "install this certificate" for someone who already did
+  // is the exact confusion this page exists to remove.
+  function settle(trusted) {{
+    if (settled) return;
+    settled = true;
+    (trusted ? ready : setup).className = '';
+  }}
+
+  document.getElementById('show-setup').addEventListener('click', function (e) {{
+    e.preventDefault();
+    setup.className = '';
+  }});
+
+  function runCheck(manual) {{
+    if (manual) {{
+      button.disabled = true;
+      say('Checking…', '');
+    }}
 
     // Stage one: can we reach the bridge by name at all? A failure here is a
     // name or network problem and has nothing to do with the certificate, so
@@ -386,6 +451,7 @@ authority from the computer as well.</p>
         say('Trusted — you are all set.',
             'Your phone accepts this bridge’s certificate. You can open the app now.');
         next.className = 'row show';
+        settle(true);
       }}).catch(function () {{
         say('Not trusted yet.',
             'The bridge is reachable, so the network and the address are fine — ' +
@@ -400,8 +466,17 @@ authority from the computer as well.</p>
           'Wi‑Fi as the computer, and not on a guest network.');
     }}).then(function () {{
       button.disabled = false;
+      // Whatever happened, this is no longer undecided: anything that did not
+      // reach the "trusted" branch needs the instructions.
+      settle(false);
     }});
-  }});
+  }}
+
+  button.addEventListener('click', function () {{ runCheck(true); }});
+
+  // Run once on load, so the QR has one destination and the bridge works out
+  // which half of it the phone needs.
+  runCheck(false);
 }})();
 </script>
 </body></html>"#
@@ -553,6 +628,53 @@ mod tests {
     }
 
     #[test]
+    fn one_page_serves_both_states_and_starts_showing_neither() {
+        // The user asked why there were two QRs and which one to scan. There is
+        // now one, and the phone's own answer to `/trustcheck` decides which
+        // half it sees — the bridge can ask rather than making the user choose.
+        let page = page(&ctx(""));
+        assert!(page.contains(r#"id="ready""#));
+        assert!(page.contains(r#"id="setup""#));
+        // Both start hidden: a flash of "install this certificate" shown to
+        // someone who already installed it is the confusion this removes.
+        assert!(page.contains(r#"<div id="ready" class="hidden">"#));
+        assert!(page.contains(r#"<div id="setup" class="hidden">"#));
+        // And the check runs itself rather than waiting to be pressed.
+        assert!(page.contains("runCheck(false);"));
+    }
+
+    #[test]
+    fn the_qr_points_at_the_install_page_whenever_a_certificate_exists() {
+        // Regression. The QR used to encode the bare root while the log said
+        // `/install`, so scanning it — the path every instruction leads with —
+        // dropped the phone into the app over plain HTTP, where Web Bluetooth
+        // cannot work and nothing ever offers the certificate.
+        assert_eq!(
+            pairing_base("http://192.168.0.9:8788", true),
+            "http://192.168.0.9:8788/install"
+        );
+        // And without a certificate there is nothing to install, so the root is
+        // right.
+        assert_eq!(
+            pairing_base("http://192.168.0.9:8788", false),
+            "http://192.168.0.9:8788"
+        );
+    }
+
+    #[test]
+    fn the_bluetooth_check_link_does_not_leak_the_token_into_a_second_browser() {
+        // The page tells the user to open this in Bluefy. `/secure-check`
+        // ignores a token, so appending one only writes a password-equivalent
+        // string into a second browser's history and leaves it there.
+        let page = page(&ctx("?t=secret-token"));
+        assert!(page.contains("https://coyote.local:8443/secure-check"));
+        assert!(
+            !page.contains("secure-check?t="),
+            "the Bluetooth check must not carry the pairing token"
+        );
+    }
+
+    #[test]
     fn the_pairing_token_survives_the_move_to_https() {
         // The single most breakable contract between this work and the pairing
         // token: a QR that loads a page which then fails to authorize looks
@@ -659,10 +781,10 @@ mod tests {
     #[test]
     fn the_bluetooth_check_link_goes_through_the_tested_rewrite() {
         // `to_https_origin` had tests and no callers, so a reviewer sent to
-        // check it was checking code nothing ran. It is now the only thing that
-        // builds this URL, and it preserves the query while doing so.
+        // check it was reviewing code nothing ran. It is now the only thing
+        // that builds this URL.
         let page = page(&ctx("?t=tok"));
-        assert!(page.contains("https://coyote.local:8443/secure-check?t=tok"));
+        assert!(page.contains("https://coyote.local:8443/secure-check"));
     }
 
     #[test]

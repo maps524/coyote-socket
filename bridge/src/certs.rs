@@ -271,12 +271,16 @@ impl LocalCa {
 
         std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
 
-        // Write to temporaries and rename into place. Two bridges starting
-        // together against an empty directory would otherwise interleave — one
-        // writing its key between the other's key and certificate — leaving a
-        // key and a certificate that both parse and are not a pair. Rename is
-        // atomic on both platforms, so a reader sees either the old file or the
-        // complete new one and never a half-written pair.
+        // Write to temporaries and rename into place.
+        //
+        // This makes each *file* appear atomically — no reader ever sees a
+        // half-written certificate. It does **not** make the pair atomic: two
+        // processes racing an empty directory can still interleave their two
+        // renames and leave one CA's certificate beside the other's key. That
+        // is caught by `verify_pair` on the next load, so the outcome is a loud
+        // error and one reinstall rather than a silent permanent failure.
+        // Closing it properly needs an exclusive-create lock file; this is the
+        // cheap part, and the comment should not claim the expensive part.
         let key_tmp = dir.join(format!("{CA_KEY_FILE}.tmp{}", std::process::id()));
         let cert_tmp = dir.join(format!("{CA_CERT_FILE}.tmp{}", std::process::id()));
         write_private(&key_tmp, &key_pair.serialize_pem())?;
@@ -464,8 +468,18 @@ fn subject_common_name(cert_pem: &str) -> Option<String> {
 /// desktop and a home server will otherwise see two identical entries and have
 /// no way to tell which one they are about to delete.
 fn display_name_for_host() -> String {
-    let host = hostname().unwrap_or_else(|| "this computer".to_string());
-    format!("CoyoteSocket Bridge on {host}")
+    display_name_for(hostname().as_deref())
+}
+
+/// Split out so tests can supply a name without mutating process environment.
+///
+/// The regression test for the rename bug used to `set_var("COMPUTERNAME", …)`
+/// and never restore it, inside a suite `cargo test` runs as parallel threads
+/// in one process — a test mutating global state shared with everything else in
+/// flight. A regression test for a silent-failure bug should not itself be a
+/// source of one.
+fn display_name_for(host: Option<&str>) -> String {
+    format!("CoyoteSocket Bridge on {}", host.unwrap_or("this computer"))
 }
 
 fn hostname() -> Option<String> {
@@ -693,7 +707,15 @@ mod tests {
         let original_name = first.display_name().to_string();
         drop(first);
 
-        std::env::set_var("COMPUTERNAME", "A-COMPLETELY-DIFFERENT-NAME");
+        // The machine "renames": what the environment would generate now differs
+        // from what is stored. Expressed as an assertion rather than by mutating
+        // a process-wide variable out from under every other test in flight.
+        assert_ne!(
+            display_name_for(Some("A-COMPLETELY-DIFFERENT-NAME")),
+            original_name,
+            "premise: a rename changes what the environment would produce"
+        );
+
         let reloaded = LocalCa::load_or_generate(&dir).expect("reload after rename");
 
         assert_eq!(
