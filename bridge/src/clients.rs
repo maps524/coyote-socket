@@ -283,6 +283,22 @@ pub struct Claim {
     pub label: Option<String>,
 }
 
+impl Credential {
+    /// Whether this id can safely key a row and be rendered.
+    ///
+    /// Deliberately far weaker than [`sanitise_id`] — no length floor, no
+    /// charset — because this comes from the bridge's own store rather than
+    /// from a peer, and imposing our format on someone else's generator would
+    /// buy nothing. It rejects only what cannot be displayed at all: nothing,
+    /// whitespace, control characters, or something too long to be a name.
+    pub fn id_is_usable(&self) -> bool {
+        let id = self.id.trim();
+        !id.is_empty()
+            && id.len() <= MAX_ID_LEN
+            && !self.id.chars().any(|c| c.is_control())
+    }
+}
+
 impl Claim {
     pub fn is_empty(&self) -> bool {
         self.id.is_none() && self.label.is_none()
@@ -663,7 +679,7 @@ impl ClientRegistry {
     pub fn credentials_available(&self) -> bool {
         self.credentials
             .lock()
-            .expect("client registry lock")
+            .unwrap_or_else(|e| e.into_inner())
             .is_some()
     }
 
@@ -681,11 +697,26 @@ impl ClientRegistry {
         let resolver = self
             .credentials
             .lock()
-            .expect("client registry lock")
+            .unwrap_or_else(|e| e.into_inner())
             .clone();
         if let Some(resolver) = resolver {
             if let Some(credential) = resolver(cookie_header) {
-                return ConnectingIdentity::Credential(credential);
+                // The contract on `Credential` cannot be enforced at a type
+                // boundary, so it is enforced here. A blank or unprintable id
+                // keys a row that renders as an empty name, and "the verified
+                // device called nothing" is a worse answer than "we could not
+                // establish who this is".
+                //
+                // Refuses rather than repairs: a store handing back a malformed
+                // id is a bug in the store, and quietly making it presentable
+                // would hide it. Loud, and falls back to the honest state.
+                if credential.id_is_usable() {
+                    return ConnectingIdentity::Credential(credential);
+                }
+                crate::log_warn!(
+                    "[clients] the credential store returned an unusable device id                      ({} chars); treating this connection as unidentified",
+                    credential.id.chars().count()
+                );
             }
         }
         match id_from_query(path_and_query) {
@@ -893,7 +924,7 @@ impl ClientRegistry {
             credentials_available: self
                 .credentials
                 .lock()
-                .expect("client registry lock")
+                .unwrap_or_else(|e| e.into_inner())
                 .is_some(),
         }
     }
@@ -2210,6 +2241,118 @@ mod tests {
             "the verified device's disconnect survived the churn"
         );
         assert!(view.clients.len() <= RETAIN_DISCONNECTED);
+    }
+
+    // -----------------------------------------------------------------------
+    // Revocation, probed for shape
+    //
+    // The surface where a wrong answer is most expensive: a device the user
+    // believes is cut off that is not.
+    // -----------------------------------------------------------------------
+
+    /// Revoking a credential whose socket has already closed still marks the
+    /// row, and still reports nothing was disconnected. Both facts matter and
+    /// they are different facts.
+    #[test]
+    fn revoking_an_already_closed_socket_marks_without_claiming_a_disconnect() {
+        let reg = registry();
+        let handle = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-0001", None));
+        drop(handle);
+
+        assert_eq!(reg.revoke("dev-0001"), 0, "nothing was open to close");
+        let view = reg.view();
+        assert!(view.clients[0].revoked_at_ms.is_some());
+        assert!(!view.clients[0].revocable, "nothing left to revoke");
+    }
+
+    /// Revoking twice is not an error and does not double-count. The second
+    /// call finds the row already marked and no sockets left to close.
+    #[test]
+    fn revoking_twice_is_harmless() {
+        let reg = registry();
+        let handle = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-0001", None));
+
+        assert_eq!(reg.revoke("dev-0001"), 1);
+        assert!(reg.view().clients[0].revoked_at_ms.is_some());
+
+        // The socket is signalled but the relay has not dropped it yet, which
+        // is the real interleaving: `revoke` returns before the task wakes.
+        assert_eq!(reg.revoke("dev-0001"), 1, "still open, still signalled");
+
+        drop(handle);
+        assert_eq!(reg.revoke("dev-0001"), 0, "now there is nothing to close");
+        assert!(reg.view().clients[0].revoked_at_ms.is_some());
+    }
+
+    /// A revoke that lands while a connection is still being set up must still
+    /// reach it. The signal is a *level*, not an edge — a handle created before
+    /// the revoke sees it on its first poll rather than waiting for a change
+    /// that has already happened.
+    #[tokio::test]
+    async fn a_revoke_during_setup_is_not_missed() {
+        let reg = registry();
+        let mut handle = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-0001", None));
+
+        // Revoked before anything ever polls `revoked()`, which is the window
+        // between registering and the relay reaching its select.
+        reg.revoke("dev-0001");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle.revoked())
+            .await
+            .expect("a revoke issued before the first poll must still be seen");
+    }
+
+    /// Revoking a credential must not touch a different connection that merely
+    /// volunteers the same string.
+    ///
+    /// The impersonating row is the one an attacker controls, so if revocation
+    /// followed the id rather than the identity, the attacker would choose
+    /// whose socket got closed.
+    #[test]
+    fn revoking_a_credential_leaves_an_impersonator_alone_and_vice_versa() {
+        let reg = registry();
+        let mut real = reg.connect(addr("192.168.0.31:5000"), Some(PHONE), credential("dev-abc123", None));
+        let _fake = reg.connect(addr("10.9.9.9:40000"), Some(PHONE), claimed("dev-abc123"));
+
+        assert_eq!(reg.revoke("dev-abc123"), 1, "exactly the verified socket");
+
+        let view = reg.view();
+        let fake = view
+            .clients
+            .iter()
+            .find(|c| c.provenance == Some(Provenance::SelfReported))
+            .unwrap();
+        assert!(fake.connected, "the impersonator's socket is untouched");
+        assert!(fake.revoked_at_ms.is_none(), "and it is not marked revoked");
+
+        // And the verified one really was the one signalled.
+        assert!(
+            futures::FutureExt::now_or_never(Box::pin(real.revoked())).is_some(),
+            "the verified socket was told"
+        );
+    }
+
+    /// A credential store that returns an unusable id must not produce a
+    /// verified row with no name. Falling back to unidentified is honest; a
+    /// blank verified row is not.
+    #[test]
+    fn an_unusable_credential_id_is_refused_rather_than_rendered() {
+        for bad in ["", "   ", "\u{0}bad"] {
+            let reg = registry();
+            let id = bad.to_string();
+            reg.set_credential_resolver(Arc::new(move |_: Option<&str>| {
+                Some(Credential {
+                    id: id.clone(),
+                    label: None,
+                    created_ms: None,
+                })
+            }));
+            assert_eq!(
+                reg.identity_for("/ws?t=x", Some("coyote_device=whatever")),
+                ConnectingIdentity::Unidentified,
+                "{bad:?} must not become a verified identity"
+            );
+        }
     }
 
     #[test]

@@ -1242,6 +1242,14 @@ pub const RELAY_KEEPALIVE: std::time::Duration = std::time::Duration::from_milli
 /// reasoning that makes 1006 unsafe to render as "the bridge is unreachable".
 pub const WS_CLOSE_REVOKED: u16 = 4001;
 
+/// How long a revoked client gets to accept its close frame before the socket
+/// is dropped from under it.
+///
+/// Short on purpose. The only thing waiting buys is a client learning *why* it
+/// was disconnected, and the cost of waiting too long is the bridge continuing
+/// to report a revoked device as connected. Those are not close in weight.
+pub const REVOKE_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Relay player state to one client, and accept commands back.
 ///
 /// The message format is a stub, but an honest one: it carries exactly the
@@ -1408,15 +1416,37 @@ pub(crate) async fn ws_relay<S>(
 
             _ = client.revoked() => {
                 log_info!("[ws] {addr} closed: the device was revoked");
-                // Say why. A silent drop is byte-identical to a dead router,
-                // and sending someone to check their Wi-Fi for a credential
-                // they revoked themselves is the failure this names away.
-                let _ = tx.send(Message::Close(Some(
+                // Say why — a silent drop is byte-identical to a dead router —
+                // but never wait indefinitely to say it.
+                //
+                // This send is to a peer we have every reason to think may not
+                // be reading. The wedged half-open socket is not a hypothetical
+                // here: it is the case the panel's staleness detector exists
+                // for, and "the user revoked a device that had wandered off" is
+                // an ordinary way to arrive at this line. An unbounded await
+                // would then hang this task forever, so the handle would never
+                // drop, so the registry would go on reporting the revoked
+                // device as connected — the panel confidently vouching for a
+                // device the user has just cut off, which is the worst
+                // available outcome in this whole module and is reached by
+                // being polite about the close frame.
+                //
+                // So: a short grace period for the courtesy, then go regardless.
+                // Dropping the stream closes the socket; the client sees a 1006
+                // rather than a reason, which is worse for them and much better
+                // than a lie on our side.
+                let close = tx.send(Message::Close(Some(
                     tokio_tungstenite::tungstenite::protocol::CloseFrame {
                         code: WS_CLOSE_REVOKED.into(),
                         reason: "revoked".into(),
                     },
-                ))).await;
+                )));
+                if tokio::time::timeout(REVOKE_CLOSE_GRACE, close).await.is_err() {
+                    log_warn!(
+                        "[ws] {addr} did not accept the close frame within {REVOKE_CLOSE_GRACE:?}; \
+                         dropping the socket anyway"
+                    );
+                }
                 break;
             }
             changed = snapshots.changed() => {
