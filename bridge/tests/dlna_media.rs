@@ -315,6 +315,10 @@ async fn browsing_yields_a_real_title_and_a_playable_resource() {
     assert_eq!(item["title"], "Cock Hero Island 5 Episode I");
     assert_eq!(item["seekable"], true);
     assert_eq!(item["resolution"], "3840x1920");
+    // The name script matching needs, which the opaque media reference hides.
+    // UMS has already turned the title's spaces into dashes here, and it is the
+    // dashed form that sits beside the funscript on disk.
+    assert_eq!(item["fileName"], "media.mp4");
     let media_url = item["mediaUrl"].as_str().unwrap();
     assert!(media_url.starts_with("/dlna/media/"), "{media_url}");
     // The chosen resource is the mp4, not the mkv that came first.
@@ -494,6 +498,55 @@ async fn a_range_ignoring_server_is_compensated_for() {
         "{head}"
     );
     assert_eq!(body, all[seek_to..]);
+}
+
+/// **Found against a real Universal Media Server 15.7.0, not reasoned about.**
+///
+/// A seek past the end of the file made UMS answer `200` with the whole thing:
+/// asking "is there anything at byte 99,999,999,999 of this 2 GB video" began a
+/// 2 GB download. Relaying that is not merely wasteful — the client asked a
+/// question whose answer is "no", and would instead receive the film from the
+/// beginning.
+///
+/// The bridge knows it is unsatisfiable, because the same response carried the
+/// length, so it answers `416` itself.
+#[tokio::test]
+async fn a_seek_past_the_end_is_416_not_the_whole_file() {
+    let server = fake_media_server(RangeSupport::Ignores).await;
+    let (bridge, token, _dlna) = bridge_with(server).await;
+    let path = media_path(bridge, &token).await;
+
+    let (head, body) = request(
+        bridge,
+        "GET",
+        &format!("{path}?t={token}"),
+        &[("Range", "bytes=99999999999-")],
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 416"), "{head}");
+    assert!(head.contains(&format!("Content-Range: bytes */{MEDIA_LEN}")), "{head}");
+    assert!(body.is_empty(), "{} bytes were sent for an unsatisfiable range", body.len());
+
+    // Exactly at the end is also past the end: byte `MEDIA_LEN` does not exist.
+    let (head, _) = request(
+        bridge,
+        "GET",
+        &format!("{path}?t={token}"),
+        &[("Range", &format!("bytes={MEDIA_LEN}-"))],
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 416"), "{head}");
+
+    // The last byte does exist, and must still be served.
+    let (head, body) = request(
+        bridge,
+        "GET",
+        &format!("{path}?t={token}"),
+        &[("Range", &format!("bytes={}-", MEDIA_LEN - 1))],
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 206"), "{head}");
+    assert_eq!(body, vec![media()[MEDIA_LEN - 1]]);
 }
 
 /// Two clients streaming at once both get whole, correct files. The bridge

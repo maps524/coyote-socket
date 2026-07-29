@@ -48,6 +48,21 @@ use tokio::net::TcpStream;
 /// see [`open`] for the per-read idle timeout that replaces it.
 pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long [`open`] waits for a response head.
+///
+/// Longer than [`HEAD_TIMEOUT`] because the two wait for different work. An XML
+/// fetch is a small file off disk; a media response may require the server to
+/// seek into a multi-gigabyte file, or to start a transcode, before it can say
+/// anything at all — and a media server under load does not owe us an answer in
+/// ten seconds.
+///
+/// Ten was the original figure and it produced exactly one unexplained `502`
+/// against a real Universal Media Server, on a deep seek, not reproducible in
+/// five further attempts. That is not enough to call it the cause; it is enough
+/// to say the budget was too tight to distinguish "slow" from "gone", which is
+/// the only thing a timeout is for.
+pub const STREAM_HEAD_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// Cap on a response head, matching the server side's [`crate::http`] cap.
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 
@@ -239,9 +254,16 @@ fn request_head(method: &str, url: &Url, extra: &[(&str, &str)], body_len: Optio
 
 /// Read the response head, returning it and any body bytes read alongside it.
 async fn read_head(stream: &mut TcpStream) -> std::io::Result<(Head, Vec<u8>)> {
+    read_head_within(stream, HEAD_TIMEOUT).await
+}
+
+async fn read_head_within(
+    stream: &mut TcpStream,
+    budget: Duration,
+) -> std::io::Result<(Head, Vec<u8>)> {
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 2048];
-    let deadline = tokio::time::Instant::now() + HEAD_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + budget;
 
     let split_at = loop {
         // Unlike the server side, this reads in blocks rather than byte at a
@@ -346,7 +368,7 @@ pub async fn open(
     stream.write_all(head_text.as_bytes()).await?;
     stream.flush().await?;
 
-    let (head, leftover) = read_head(&mut stream).await?;
+    let (head, leftover) = read_head_within(&mut stream, STREAM_HEAD_TIMEOUT).await?;
     let framing = if head.is_chunked() {
         Framing::Chunked
     } else if let Some(n) = head.content_length() {

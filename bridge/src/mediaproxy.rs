@@ -187,6 +187,44 @@ where
         if let Some(RangeSpec::From(start)) = range.and_then(parse_range) {
             if start > 0 {
                 let total = head.content_length();
+
+                // The range starts at or past the end of the file. Universal
+                // Media Server answers this with `200` and the whole file —
+                // **observed, on UMS 15.7.0**: a seek past the end of a 2 GB
+                // video began a 2 GB download. Relaying that is not merely
+                // wasteful, it is wrong: the client asked a question whose
+                // answer is "there is nothing there", and instead receives the
+                // film from the beginning.
+                //
+                // We know it is unsatisfiable, because the upstream told us the
+                // length in the same breath. So this is answered here rather
+                // than passed on.
+                if total.is_some_and(|t| start >= t) {
+                    let total = total.unwrap_or(0);
+                    log_debug!(
+                        "[media] bytes={start}- is past the end of {total}; 416 rather than \
+                         relaying the {total}-byte 200 the media server offered"
+                    );
+                    let content_range = format!("bytes */{total}");
+                    let _ = write_head(
+                        out,
+                        416,
+                        &[
+                            ("Content-Range", &content_range),
+                            ("Content-Length", "0"),
+                            ("Accept-Ranges", "bytes"),
+                            ("Cache-Control", "no-store"),
+                            ("Connection", "close"),
+                        ],
+                    )
+                    .await;
+                    let _ = out.flush().await;
+                    return Outcome::Relayed {
+                        status: 416,
+                        bytes: 0,
+                    };
+                }
+
                 return match (start <= MAX_SKIP, total) {
                     (true, Some(total)) if start < total => {
                         log_info!(

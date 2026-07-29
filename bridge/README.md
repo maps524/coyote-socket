@@ -443,12 +443,14 @@ GET /dlna/media/<ref>                               the bytes, range-correct
 | Compensating for a server that ignores `Range` | **Tested** against a fake server that does exactly that. |
 | Refusing a `<res>` on another host | **Tested.** |
 | DIDL and device-description parsing | **Tested** against captured-shape documents, including truncated and malformed input. |
-| SSDP `M-SEARCH` against a real network | **Never run.** Every test here is a pure function over a captured datagram; nothing multicasts. |
-| **Universal Media Server, anything** | **Never talked to.** The DIDL fixtures are shaped from the captured player path, not from a UMS response. |
-| Playing in Safari or Bluefy | **Never tried.** |
+| SSDP `M-SEARCH` against a real network | **Run, once, by hand.** Found `MPVR-UMS` (UMS 15.7.0, Linux) at `192.168.0.4:5001` in 2.5 s: 3 searches sent from `192.168.0.9`, 3 replies. No test multicasts. |
+| Browsing a real Universal Media Server | **Run by hand.** Root, then a 48-entry `videos` folder, with real `dc:title`, `duration`, `resolution` and `size`. |
+| Range requests against a real UMS | **Run by hand**, and byte-for-byte verified — see below. |
+| Playing in Safari or Bluefy | **Never tried.** No phone has loaded any of this. |
+| HereSphere, on-device media | Out of scope here, and unobserved as ever. |
 
-Scope that precisely: the transport is exercised, the protocol is reasoned
-from the specification and from one captured media URL.
+Scope that precisely: the transport is exercised and one real media server has
+been browsed and streamed from. Nothing has been played in a browser.
 
 ### `<res>` selection is not "take the first one"
 
@@ -464,18 +466,45 @@ one field away rather than a packet capture away.
 `seekable: false` in a listing means the *server* said it does not honour byte
 ranges. Scrubbing will not work and the proxy is not the reason.
 
+### Verified against a real media server
+
+UMS 15.7.0, a 2,097,190,731-byte video, bridge and server on **different**
+machines. 64 KiB fetched through the proxy and straight from UMS, at four
+offsets including the last block: **byte-identical every time.**
+
+```text
+bytes=0-65535                    IDENTICAL
+bytes=1000000000-1000065535      IDENTICAL
+bytes=2000000000-2000065535      IDENTICAL
+bytes=2097125195-2097190730      IDENTICAL   (the final block)
+```
+
+An open-ended seek 2 GB in answered `206 … Content-Range: bytes
+2000000000-2097190730/2097190731` with **15 ms** to first byte.
+
 ### The cost of being in the playback path
 
-- **Co-located** — bridge and media server on one machine, which is the
-  expected deployment: the upstream fetch is a loopback socket, the bytes cross
-  the network once, and the overhead is a memcpy through a 64 KiB buffer.
-- **Separate machines** — the bytes cross the network twice, and if both hops
-  share one Wi-Fi radio the usable throughput roughly halves. Invisible for a
-  25 Mb/s file on a good link; the difference between playing and stalling on a
-  congested one. Unavoidable while the page is on HTTPS.
+**Measured, on the worse of the two deployments.** 200 MB pulled through the
+proxy from a media server on another machine, debug build:
 
-Neither figure has been measured. The first is a claim about a memcpy; the
-second is arithmetic.
+| | Throughput | Time |
+|---|---|---|
+| Straight from UMS | 107 MB/s | 1.96 s |
+| Through the bridge | 55 MB/s | 3.82 s |
+
+**Almost exactly half**, which is the arithmetic of the bytes crossing the
+network twice rather than any cost in the proxy itself. It is also still about
+eighteen times a 25 Mb/s VR stream, so on a wired or decent wireless link this
+is not the constraint. On a congested 2.4 GHz network, where both hops share one
+radio, it is the difference between playing and stalling.
+
+**Co-location removes the second hop entirely** — that is the deployment this
+was designed for, and the case where the proxy costs a memcpy through a 64 KiB
+buffer. It has not been measured, because the machine to measure it on is the
+one running UMS.
+
+There is no way to avoid any of this while the page is on HTTPS, which it must
+be for Web Bluetooth.
 
 ### When discovery finds nothing
 

@@ -398,9 +398,21 @@ struct BrowseResponse {
 struct BrowseItem {
     id: String,
     /// `dc:title`. A real title, not a filename with the spaces turned to
-    /// dashes — which is the better input to script matching, and the reason
-    /// the handoff document called this out.
+    /// dashes — which is the better input to *display*, and the reason the
+    /// handoff document called this out.
     title: String,
+    /// The last path segment of the chosen `<res>` URL, percent-decoded.
+    ///
+    /// Carried because `mediaUrl` is deliberately opaque, and the client's
+    /// script matching compares a funscript's stem against a media *basename*.
+    /// Without this the reference hash would be the only name the client had,
+    /// and every DLNA item would silently match nothing.
+    ///
+    /// So the handoff document's suggestion that `dc:title` might replace the
+    /// naming work is half right: the title is better to show and worse to
+    /// match on, at least until stem comparison normalises spaces and dashes.
+    /// Both travel, so the client can move when it is ready.
+    file_name: Option<String>,
     class: String,
     /// `/dlna/media/<ref>` — relative, so it inherits the page's origin and
     /// therefore its scheme. `null` when nothing playable was on offer.
@@ -566,6 +578,7 @@ async fn browse(dlna: &Dlna, params: &HashMap<String, String>) -> Action {
     let mut items = Vec::with_capacity(listing.items.len());
     for item in &listing.items {
         let chosen = upnp::choose_res(item);
+        let file_name = chosen.as_ref().ok().and_then(|c| file_name_of(&c.res.url));
         let (media_url, reason, seekable, unplayable, duration, resolution, size) = match chosen {
             Ok(c) => {
                 let minted = dlna
@@ -598,6 +611,7 @@ async fn browse(dlna: &Dlna, params: &HashMap<String, String>) -> Action {
         items.push(BrowseItem {
             id: item.id.clone(),
             title: item.title.clone(),
+            file_name,
             class: item.class.clone(),
             media_url,
             chosen: reason,
@@ -633,6 +647,19 @@ async fn browse(dlna: &Dlna, params: &HashMap<String, String>) -> Action {
         returned
     );
     Action::Json(serde_json::to_vec(&body).unwrap_or_else(|_| b"{\"items\":[]}".to_vec()))
+}
+
+/// The last path segment of a media URL, percent-decoded.
+///
+/// What the client matches funscripts against — see [`BrowseItem::file_name`].
+/// A query string is stripped first: UMS puts none there, but a server that
+/// does would otherwise hand back `x.mp4?profile=2` as the name.
+fn file_name_of(res_url: &str) -> Option<String> {
+    let path = Url::parse(res_url)?.path_and_query;
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    let last = path.rsplit('/').find(|s| !s.is_empty())?;
+    let decoded = percent_decode(last);
+    (!decoded.is_empty()).then_some(decoded)
 }
 
 /// Parse a query string into a map, percent-decoding both halves.
@@ -796,6 +823,28 @@ mod tests {
             short_hash(&[b"ab", b"c"]),
             short_hash(&[b"a", b"bc"])
         );
+    }
+
+    /// The name script matching needs, which the opaque media reference hides.
+    ///
+    /// Without this the client's only name for a DLNA item would be a hash, and
+    /// every item would silently match no funscript at all.
+    #[test]
+    fn recovers_the_filename_from_the_res_url() {
+        assert_eq!(
+            file_name_of("http://192.168.0.4:5001/ums/media/06b1f0ee/253/Cock-Hero-Island-5-Episode-I.mp4"),
+            Some("Cock-Hero-Island-5-Episode-I.mp4".into())
+        );
+        // Percent-encoded spaces come back as spaces, because that is what the
+        // funscript beside it is named.
+        assert_eq!(
+            file_name_of("http://h/a/My%20Movie.mp4"),
+            Some("My Movie.mp4".into())
+        );
+        // A query string is not part of the name.
+        assert_eq!(file_name_of("http://h/a/x.mp4?profile=2"), Some("x.mp4".into()));
+        assert_eq!(file_name_of("http://h/"), None);
+        assert_eq!(file_name_of("not a url"), None);
     }
 
     #[test]
