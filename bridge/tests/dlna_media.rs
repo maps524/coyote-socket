@@ -53,7 +53,29 @@ enum RangeSupport {
 
 /// A stand-in for Universal Media Server: a description, a ContentDirectory,
 /// and one video.
+/// What the fake server puts in its listing.
+///
+/// The awkward catalogue exists because of `FOLLOW-UPS.md` §0c: a run against
+/// the real media server exercised only the paths where everything works, and
+/// left the two that explain failure — `unplayable`, and the notice that
+/// seeking will not work — as the least-tested code in the change. They are
+/// also what a user on a different server meets first. A fixture built to
+/// misbehave is the cheapest way to stop that being true.
+#[derive(Clone, Copy, PartialEq)]
+enum Catalogue {
+    /// One item, two `<res>`, both fine. What the real UMS looks like.
+    Playable,
+    /// What somebody else's server looks like: one item offering only a
+    /// container WebKit will not decode, and one that says outright it does not
+    /// honour byte ranges.
+    Awkward,
+}
+
 async fn fake_media_server(support: RangeSupport) -> SocketAddr {
+    fake_media_server_with(support, Catalogue::Playable).await
+}
+
+async fn fake_media_server_with(support: RangeSupport, catalogue: Catalogue) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -115,9 +137,15 @@ async fn fake_media_server(support: RangeSupport) -> SocketAddr {
                     // Two `<res>` on purpose: Matroska first, which is what a
                     // "take the first one" proxy picks and which WebKit will
                     // not decode.
-                    let didl = format!(
+                    let didl = if catalogue == Catalogue::Awkward {
+                        format!(
+                            r#"&lt;DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"&gt;&lt;item id="mkv-only" parentID="0"&gt;&lt;dc:title&gt;An Old Matroska Rip&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;&lt;res protocolInfo="http-get:*:video/x-matroska:DLNA.ORG_OP=01" size="123456"&gt;http://{addr}/media.mkv&lt;/res&gt;&lt;/item&gt;&lt;item id="no-ranges" parentID="0"&gt;&lt;dc:title&gt;Streamed Without Seeking&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;&lt;res protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=00" size="{MEDIA_LEN}" duration="0:01:23.000"&gt;http://{addr}/media.mp4&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;"#
+                        )
+                    } else {
+                        format!(
                         r#"&lt;DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"&gt;&lt;container id="1$7" parentID="0" childCount="3"&gt;&lt;dc:title&gt;Videos&lt;/dc:title&gt;&lt;/container&gt;&lt;item id="1$7$253" parentID="1$7"&gt;&lt;dc:title&gt;Cock Hero Island 5 Episode I&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;&lt;res protocolInfo="http-get:*:video/x-matroska:DLNA.ORG_OP=01" size="99999"&gt;http://{addr}/media.mkv&lt;/res&gt;&lt;res protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0" size="{MEDIA_LEN}" duration="0:01:23.000" resolution="3840x1920"&gt;http://{addr}/media.mp4&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;"#
-                    );
+                        )
+                    };
                     let body = format!(
                         r#"<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>{didl}</Result><NumberReturned>2</NumberReturned><TotalMatches>2</TotalMatches></u:BrowseResponse></s:Body></s:Envelope>"#
                     );
@@ -547,6 +575,83 @@ async fn a_seek_past_the_end_is_416_not_the_whole_file() {
     .await;
     assert!(head.starts_with("HTTP/1.1 206"), "{head}");
     assert_eq!(body, vec![media()[MEDIA_LEN - 1]]);
+}
+
+/// The two failure explanations, which a run against the real server never
+/// produced — see `FOLLOW-UPS.md` §0c.
+///
+/// Both items are in the listing rather than dropped from it, and both carry
+/// the reason. A library with silent holes in it is one nobody can debug: the
+/// question "why is this file missing when the one beside it is not" has to be
+/// answerable from the listing, not from a packet capture.
+#[tokio::test]
+async fn a_server_that_offers_nothing_playable_says_so_per_item() {
+    let server = fake_media_server_with(RangeSupport::Honours, Catalogue::Awkward).await;
+    let (bridge, token, _dlna) = bridge_with(server).await;
+
+    let (head, body) = request(
+        bridge,
+        "GET",
+        &format!("/dlna/browse.json?t={token}&server=uuid%3A11111111-2222-3333-4444-555555555555&object=0"),
+        &[],
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "neither item may be dropped: {v}");
+
+    // 1. Nothing a browser can decode. No media URL, and the reason names the
+    //    container that was on offer rather than saying "unsupported".
+    let mkv = items.iter().find(|i| i["id"] == "mkv-only").unwrap();
+    assert!(mkv["mediaUrl"].is_null(), "{mkv}");
+    let why = mkv["unplayable"].as_str().unwrap();
+    assert!(why.contains("video/x-matroska"), "{why}");
+    assert_eq!(mkv["title"], "An Old Matroska Rip");
+
+    // 2. Playable, but the server said outright that it does not honour byte
+    //    ranges. It still gets a URL — it will play — and `seekable` is what
+    //    stops the missing scrub bar being blamed on the bridge.
+    let stuck = items.iter().find(|i| i["id"] == "no-ranges").unwrap();
+    assert!(stuck["mediaUrl"].is_string(), "{stuck}");
+    assert_eq!(stuck["seekable"], false);
+    assert!(stuck["unplayable"].is_null(), "it plays; it just cannot seek");
+    let chosen = stuck["chosen"].as_str().unwrap();
+    assert!(chosen.contains("does NOT honour byte ranges"), "{chosen}");
+}
+
+/// And the unseekable item really is served, rather than being refused on the
+/// strength of its own advertisement.
+///
+/// Refusing it would be worse than the missing scrub bar: a file that plays
+/// from the start is usable, and a file the bridge declines to serve because of
+/// a `protocolInfo` flag is not.
+#[tokio::test]
+async fn an_unseekable_item_is_still_playable_from_the_start() {
+    let server = fake_media_server_with(RangeSupport::Honours, Catalogue::Awkward).await;
+    let (bridge, token, _dlna) = bridge_with(server).await;
+
+    let (_, body) = request(
+        bridge,
+        "GET",
+        &format!("/dlna/browse.json?t={token}&server=uuid%3A11111111-2222-3333-4444-555555555555&object=0"),
+        &[],
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let path = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "no-ranges")
+        .unwrap()["mediaUrl"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (head, bytes) = request(bridge, "GET", &format!("{path}?t={token}"), &[]).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(bytes, media());
 }
 
 /// Two clients streaming at once both get whole, correct files. The bridge

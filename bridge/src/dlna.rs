@@ -223,12 +223,48 @@ impl Dlna {
     /// Describes it immediately so a bad address is reported now rather than as
     /// an empty library later — which is the §0b failure this whole module is
     /// arranged around. Returns the device on success.
+    ///
+    /// **A failure still registers the address.** The first version returned
+    /// early on a description failure, so a `--dlna-server` that could not be
+    /// reached at startup was logged once and then vanished: it was absent from
+    /// `/dlna/index.json`, absent from `unreadable`, and never retried. The
+    /// user had configured a server and the API's answer was silence. On a
+    /// headless service, where the startup log is the one thing nobody reads,
+    /// that is the whole failure.
+    ///
+    /// Keeping it means it is reported every time the index is fetched, and
+    /// retried on every refresh — which is also right for a server that is
+    /// simply not switched on yet, the same reasoning [`State::manual`] gives
+    /// for a network share that mounts after login.
+    ///
+    /// Found by exercising the failure path on purpose, per `FOLLOW-UPS.md`
+    /// §0c: the success path had been run by every integration test and this
+    /// one had only been reasoned about.
     pub async fn add_server(&self, location: Url) -> Result<Device, String> {
-        let device = upnp::describe(&location).await?;
+        let described = upnp::describe(&location).await;
+
         let mut state = self.state.lock().await;
         if !state.manual.contains(&location) {
-            state.manual.push(location);
+            state.manual.push(location.clone());
         }
+
+        let device = match described {
+            Ok(device) => device,
+            Err(problem) => {
+                // Reported by `/dlna/index.json` until it starts working.
+                if !state
+                    .undescribable
+                    .iter()
+                    .any(|(loc, _)| loc == &location.to_string())
+                {
+                    state.undescribable.push((location.to_string(), problem.clone()));
+                }
+                // Force the next index fetch to re-describe rather than serving
+                // a cached "no servers" for the next minute.
+                state.discovered_at_ms = 0;
+                return Err(problem);
+            }
+        };
         state.devices.insert(device.udn.clone(), device.clone());
         state.generation += 1;
         // A manual entry is itself a discovery result: without this, the first
@@ -820,6 +856,38 @@ mod tests {
                 .await;
         }
         assert!(dlna.state.lock().await.refs.len() <= MAX_REFS);
+    }
+
+    /// A pinned server that cannot be described must not vanish.
+    ///
+    /// Regression: `add_server` used to return early on a description failure,
+    /// so a `--dlna-server` that was unreachable at startup was logged once and
+    /// then absent from `/dlna/index.json` entirely — not in `servers`, not in
+    /// `unreadable`, and never retried. The user had configured a server and
+    /// the API said nothing at all about it.
+    ///
+    /// This test dials port 1 on loopback, which nothing listens on, so it
+    /// reaches no network. See this module's test-module note.
+    #[tokio::test]
+    async fn a_pinned_server_that_fails_is_still_reported() {
+        let dlna = Dlna::new();
+        let bad = Url::parse("http://127.0.0.1:1/nothing").unwrap();
+        assert!(dlna.add_server(bad.clone()).await.is_err());
+
+        let state = dlna.state.lock().await;
+        assert!(
+            state.manual.contains(&bad),
+            "it must be retried, not forgotten"
+        );
+        assert!(
+            state.undescribable.iter().any(|(loc, _)| loc == &bad.to_string()),
+            "it must be reported: {:?}",
+            state.undescribable
+        );
+        assert_eq!(
+            state.discovered_at_ms, 0,
+            "the next index fetch must re-describe rather than serve a cached empty answer"
+        );
     }
 
     /// A reference that has been evicted, or that predates a restart, gets a

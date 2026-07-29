@@ -535,11 +535,49 @@ frame decoded, non-black
 The bridge logged `bytes=0-`, `bytes=3997696-` and `bytes=466583552-` for that
 run — the third being the seek.
 
-Two things worth noting from it. Every one of the 46 items was playable, so the
-`unplayable` and unseekable warnings did not appear and **have never been seen
-rendered** — only unit-tested. And the app reported *"No script matches this
-video's name"*, which is the matching path running against the filename rather
-than the title, as intended.
+The app reported *"No script matches this video's name"*, which is the matching
+path running against the filename rather than the title, as intended.
+
+Every one of those 46 items was playable, so that run rendered none of the
+warnings — see `FOLLOW-UPS.md` §0c for why a fully successful run is a weak
+result for the failure paths, and what was done about it.
+
+### And against a server built to misbehave
+
+`FOLLOW-UPS.md` §0c, acted on rather than only recorded. A fixture offering one
+item in a container WebKit will not decode, and one whose `protocolInfo` says
+outright it does not honour byte ranges. Both are covered by
+`tests/dlna_media.rs`, and both were then rendered in the real picker for the
+first time:
+
+```text
+An Old Matroska Rip            [disabled]
+  no playable resource for "An Old Matroska Rip". Offered: video/x-matroska (http-get)
+Streamed Without Seeking       0:01:23.000 · 1920x1080 · 9.8 KB
+  The media server does not offer byte ranges for this file, so seeking will not
+  work. It will play from the start.
+A Perfectly Ordinary File      0:01:23.000 · 1920x1080 · 9.8 KB
+```
+
+The unseekable item is still served and still plays; only its scrub bar is a
+lie, and the notice says whose fault that is. Refusing to serve it on the
+strength of its own advertisement would be worse.
+
+The same exercise found a real defect in `--dlna-server`, which had only ever
+been run on its success path: **a pinned server that could not be described
+vanished.** It was logged once at startup and then absent from
+`/dlna/index.json` entirely — not in `servers`, not in `unreadable`, never
+retried. On a headless service, where the startup log is the one thing nobody
+reads, that is the whole failure. Fixed, and both failure modes now report
+themselves on every fetch:
+
+```text
+unreadable: http://127.0.0.1:1/nothing
+  -> could not fetch the device description … the target machine actively refused it
+unreadable: http://127.0.0.1:5099/media.mp4
+  -> is a device description with no …ContentDirectory:1 service
+```
+
 
 Reproduce it by serving the page from the bridge and opening it:
 
