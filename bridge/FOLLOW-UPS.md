@@ -341,12 +341,18 @@ failures: nothing is stale, nothing is lost, and the tool does exactly what it
 says. **The gap is between what it covered and what the reader took it to
 cover.**
 
-Three instances, one per branch:
+Four instances, and the first two are the same defect from opposite directions:
 
 - `cargo test --lib` was reported as green while `tests/tls_end_to_end.rs` did
   not compile. A `Ctx` field added during a merge was missing from one test
   target, and `--lib` does not build test targets. **`--all-targets` is the
   claim people think `--lib` is making.**
+- The same thing across crates, in the other direction: `bridge-app` did not
+  compile because `Ctx` gained a `dlna` field that only the headless binary was
+  updated for. **`cargo test` in `bridge/` cannot see `bridge-app` at all**, and
+  "the suite is green" meant that command all evening. `Ctx` is the shared
+  surface every branch extends and nobody owns, and each extension silently
+  obliges every construction site in a crate the author was not building.
 - A verification was run against an `origin/` ref an hour old and read as the
   state of the world. The command succeeded and reported the opposite of the
   truth for one command; a `git fetch` first would have settled it.
@@ -354,11 +360,15 @@ Three instances, one per branch:
   disabling it lived fifteen lines above the match — recorded above, and the
   same shape seen from the reading side.
 
-In all three the output is correct and the inference is not, which is what makes
+In all four the output is correct and the inference is not, which is what makes
 it hard: there is nothing wrong to notice. The question is not *"did it pass?"*
 but **"what did this command actually look at?"** — and for anything that takes
 a scope flag or a ref, the honest answer is usually narrower than the sentence
 you were about to write about it.
+
+**The bar before calling a rebase green is `--all-targets` in both crates.**
+Every cross-crate break tonight was invisible to the command everyone was
+actually running, and both were found by another agent rather than by the author.
 
 ### The edit that silently did nothing — and the wrong story told about it
 
