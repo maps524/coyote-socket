@@ -509,6 +509,29 @@ trust and nothing else.
 
 ### Still open
 
+- **Revocation has no command yet, and the half-built version is a safety
+  defect.** `DeviceStore::revoke` deletes the credential and
+  `ClientRegistry::revoke` closes the live sockets. Neither PR wires either to
+  an IPC command, so there is currently no button — and the way this ships wrong
+  is somebody adding the obvious one that calls the store and not the registry.
+
+  That failure is silent and it is the dangerous direction: the record is gone,
+  the panel says revoked, the user believes the device is disconnected — and the
+  phone keeps its relay and **keeps driving output** until the network happens
+  to drop it. Deleting a record stops the next connection; it does nothing to
+  the one that is running.
+
+  Both calls, store first, so a reconnect in the gap is refused rather than
+  re-admitted:
+
+  ```rust
+  state.devices.revoke(&id)?;              // durable before we go on
+  let closed = state.clients.revoke(&id);  // and stop what is running now
+  ```
+
+  Owned by whoever merges second, together with installing the credential
+  resolver — the two are the same wiring job.
+
 - **Token exposure on the first hop.** The QR points at plain HTTP by
   necessity, so the pairing token is readable by anyone on the LAN at that
   moment. Per-device credentials narrow what that buys — a sniffer can pair a

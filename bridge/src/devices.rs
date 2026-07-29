@@ -221,12 +221,33 @@ impl DeviceStore {
         self.persist()
     }
 
-    /// Delete a credential so it can never be presented again.
+    /// Delete a credential so it can never be presented **again**.
     ///
-    /// **Deletion only. The caller must also close the live socket** — see the
-    /// module docs on `clients::ClientRegistry::revoke`. Deleting first is
-    /// deliberate: a socket that reconnects in the gap between the two is then
-    /// refused rather than re-admitted.
+    /// # This is half of revoking a device. On its own it is a safety defect.
+    ///
+    /// Deleting the record stops the *next* connection. It does nothing to the
+    /// socket that is open right now, and that socket is what is driving
+    /// hardware. A caller that stops here produces the worst available outcome:
+    /// the record is gone, the panel says the device is revoked, the user
+    /// believes they have disconnected it — and the phone keeps its relay and
+    /// keeps driving output until the network happens to drop it.
+    ///
+    /// That is the shape this project has already fixed twice elsewhere: **a
+    /// state that reads as safe while the thing it describes is still live.**
+    ///
+    /// So every caller must also close the live sockets:
+    ///
+    /// ```ignore
+    /// state.devices.revoke(&id)?;              // durable before we go on
+    /// let closed = state.clients.revoke(&id);  // and stop what is running now
+    /// ```
+    ///
+    /// Store first is deliberate: a socket that reconnects in the gap between
+    /// the two is then refused rather than re-admitted.
+    ///
+    /// The ordering cannot be enforced from here — `clients` is a different
+    /// module and this one deliberately does not depend on it — so it is
+    /// enforced by saying so at the only place a caller will look.
     pub fn revoke(&self, id: &str) -> Result<bool, String> {
         let removed = {
             let mut devices = self.devices.write().map_err(|_| "device store poisoned")?;
