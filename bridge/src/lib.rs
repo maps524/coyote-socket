@@ -59,6 +59,7 @@ pub mod codec;
 pub mod fake_player;
 pub mod http;
 pub mod icon;
+pub mod library;
 pub mod logging;
 pub mod player;
 pub mod probe;

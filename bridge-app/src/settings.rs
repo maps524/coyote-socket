@@ -26,6 +26,12 @@ pub struct Settings {
     pub http_port: u16,
     /// Directory of static files to serve, when the PWA has been built.
     pub static_dir: Option<String>,
+    /// Directory of `.funscript` files to serve at `/library`.
+    ///
+    /// `None` by default and `None` is a normal state: a bridge with no library
+    /// configured serves an empty index rather than an error, and the phone
+    /// falls back to whatever it has imported itself.
+    pub library_dir: Option<String>,
 
     /// The pairing token, persisted so the phone's home-screen shortcut keeps
     /// working across restarts.
@@ -58,6 +64,7 @@ impl Default for Settings {
             recents: Vec::new(),
             http_port: 8787,
             static_dir: None,
+            library_dir: None,
             token: None,
             token_is_ours: false,
         }
@@ -201,6 +208,7 @@ impl Settings {
             recents: self.recents.clone(),
             http_port: self.http_port,
             static_dir: self.static_dir.clone(),
+            library_dir: self.library_dir.clone(),
             token: self.token.clone(),
             token_is_ours: false,
         };
@@ -473,11 +481,20 @@ mod tests {
         let mut original = Settings::default();
         original.remember("192.168.1.50:23554");
         original.http_port = 9000;
+        // The path-shaped settings are asserted too. The exhaustive literal in
+        // `merge_and_write` is the guard against a new field being dropped, and
+        // it is a good one — but it is a compile-time guard on a save path, and
+        // nothing here previously checked that a saved directory came back.
+        // Loss would show up as "the bridge forgot my library", far from here.
+        original.static_dir = Some("C:/pwa/dist".into());
+        original.library_dir = Some("D:/scripts".into());
         original.save(&path);
 
         let loaded = Settings::load(&path);
         assert_eq!(loaded.endpoint, "192.168.1.50:23554");
         assert_eq!(loaded.http_port, 9000);
+        assert_eq!(loaded.static_dir.as_deref(), Some("C:/pwa/dist"));
+        assert_eq!(loaded.library_dir.as_deref(), Some("D:/scripts"));
         let _ = std::fs::remove_file(&path);
     }
 }

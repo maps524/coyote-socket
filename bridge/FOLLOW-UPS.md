@@ -1,9 +1,10 @@
 # Bridge follow-ups
 
-Sections **0** and **0b** are not tasks. They are two defect signatures this
-work produced repeatedly, written as recognition rules because each has already
-caught its next instance. Read them before adding a field that records whether
-something worked, or an error message about a component you do not own.
+Sections **0**, **0a** and **0b** are not tasks. They are three defect signatures
+this work produced repeatedly, written as recognition rules because each has
+already caught its next instance. Read them before adding a field that records
+whether something worked, a check that guards one, or an error message about a
+component you do not own.
 
 Sections **1** onward are work identified and deliberately not done.
 
@@ -109,6 +110,147 @@ time.** That is not our assumption to relax — it is why `probe` must not run
 while connected, and why a "test this address" button that opens a second
 connection can sever the first. When auditing the list above, do not
 "fix" that one.
+
+---
+
+## 0a. The inert guard
+
+A variant of §0, written down separately because **§0's recognition rule does
+not catch it**. Same tell — the optimistic reading is the default and the
+failure is silent — but it hides somewhere §0 does not look. (§0b is a third
+signature and independent of both; the three are siblings, not a sequence.)
+
+**The shape:** a check whose success path is reached without the check
+happening. The mechanism exists, is visible in review, and is inert.
+
+That is what makes it expensive. Reading the code confirms the guard is
+*present* and tells you nothing about whether it *runs*. A reviewer sees a test
+covering the case, a warning covering the condition, an assertion covering the
+regression — and every one of those observations is true and useless.
+
+### The five, and how they were found
+
+The first three were introduced **in the commits fixing §0 instances**, by
+someone who had read this section that morning and was consciously applying it.
+None was caught by writing it; all three were caught by a reviewer running the
+code.
+
+| The guard | When it was meant to run | When it actually ran |
+|---|---|---|
+| A test asserting every HTTP status carries its reason phrase | for every status a call site passes | for every status in a second hand-typed list inside the test |
+| The regression test for symlink handling — this module's headline bug | every run | only where the machine can create symlinks; otherwise it printed a skip and reported `ok` |
+| A warning that a file was excluded for exceeding the size cap | whenever a file was excluded | whenever the *script listing* changed, so a library whose only file was oversized said nothing |
+| **`ScanState::Failed`** — the whole three-state mechanism from §0 | whenever the library could not be read | whenever the directory's *mtime moved or it would not `stat`*, so a directory that stats fine but refuses `read_dir` never triggered a scan, produced no verdict, and went on reporting `scan: "ok"` with a frozen `checkedAtMs` |
+| A test asserting an oversized file is reported when it is the only entry | on the fix — the log in `poll` | on the precondition — `scan`'s return value, which is unchanged by reverting the fix |
+
+Note how each one *nearly* works, and works in exactly the conditions you would
+test it in. The status test passes for every status that exists today. The
+symlink test runs on the developer's machine. The oversize warning fires the
+moment there is a second, normal file in the directory. **The failing case is
+the one nobody has yet**, which is the same reason §0's defects are invisible to
+whoever writes them.
+
+The fourth is the significant one, for three reasons.
+
+**It is production code, not a test.** The first three were guards over the
+code. This one *is* the code — the §0 three-state fix itself, complete and
+correct and unreachable, because the gate deciding whether to run it asked a
+different question than the check did. A reviewer had already confirmed the
+state machine worked; it did, whenever anything invoked it.
+
+**It was found by someone else applying the rule below**, on the diff that
+introduced the rule, in one experiment: deny the list-directory right with
+`icacls` while leaving attribute reads intact, and watch `checkedAtMs` stand
+still for the full sixty seconds. That is better evidence than the first three,
+which were found by their author noticing his own mistake.
+
+**The obvious one-line fix was itself an inert guard**, and this is the part
+worth remembering. Replacing the stat proxy with `state != ScanState::Ok` looks
+exactly right — it retries until a scan succeeds and covers `Pending`. But the
+transition *into* failure happens while `state` is still `Ok`, so the first
+refusal is still missed, and the gate still never fires. It was written, the
+test still failed, and only then did the actual shape become clear: **the gate
+has to perform the same operation the check depends on.** So it now opens the
+directory and takes one entry — O(1), every tick — rather than consulting a
+`stat` or a flag that stands in for it. A proxy for the answer had been replaced
+with a different proxy for the answer.
+
+The fifth is small but is the best illustration of why the recognition rule has
+to be asked deliberately: the assertion `scanned.oversize.len() == 1` looks
+entirely reasonable, is true, and tests the wrong side of the fix. Both tests
+now exist — one named as the precondition, one exercising `poll` through the log
+tap — and the second was confirmed to fail against the reverted fix before it
+was kept.
+
+### The recognition rule
+
+Deliberately not §0's. §0 asks *what does this value mean when nobody set it?*
+— a question about state. This one is about control flow:
+
+> **Under what condition does this check actually execute, and is that condition
+> the same as the condition it is supposed to guard?**
+
+Ask it out loud, of the guard rather than of the code being guarded. All five
+above answer "no", and each answer is a sentence long once the question is
+asked:
+
+- the enumeration executes over a hand-written list, not over the call sites;
+- the skip executes on a machine setting, not on the code under test;
+- the warning executes when an unrelated list changed, not when a file was
+  excluded;
+- the scan executes when the mtime moved, not when the directory became
+  unreadable;
+- the assertion executes against `scan`'s return value, not against the `poll`
+  branch that was changed.
+
+None of those is hard to see. All five are invisible until someone asks.
+
+**A test for a guard is itself a guard**, so ask it twice. The cheap way to
+answer the second one is mechanical and worth doing every time: **revert the
+fix, run the test, and require it to fail.** Both tests added for the fourth and
+fifth instances were confirmed to fail against the reverted code before being
+kept — and that is precisely how the one-line gate fix was caught being inert,
+because the test kept failing after it went in.
+
+### The fix, in preference order
+
+1. **Make the failure unrepresentable**, so no guard is needed. The status case
+   ended here: `respond` takes a `Status` carrying its own reason phrase, so a
+   status without one is a compile error and the test that enumerated them is
+   gone rather than fixed. A guard that cannot be inert is better than one that
+   is currently running.
+2. **Make the guard's trigger the same as the thing it guards.** The oversize
+   warning now fires on the oversize set changing, not on the listing changing.
+   The poll gate now *opens the directory* rather than consulting a `stat` or a
+   state flag that stands in for opening it. Beware of satisfying this by
+   swapping one proxy for another — that was the failed first attempt at the
+   fourth instance, and it read as obviously correct.
+3. **Fail rather than skip.** A skip that reports `ok` is an inert guard by
+   construction. If a skip is genuinely unavoidable it has to be visible in
+   default output — `eprintln!` is swallowed by libtest without `--nocapture`,
+   so it is not.
+
+Option 1 has a second benefit worth stating, because it is not obvious and it
+generalises past this defect: **in a file several branches are editing, a type
+error is a conflict that fails to build rather than one that resolves quietly.**
+Four branches were touching `http.rs` when the status conversion landed. A
+merge that drops a call site's status now stops the build; a merge that drops a
+line from a hand-written test list does not.
+
+### Where this sits relative to the review question
+
+The house review question — *"what did this leave alone that now means
+something different?"*, from **"The confident optional" in the sibling repo's
+`CLAUDE.md`** (`coyote-socket-web`, not this one) — catches the change that
+quietly reinterprets existing code. This is its sibling:
+
+> **What did this add that never runs?**
+
+One is about untouched code whose meaning moved; the other is about added code
+that has no path to it. **Both are invisible in a diff**, which is why they
+belong together: the diff shows the guard arriving and shows the surrounding
+lines unchanged, and neither fact is the one that matters. Ask both of every
+change that adds a check.
 
 ---
 
@@ -382,3 +524,56 @@ Worth knowing about for anyone already running it; not worth building instead.
 **Cloudflare quick tunnels are the wrong default.** The hostname churns every
 restart, which is a new origin every launch, which makes the PWA amnesiac —
 that is the difference between an app and a demo, not a polish issue.
+
+---
+
+## 3. The funscript library: what was deliberately left out
+
+`src/library.rs` serves `/library/index.json` and `/library/<name>`. Three
+things it does not do, each a decision rather than an omission, with the number
+that would force it.
+
+- **No subdirectories.** The scan is flat. Recursion is where symlink loops,
+  unbounded depth and a name that is no longer a single path segment all arrive
+  together, and the client matches on a bare filename anyway. Revisit with a
+  depth cap and a visited-inode set — not by removing the `components().count()
+  == 1` check, which is one of the four gates on the fetch path.
+- **No pagination, and the number is 673 KB.** That is a measured 10,000-entry
+  index, sent whole on every fetch. The scan itself is 18-21 ms and is not the
+  problem. `generation` is already the etag-shaped field to hang a conditional
+  fetch on when someone's library gets there.
+
+- **`set_library_dir` does not restart the poller.** It writes the setting and
+  takes effect next launch, exactly like `set_static_dir` — so between the call
+  and a restart, `bridge_status` reports the new path while
+  `/library/index.json` still answers for the old one. Two sources of truth for
+  one question, which is §0 again. Harmless only because **no UI calls it yet**;
+  whoever builds one must either restart the poller or label the field as
+  pending. It is currently dead code kept deliberately, so the window has
+  something to call when it grows a folder picker.
+- **No `canonicalize`.** Inherited from `serve_static`'s known gap, and shared
+  with it deliberately so there is one implementation to fix. A symlink named
+  `*.funscript` inside the library root, pointing outside it, is listed and
+  served. Placing one requires write access to a directory the user chose — at
+  which point the attacker can put the file there instead — and symlinked
+  collections are how media libraries are actually assembled. If this is ever
+  closed, close it in `http::safe_relative_path` so both callers get it.
+
+  Worth knowing how this paragraph nearly shipped as fiction. The first version
+  of `scan` used `DirEntry::metadata`, which is `lstat` on every platform, so
+  symlinks were silently *excluded* — while this file asked a reviewer to accept
+  a risk that did not exist, and the code broke the exact layout the prose
+  called legitimate, with no log line. Two wrong statements pointing in opposite
+  directions, neither visible from the other. A test now asserts the behaviour
+  rather than the comment claiming it.
+
+  One residue, deliberately open: an indexed regular file replaced by a symlink
+  before it is fetched is followed, because `File::open` follows and the index
+  is up to `DIR_POLL` old. Same write-access bound, so the disposition is the
+  same.
+
+The one thing that would be a defect rather than a limit: **`serve_static` still
+does not percent-decode**, so the PWA cannot have an asset with a space in its
+name. `library::percent_decode` is the decoder to reuse; the reason it was not
+wired in here is that doing so means auditing every static path at the same
+time, which is a different change.

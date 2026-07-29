@@ -117,6 +117,71 @@ a home-screen shortcut keeps working.
 - **The phone.** The WebSocket relay has only ever been driven from a desktop
   browser.
 
+## The funscript library
+
+The bridge runs on the machine where the media lives, already serves the PWA,
+and already knows what the player is playing. So it serves the scripts too:
+
+```
+GET /library/index.json   -> { "scripts": [ { "name", "bytes", "modifiedMs" } ],
+                              "configured", "scan", "scannedAtMs", "ageMs",
+                              "checkedAtMs", "generation" }
+GET /library/<name>       -> the funscript bytes
+```
+
+Both are token-gated, like `/healthz` and `/ws`. Point the bridge at a folder
+with `--library-dir <path>` (or `libraryDir` in the app's settings file). **No
+library configured is a normal state**, not an error: the index answers 200 with
+an empty list and `configured: false`, so the app can say "you have not pointed
+me at a folder" rather than showing a failure.
+
+`configured` and `scan` answer different questions and a UI needs both.
+`configured` is whether a path is set; `scan` is `"pending"`, `"ok"` or
+`"failed"` for whether the last attempt to read it worked. **A failed scan keeps
+the previous listing** rather than replacing it with an empty one — otherwise a
+network share dropping for a single poll tick tells every phone the library is
+empty. `scannedAtMs` / `ageMs` describe the listing, and are `null` before the
+first successful scan; `checkedAtMs` describes the last attempt. When those
+diverge, something is wrong and the gap is how far behind you are.
+
+Readability is checked every ~2 s by opening the directory, not by looking at
+its timestamp — a share that is still there but has stopped answering leaves the
+timestamp alone, and a `scan: "ok"` with a `checkedAtMs` that quietly stopped
+advancing is the one failure this API must not have.
+
+A `library` WebSocket message — `{"type":"library","generation":N,"count":M,
+"scan":S,"scannedAtMs":T}` — means **re-fetch the index**. One is sent on
+connect, whether or not a library is configured, and one each time the contents
+or the scan state change, so a phone already connected picks up a new file
+without a reload. It deliberately carries no listing: contents travel over the
+request/response that stamps its own freshness, not over the relay's `watch`
+channel — which, as `ws_relay`'s contract records, collapses an unbounded number
+of updates into one delivery for a slow consumer.
+
+Two contracts worth knowing before writing a client:
+
+- **Names round-trip exactly** — no case folding, no Unicode normalisation. Ask
+  for the name the index gave you. (`naming.ts` case-folds when matching a
+  script to media, which is right there; the folded name is not the fetch key.)
+- **Symlinks and junctions inside the folder are followed**, so a library
+  assembled out of links into several drives works.
+
+A new file appears within ~2 s, not 60: dropping one moves the directory's
+mtime. The 60 s full rescan only bounds how stale `bytes` and `modifiedMs` can
+get for a file edited in place — except on an SMB share, where cached directory
+metadata can delay the mtime change and 60 s becomes the worst case for noticing
+a new file at all.
+
+**The bridge does not match scripts to media.** That lives in the client, in
+`src/lib/script/naming.ts` in `coyote-socket-web` — the MultiFunPlayer suffix
+convention, DLNA URLs, and a documented tie-break, already tested and merged. Two
+implementations of a naming convention diverge, and the divergence shows up as
+"the script I can see will not load". The bridge serves names; the client
+matches them against the `path` it gets in every snapshot.
+
+Details — path handling, the freshness contract, and what a 10,000-file
+directory costs — are in `src/library.rs`'s module documentation.
+
 ## Where the framing came from
 
 Two independent sources, which agree:
@@ -162,7 +227,9 @@ Two binaries.
 cargo run --bin fake-player
 
 # Terminal 2 — the bridge
-cargo run --bin coyote-bridge -- --player 127.0.0.1:23554 --static-dir ../path/to/pwa/dist
+cargo run --bin coyote-bridge -- --player 127.0.0.1:23554 \
+    --static-dir ../path/to/pwa/dist \
+    --library-dir /path/to/funscripts
 ```
 
 Then:
@@ -170,6 +237,7 @@ Then:
 - `http://127.0.0.1:8787/` — the app (or a placeholder if `--static-dir` is unset)
 - `http://127.0.0.1:8787/pair` — the QR the phone should scan
 - `http://127.0.0.1:8787/healthz` — current state as JSON
+- `http://127.0.0.1:8787/library/index.json` — the funscript listing
 - `ws://127.0.0.1:8787/ws` — the state relay
 - Tray icon — left-click opens the pairing page
 
