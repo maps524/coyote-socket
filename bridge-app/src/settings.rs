@@ -481,11 +481,20 @@ mod tests {
         let mut original = Settings::default();
         original.remember("192.168.1.50:23554");
         original.http_port = 9000;
+        // The path-shaped settings are asserted too. The exhaustive literal in
+        // `merge_and_write` is the guard against a new field being dropped, and
+        // it is a good one — but it is a compile-time guard on a save path, and
+        // nothing here previously checked that a saved directory came back.
+        // Loss would show up as "the bridge forgot my library", far from here.
+        original.static_dir = Some("C:/pwa/dist".into());
+        original.library_dir = Some("D:/scripts".into());
         original.save(&path);
 
         let loaded = Settings::load(&path);
         assert_eq!(loaded.endpoint, "192.168.1.50:23554");
         assert_eq!(loaded.http_port, 9000);
+        assert_eq!(loaded.static_dir.as_deref(), Some("C:/pwa/dist"));
+        assert_eq!(loaded.library_dir.as_deref(), Some("D:/scripts"));
         let _ = std::fs::remove_file(&path);
     }
 }
